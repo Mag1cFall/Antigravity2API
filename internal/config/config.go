@@ -38,6 +38,7 @@ var Keys = []string{
 	"ROUTING_STRATEGY",
 	"PREFER_LOWER_TIER_MODELS",
 	"REQUEST_TIMEOUT",
+	"QUOTA_REFRESH_INTERVAL",
 	"TRUSTED_PROXIES",
 	"LOG_LEVEL",
 	"LOG_FORMAT",
@@ -86,6 +87,8 @@ type Config struct {
 	// PreferLowerTierModels 是同优先级内先用套餐低的账户的模型 ID
 	PreferLowerTierModels []string
 	RequestTimeout        time.Duration
+	// QuotaRefreshInterval 是后台刷新全部账户额度的间隔，为 0 时不刷新
+	QuotaRefreshInterval time.Duration
 	// TrustedProxies 是可信反向代理的地址段，来自这些地址的请求以 X-Forwarded-For 确定客户端 IP
 	TrustedProxies   []netip.Prefix
 	LogLevel         string
@@ -110,6 +113,7 @@ func Default() Config {
 		AccountConcurrency:   2,
 		RoutingStrategy:      "round-robin",
 		RequestTimeout:       5 * time.Minute,
+		QuotaRefreshInterval: 15 * time.Minute,
 		LogLevel:             "info",
 		LogFormat:            "json",
 		LogFile:              true,
@@ -189,6 +193,7 @@ func (c *Config) Set(values map[string]string) error {
 		c.PreferLowerTierModels = SplitList(value)
 	}
 	duration("REQUEST_TIMEOUT", &c.RequestTimeout)
+	duration("QUOTA_REFRESH_INTERVAL", &c.QuotaRefreshInterval)
 	if value, ok := values["TRUSTED_PROXIES"]; ok && err == nil {
 		c.TrustedProxies, err = parsePrefixes(value)
 	}
@@ -230,6 +235,7 @@ func (c Config) Values() map[string]string {
 		"ROUTING_STRATEGY":         c.RoutingStrategy,
 		"PREFER_LOWER_TIER_MODELS": strings.Join(c.PreferLowerTierModels, ","),
 		"REQUEST_TIMEOUT":          formatDuration(c.RequestTimeout),
+		"QUOTA_REFRESH_INTERVAL":   formatDuration(c.QuotaRefreshInterval),
 		"TRUSTED_PROXIES":          strings.Join(prefixes, ","),
 		"LOG_LEVEL":                c.LogLevel,
 		"LOG_FORMAT":               c.LogFormat,
@@ -295,6 +301,9 @@ func (c Config) Validate() error {
 	}
 	if c.RequestTimeout <= 0 {
 		return fmt.Errorf("REQUEST_TIMEOUT 必须是正数时长")
+	}
+	if c.QuotaRefreshInterval != 0 && c.QuotaRefreshInterval < time.Minute {
+		return fmt.Errorf("QUOTA_REFRESH_INTERVAL 必须是 0 或不小于 1m 的时长")
 	}
 	if !slices.Contains(LogLevels, c.LogLevel) {
 		return fmt.Errorf("LOG_LEVEL 必须是 %s", strings.Join(LogLevels, "、"))

@@ -37,6 +37,7 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("PATCH /api/accounts/{id}", s.updateAccount)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/verify", s.verifyAccount)
+	mux.HandleFunc("POST /api/accounts/{id}/quota", s.refreshQuota)
 	mux.HandleFunc("POST /api/accounts/{id}/switch", s.switchAccount)
 	mux.HandleFunc("POST /api/accounts/import", s.importAccounts)
 	mux.HandleFunc("POST /api/accounts/refresh", s.refreshAccounts)
@@ -198,6 +199,22 @@ func (s *server) verifyAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
+// refreshQuota 实时读取一个账户的额度并返回该账户
+func (s *server) refreshQuota(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.findAccount(id); !ok {
+		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+id)
+		return
+	}
+	if err := s.deps.Service.RefreshQuota(r.Context(), id); err != nil {
+		slog.WarnContext(r.Context(), "读取额度摘要失败 | 错误="+err.Error(), "source", id)
+		writeError(w, http.StatusBadGateway, "quota_refresh_failed", err.Error())
+		return
+	}
+	item, _ := s.findAccount(id)
+	writeJSON(w, http.StatusOK, item)
+}
+
 // switchAccount 把账户写入本机官方客户端并重新启动官方客户端
 func (s *server) switchAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -231,10 +248,14 @@ func (s *server) importAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": ids})
 }
 
-// refreshAccounts 同步刷新账户池并返回刷新后的账户
+// refreshAccounts 同步刷新账户池并读取全部账户的额度，返回刷新后的账户与读取额度失败的账户及原因
 func (s *server) refreshAccounts(w http.ResponseWriter, r *http.Request) {
 	s.refresh(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": s.accounts()})
+	failed := map[string]string{}
+	for id, err := range s.readQuotas(r.Context()) {
+		failed[id] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": s.accounts(), "failed": failed})
 }
 
 // adminModel 是管理端模型条目，Accounts 为可调度到该模型的就绪账户数

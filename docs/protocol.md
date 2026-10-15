@@ -277,7 +277,7 @@ userinfo 与 `fetchUserInfo` 响应：
 
 - unleash 的 `instanceId` 为设备档案的用户名与主机名（Windows 为 `DESKTOP-<7 位>\<用户名>-DESKTOP-<7 位>`，主机名由 `installation_id` 确定），`connectionId` 每个虚拟进程随机生成，`started` 为档案时区的启动时刻
 - 周期请求的时刻按启动时刻计算，进程挂起后错过的时刻不补发
-- `retrieveUserQuotaSummary` 在登录初始化与账户初始化后首次成功生成后各发一次
+- `retrieveUserQuotaSummary` 在登录初始化与账户初始化后首次成功生成后各发一次，另按 `QUOTA_REFRESH_INTERVAL` 定时发送，管理端刷新额度时立即发送；尚未初始化或已停用的账户先发 daily `loadCodeAssist`
 - 每轮实验轮询先 `listExperiments` 再 `fetchConfig`；刷新轮另有 `loadCodeAssist` 与 `listExperiments` 同时发出，`fetchAvailableModels` 与 `fetchConfig` 同时发出，`fetchConfig` 结束后 userinfo（之后读头像）与 `fetchUserInfo` 同时发出
 
 **unleash：** 基址 `https://antigravity-unleash.goog/api/client`，经克隆的 `http.DefaultTransport` 以 HTTP/2 发出，不带 OAuth token。

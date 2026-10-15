@@ -343,14 +343,19 @@ func (s *Service) proxy(record *auth.Account) antigravity.Proxy {
 	return func(request *http.Request) (*url.URL, error) { return s.live.Load().ProxyURL(request) }
 }
 
+// tokenSource 返回账户保存的 token 的来源，刷新后写回账户库
+func (s *Service) tokenSource(record *auth.Account, proxy antigravity.Proxy) *antigravity.TokenSource {
+	return antigravity.NewTokenSource(s.store.Token(record.ID), proxy, func(token *oauth2.Token) error {
+		slog.Info(fmt.Sprintf("token 已刷新 | 到期=%s", token.Expiry.Format(time.RFC3339)), "source", record.ID)
+		return s.store.SaveToken(record.ID, token)
+	})
+}
+
 // initialize 以账户的设备档案与代理开始虚拟客户端，login 为真时按登录序列、否则按冷启动序列初始化，写回套餐、项目与地区，记下额度快照（冷启动不读额度，沿用最近一次读取）并开始伴随请求；失败时停止伴随请求并把账户移出调度
 func (s *Service) initialize(ctx context.Context, record *auth.Account, login bool) error {
 	token := s.store.Token(record.ID)
 	proxy := s.proxy(record)
-	source := antigravity.NewTokenSource(token, proxy, func(token *oauth2.Token) error {
-		slog.Info(fmt.Sprintf("token 已刷新 | 到期=%s", token.Expiry.Format(time.RFC3339)), "source", record.ID)
-		return s.store.SaveToken(record.ID, token)
-	})
+	source := s.tokenSource(record, proxy)
 	client := antigravity.NewClient(record.ID, source, record.Device, proxy)
 	path := s.hubPath(record.ID)
 	client.SetHub(loadHub(path), saveHub(path))
@@ -426,11 +431,72 @@ func (s *Service) quote(ctx context.Context, current *account) {
 		slog.WarnContext(ctx, "读取额度摘要失败 | 错误="+err.Error(), "source", current.id)
 		return
 	}
+	s.setQuota(current.id, summary)
+}
+
+// setQuota 记下账户的额度摘要及读取时间，更新账户池并写入额度快照
+func (s *Service) setQuota(id string, summary antigravity.QuotaSummary) {
 	s.mu.Lock()
-	s.quotas[current.id] = quotaRead{summary: summary, at: time.Now()}
+	s.quotas[id] = quotaRead{summary: summary, at: time.Now()}
 	s.mu.Unlock()
-	s.pool.SetQuota(current.id, summary)
-	s.ledger.RecordQuota(current.id, summary.Groups)
+	s.pool.SetQuota(id, summary)
+	s.ledger.RecordQuota(id, summary.Groups)
+}
+
+// quotaWorkers 是同时读取额度摘要的账户数上限
+const quotaWorkers = 5
+
+// RefreshQuota 实时读取一个账户的额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理先查询项目再读取
+func (s *Service) RefreshQuota(ctx context.Context, id string) error {
+	var record *auth.Account
+	for _, item := range s.store.Accounts() {
+		if item.ID == id {
+			record = item
+		}
+	}
+	if record == nil {
+		return fmt.Errorf("账户 %s 不存在", id)
+	}
+	var client *antigravity.Client
+	if current := s.account(id); current != nil {
+		client = current.client
+	} else {
+		proxy := s.proxy(record)
+		client = antigravity.NewClient(id, s.tokenSource(record, proxy), record.Device, proxy)
+		if _, err := client.LoadCodeAssist(ctx, antigravity.EndpointDaily); err != nil {
+			return err
+		}
+	}
+	summary, err := client.RetrieveUserQuotaSummary(ctx)
+	if err != nil {
+		return err
+	}
+	s.setQuota(id, summary)
+	return nil
+}
+
+// RefreshQuotas 读取全部账户的额度摘要，同时最多 quotaWorkers 个，返回读取失败的账户及原因
+func (s *Service) RefreshQuotas(ctx context.Context) map[string]error {
+	var (
+		mu      sync.Mutex
+		workers sync.WaitGroup
+		failed  = map[string]error{}
+		slots   = make(chan struct{}, quotaWorkers)
+	)
+	for _, record := range s.store.Accounts() {
+		slots <- struct{}{}
+		workers.Go(func() {
+			defer func() { <-slots }()
+			if err := s.RefreshQuota(ctx, record.ID); err != nil {
+				slog.WarnContext(ctx, "读取额度摘要失败 | 错误="+err.Error(), "source", record.ID)
+				mu.Lock()
+				failed[record.ID] = err
+				mu.Unlock()
+			}
+		})
+	}
+	workers.Wait()
+	return failed
 }
 
 // composer 返回实时配置档位对应的 Composer，档位或自定义档的段与包装方式变化时重建

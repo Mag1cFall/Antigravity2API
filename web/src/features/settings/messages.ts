@@ -116,6 +116,9 @@ export const settingsMessages = defineMessages(
       '先用优先级最高的账户，按添加顺序一直用第一个，它忙、冷却或额度用完后再用下一个。',
     timeout: '请求超时',
     timeoutHint: '单个公开请求从开始到结束的最长时间，例如 5m、30s。',
+    quotaRefresh: '额度自动刷新间隔',
+    quotaRefreshHint:
+      '后台每隔这段时间读取全部账户（含停用账户）的额度，例如 15m、1h；最短 1m，填 0 不自动刷新。',
     logLevel: '日志级别',
     logLevelHint: '低于此级别的服务日志不记录；排查问题时临时改为 DEBUG。',
     logFormat: '日志格式',
@@ -286,6 +289,9 @@ export const settingsMessages = defineMessages(
     timeout: 'Request timeout',
     timeoutHint:
       'Longest time one public request may take from start to finish, such as 5m or 30s.',
+    quotaRefresh: 'Quota refresh interval',
+    quotaRefreshHint:
+      'Read the quota of every account, disabled ones included, in the background at this interval, such as 15m or 1h. The minimum is 1m; 0 turns automatic refresh off.',
     logLevel: 'Log level',
     logLevelHint:
       'Service logs below this level are not recorded; switch to DEBUG while troubleshooting.',
@@ -446,6 +452,9 @@ export const settingsMessages = defineMessages(
       '先用優先順序最高的帳號，依新增順序一直用第一個，它忙碌、冷卻或額度用完後再用下一個。',
     timeout: '請求逾時',
     timeoutHint: '單一公開請求從開始到結束的最長時間，例如 5m、30s。',
+    quotaRefresh: '額度自動重新整理間隔',
+    quotaRefreshHint:
+      '背景每隔這段時間讀取全部帳號（含已停用帳號）的額度，例如 15m、1h；最短 1m，填 0 不自動重新整理。',
     logLevel: '日誌等級',
     logLevelHint: '低於此等級的服務日誌不會記錄；疑難排解時可暫時改為 DEBUG。',
     logFormat: '日誌格式',

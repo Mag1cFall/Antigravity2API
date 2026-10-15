@@ -89,6 +89,7 @@ func TestValidateRejects(t *testing.T) {
 		"未知系统提示档位": func(c *Config) { c.SystemPrompt = "none" },
 		"自定义档段名无效": func(c *Config) { c.SystemPromptSections = []string{"identity", "tools"} },
 		"自定义档包装无效": func(c *Config) { c.SystemPromptWrap = "partial" },
+		"额度刷新间隔过短": func(c *Config) { c.QuotaRefreshInterval = 30 * time.Second },
 		"并发为零":     func(c *Config) { c.AccountConcurrency = 0 },
 		"未知日志级别":   func(c *Config) { c.LogLevel = "trace" },
 		"日志总量过小":   func(c *Config) { c.LogMaxTotalMB = 10 },

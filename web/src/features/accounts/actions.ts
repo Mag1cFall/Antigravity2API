@@ -90,6 +90,26 @@ export function useVerifyAccount() {
   })
 }
 
+// useRefreshQuota 实时读取一个账户的额度
+export function useRefreshQuota() {
+  const m = useMessages(accountMessages)
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (account: Account) =>
+      api<Account>(accountPath(account.id) + '/quota', { method: 'POST' }),
+    onSuccess: (result) => {
+      replaceAccount(client, result)
+      toast({ tone: 'success', title: fill(m.quotaRefreshed, { email: result.id }) })
+    },
+    onError: (error, account) => {
+      toast({
+        tone: 'error',
+        title: fill(m.quotaRefreshFailed, { email: account.id, message: error.message }),
+      })
+    },
+  })
+}
+
 // useImportAccounts 导入本机官方客户端的账户
 export function useImportAccounts() {
   const m = useMessages(accountMessages)
@@ -111,16 +131,30 @@ export function useImportAccounts() {
   })
 }
 
-// useRefreshAccounts 同步刷新账户池与额度
+// useRefreshAccounts 同步刷新账户池并读取全部账户的额度，failed 为读取额度失败的账户及原因
 export function useRefreshAccounts() {
   const m = useMessages(accountMessages)
   const client = useQueryClient()
   return useMutation({
-    mutationFn: () => api<{ accounts: Account[] }>('/api/accounts/refresh', { method: 'POST' }),
-    onSuccess: (result) => {
-      client.setQueryData(accountsKey, result)
+    mutationFn: () =>
+      api<{ accounts: Account[]; failed: Record<string, string> }>('/api/accounts/refresh', {
+        method: 'POST',
+      }),
+    onSuccess: ({ accounts, failed }) => {
+      client.setQueryData(accountsKey, { accounts })
       void client.invalidateQueries({ queryKey: ['models'] })
-      toast({ tone: 'success', title: m.refreshDone })
+      const failures = Object.entries(failed)
+      if (failures.length === 0) {
+        toast({ tone: 'success', title: m.refreshDone })
+        return
+      }
+      toast({
+        tone: 'error',
+        title: fill(m.refreshPartial, {
+          count: failures.length,
+          details: failures.map(([id, message]) => id + ': ' + message).join('; '),
+        }),
+      })
     },
     onError: (error) => {
       toast({ tone: 'error', title: fill(m.refreshFailed, { message: error.message }) })

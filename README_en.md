@@ -15,7 +15,7 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 - **Images and speech**: the image generation model of the catalog generates and edits images, returned by all four protocols and the OpenAI Images endpoints; the speech transcription model of the catalog transcribes audio over the channel of the official voice input, shared by the OpenAI transcription and translation endpoints, Chat `input_audio` and Gemini audio input
 - **Files**: the OpenAI, Claude and Gemini Files APIs store files in `RUNTIME_DIR/files/`, and file references in requests are inlined before sending
 - **System prompt tiers**: full, medium, aggressive and custom tiers control how much of the official system prompt and user message wrapping is kept
-- **Multi-account scheduling**: accounts are picked by account priority and the Gemini and third-party quota groups, requests rotate across accounts of the same priority, and a conversation stays on one account; selected models can prefer lower-plan accounts; exhausted quota cools down until reset, rate limits, capacity errors and server errors cool down or switch accounts by reason
+- **Multi-account scheduling**: accounts are picked by account priority and the Gemini and third-party quota groups, requests rotate across accounts of the same priority, and a conversation stays on one account; selected models can prefer lower-plan accounts; exhausted quota cools down until reset, rate limits, capacity errors and server errors cool down or switch accounts by reason; account quota refreshes on a schedule, and the Accounts page can refresh all accounts or one at any time
 - **Token counting**: input tokens are estimated locally per model family and calibrated with the upstream usage of the same conversation
 - **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings, in Simplified Chinese, Traditional Chinese (Taiwan) and English; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
 - **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores the account, model, tokens, cache hits and timing of every request and estimates cost with official API prices
@@ -279,6 +279,7 @@ docs/                 # protocol, development and logging docs
 | `ROUTING_STRATEGY` | Among the highest-priority accounts, `round-robin` picks the one with the fewest running requests and, on ties, the one used longest ago; `fill-first` fills one account first | `round-robin` |
 | `PREFER_LOWER_TIER_MODELS` | Model IDs that prefer lower-plan accounts, comma-separated; within the same priority, Free, then Pro, then Ultra accounts are used | empty |
 | `REQUEST_TIMEOUT` | Maximum duration of a public request | `5m` |
+| `QUOTA_REFRESH_INTERVAL` | Interval for reading the quota of every account, disabled ones included, in the background; minimum `1m`, `0` turns it off | `15m` |
 | `TRUSTED_PROXIES` | IPs or CIDRs of trusted reverse proxies whose `X-Forwarded-For` decides the client IP | empty |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `LOG_FORMAT` | Log format: `json` or `text` | `json` |

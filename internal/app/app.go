@@ -91,6 +91,7 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	var workers sync.WaitGroup
 	workers.Go(s.watch)
 	workers.Go(s.refreshWorker)
+	workers.Go(s.quotaWorker)
 	workers.Go(s.checkVersions)
 	defer workers.Wait()
 	defer cancel()
@@ -220,6 +221,35 @@ func (s *server) refresh(ctx context.Context) {
 		return
 	}
 	slog.Info(fmt.Sprintf("账户池刷新完成 | 耗时=%s", time.Since(started).Round(time.Millisecond)), "source", "service")
+}
+
+// quotaWorker 按实时配置的 QUOTA_REFRESH_INTERVAL 定时读取全部账户的额度：每分钟检查一次，启动约 1 分钟后读取第一次，此后距上次读取的整分钟数达到间隔时再读取，间隔为 0 时不读取
+func (s *server) quotaWorker() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	minutes := -1
+	for {
+		select {
+		case <-ticker.C:
+		case <-s.ctx.Done():
+			return
+		}
+		minutes++
+		if interval := s.live.Load().QuotaRefreshInterval; interval > 0 && (minutes == 0 || time.Duration(minutes)*time.Minute >= interval) {
+			minutes = 0
+			s.readQuotas(s.ctx)
+		}
+	}
+}
+
+// readQuotas 在进行中的账户池刷新结束后读取全部账户的额度，返回读取失败的账户及原因
+func (s *server) readQuotas(ctx context.Context) map[string]error {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	started := time.Now()
+	failed := s.deps.Service.RefreshQuotas(ctx)
+	slog.Info(fmt.Sprintf("额度刷新完成 | 失败=%d | 耗时=%s", len(failed), time.Since(started).Round(time.Millisecond)), "source", "service")
+	return failed
 }
 
 // securityHeaders 禁止页面被其他站点嵌入并关闭 MIME 嗅探与 Referer

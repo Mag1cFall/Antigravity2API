@@ -1,4 +1,4 @@
-import { Network, ShieldCheck, Trash2 } from 'lucide-react'
+import { Network, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 
 import { appMessages } from '@/app/messages'
@@ -102,6 +102,7 @@ export function AccountDetailSheet({
   usage,
   now,
   verifying,
+  refreshing,
   actions,
   onClose,
 }: {
@@ -109,6 +110,7 @@ export function AccountDetailSheet({
   usage: UsageStats | undefined
   now: Date
   verifying: boolean
+  refreshing: boolean
   actions: RowActions
   onClose: () => void
 }) {
@@ -193,10 +195,27 @@ export function AccountDetailSheet({
             <Block
               title={m.detailQuota}
               aside={
-                account.quota_at &&
-                fill(m.detailQuotaRead, {
-                  time: formatRelative(new Date(account.quota_at), now, locale),
-                })
+                <span className="flex items-center gap-2">
+                  {account.quota_at &&
+                    fill(m.detailQuotaRead, {
+                      time: formatRelative(
+                        new Date(Math.min(Date.parse(account.quota_at), now.getTime())),
+                        now,
+                        locale,
+                      ),
+                    })}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    loading={refreshing}
+                    onClick={() => {
+                      actions.onRefreshQuota(account)
+                    }}
+                  >
+                    <RefreshCw size={16} aria-hidden />
+                    {m.refreshQuota}
+                  </Button>
+                </span>
               }
             >
               <p className="text-sm text-foreground-muted">{m.detailQuotaHint}</p>

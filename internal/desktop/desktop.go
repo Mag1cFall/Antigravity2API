@@ -103,7 +103,7 @@ func Run(options Options) error {
 			UniqueID:               uniqueID,
 			OnSecondInstanceLaunch: func(application.SecondInstanceData) { show() },
 		},
-		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir},
+		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir, AdditionalBrowserArgs: []string{"--disable-lcd-text"}},
 		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
 			if target, ok := strings.CutPrefix(message, openPrefix); ok {
 				openBrowser(app, target)

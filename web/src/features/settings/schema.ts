@@ -87,6 +87,10 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
       ROUTING_STRATEGY: z.enum(['round-robin', 'fill-first']),
       PREFER_LOWER_TIER_MODELS: z.array(z.string()),
       REQUEST_TIMEOUT: z.string().trim().regex(goDuration, m.errDuration),
+      QUOTA_REFRESH_INTERVAL: z
+        .string()
+        .trim()
+        .refine((value) => value === '0' || goDuration.test(value), m.errDuration),
       TRUSTED_PROXIES: z.string().trim().refine(validPrefixes, m.errProxies),
       LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']),
       LOG_FORMAT: z.enum(['json', 'text']),
@@ -146,6 +150,7 @@ export function toForm(settings: Settings): SettingsForm {
     ROUTING_STRATEGY: v('ROUTING_STRATEGY', 'round-robin') as SettingsForm['ROUTING_STRATEGY'],
     PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS', ''),
     REQUEST_TIMEOUT: v('REQUEST_TIMEOUT', '5m'),
+    QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL', '15m'),
     TRUSTED_PROXIES: v('TRUSTED_PROXIES', ''),
     LOG_LEVEL: v('LOG_LEVEL', 'info') as SettingsForm['LOG_LEVEL'],
     LOG_FORMAT: v('LOG_FORMAT', 'json') as SettingsForm['LOG_FORMAT'],

@@ -85,6 +85,7 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   ROUTING_STRATEGY: 'scheduling',
   PREFER_LOWER_TIER_MODELS: 'scheduling',
   REQUEST_TIMEOUT: 'scheduling',
+  QUOTA_REFRESH_INTERVAL: 'scheduling',
   LOG_LEVEL: 'logging',
   LOG_FORMAT: 'logging',
   LOG_FILE: 'logging',
@@ -336,7 +337,8 @@ function SettingsEditor({
       | 'PROXY'
       | 'ADMIN_USERNAME'
       | 'TRUSTED_PROXIES'
-      | 'REQUEST_TIMEOUT',
+      | 'REQUEST_TIMEOUT'
+      | 'QUOTA_REFRESH_INTERVAL',
     label: string,
     hint: string,
     extra?: { placeholder?: string; disabledReason?: string | false; autoComplete?: string },
@@ -515,6 +517,7 @@ function SettingsEditor({
         </FormRow>
         {number('ACCOUNT_CONCURRENCY', m.concurrency, m.concurrencyHint, 1, 64)}
         {text('REQUEST_TIMEOUT', m.timeout, m.timeoutHint, { placeholder: '5m' })}
+        {text('QUOTA_REFRESH_INTERVAL', m.quotaRefresh, m.quotaRefreshHint, { placeholder: '15m' })}
         <LinkRow
           label={m.mapping}
           hint={m.mappingHint}

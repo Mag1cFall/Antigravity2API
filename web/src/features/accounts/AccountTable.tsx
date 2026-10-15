@@ -1,4 +1,4 @@
-import { Info, MoreHorizontal, Network, ShieldCheck, Trash2 } from 'lucide-react'
+import { Info, MoreHorizontal, Network, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
 import { memo, type ReactNode, useRef } from 'react'
 
 import { Tag } from '@/components/ui/badge'
@@ -28,6 +28,7 @@ export interface RowActions {
   onDetails: (account: Account) => void
   onToggle: (change: { account: Account; enabled: boolean }) => void
   onVerify: (account: Account) => void
+  onRefreshQuota: (account: Account) => void
   onProxy: (account: Account, trigger: HTMLElement) => void
   onRemove: (account: Account) => void
 }
@@ -65,11 +66,13 @@ function IconAction({
   tooltip,
   onClick,
   icon,
+  loading,
 }: {
   label: string
   tooltip: string
   onClick: () => void
   icon: ReactNode
+  loading?: boolean | undefined
 }) {
   return (
     <Tooltip label={tooltip}>
@@ -78,6 +81,7 @@ function IconAction({
         size="icon"
         aria-label={label}
         className="size-control-sm"
+        loading={loading ?? false}
         onClick={onClick}
       >
         {icon}
@@ -134,12 +138,14 @@ const AccountRow = memo(function AccountRow({
   lastUsed,
   now,
   verifying,
+  refreshing,
   actions,
 }: {
   account: Account
   lastUsed: string | undefined
   now: Date
   verifying: boolean
+  refreshing: boolean
   actions: RowActions
 }) {
   const m = useMessages(accountMessages)
@@ -232,6 +238,15 @@ const AccountRow = memo(function AccountRow({
               actions.onDetails(account)
             }}
           />
+          <IconAction
+            label={fill(m.refreshQuotaOf, { email: account.id })}
+            tooltip={m.refreshQuota}
+            icon={<RefreshCw size={16} aria-hidden />}
+            loading={refreshing}
+            onClick={() => {
+              actions.onRefreshQuota(account)
+            }}
+          />
           <SwitchClientDialog email={account.id} variant="icon" />
           <MoreActions account={account} actions={actions} />
         </div>
@@ -246,24 +261,26 @@ export function AccountTable({
   lastUsed,
   now,
   verifying,
+  refreshing,
   actions,
 }: {
   accounts: Account[]
   lastUsed: Map<string, string | undefined>
   now: Date
   verifying: string | undefined
+  refreshing: string | undefined
   actions: RowActions
 }) {
   const m = useMessages(accountMessages)
   const q = useMessages(quotaMessages)
   return (
-    <Table label={m.title} fixed minWidth={860}>
+    <Table label={m.title} fixed minWidth={880}>
       <colgroup>
         <col />
         <col className="w-[156px]" />
         <col className="w-[164px] xl:w-[224px]" />
         <col className="w-[164px] xl:w-[224px]" />
-        <col className="w-[184px]" />
+        <col className="w-[224px]" />
       </colgroup>
       <thead>
         <tr>
@@ -282,6 +299,7 @@ export function AccountTable({
             lastUsed={lastUsed.get(account.id)}
             now={now}
             verifying={verifying === account.id}
+            refreshing={refreshing === account.id}
             actions={actions}
           />
         ))}

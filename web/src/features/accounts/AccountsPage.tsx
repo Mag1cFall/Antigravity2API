@@ -16,6 +16,7 @@ import {
   useAccountRemoval,
   useAccountUsage,
   useRefreshAccounts,
+  useRefreshQuota,
   useToggleAccount,
   useVerifyAccount,
 } from '@/features/accounts/actions'
@@ -51,6 +52,7 @@ export function AccountsPage() {
   const usage = useAccountUsage()
   const toggle = useToggleAccount()
   const verify = useVerifyAccount()
+  const refreshQuota = useRefreshQuota()
   const refresh = useRefreshAccounts()
   const { hidden, remove } = useAccountRemoval()
   const [params, setParams] = useSearchParams()
@@ -83,12 +85,13 @@ export function AccountsPage() {
       },
       onToggle: toggle.mutate,
       onVerify: verify.mutate,
+      onRefreshQuota: refreshQuota.mutate,
       onProxy: (account, trigger) => {
         setProxyFor({ id: account.id, trigger })
       },
       onRemove: remove,
     }),
-    [setParam, setProxyFor, toggle.mutate, verify.mutate, remove],
+    [setParam, setProxyFor, toggle.mutate, verify.mutate, refreshQuota.mutate, remove],
   )
 
   const list = (accounts.data?.accounts ?? []).filter((account) => !hidden.has(account.id))
@@ -190,6 +193,7 @@ export function AccountsPage() {
                   lastUsed={lastUsed}
                   now={now}
                   verifying={verify.isPending ? verify.variables.id : undefined}
+                  refreshing={refreshQuota.isPending ? refreshQuota.variables.id : undefined}
                   actions={actions}
                 />
                 <Pagination
@@ -218,6 +222,7 @@ export function AccountsPage() {
         usage={detail ? usage.get(detail.id) : undefined}
         now={now}
         verifying={verify.isPending && verify.variables.id === detail?.id}
+        refreshing={refreshQuota.isPending && refreshQuota.variables.id === detail?.id}
         actions={actions}
         onClose={() => {
           setParam({ account: '' })

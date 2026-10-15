@@ -134,9 +134,9 @@ api 层的公开接口规则：
 | `MODEL_MAPPING` | 逗号分隔，每项以最后一个 `:` 分成别名与模型 ID |
 | `TRUSTED_PROXIES` | 逗号分隔的 IP 或 CIDR |
 | `SYSTEM_PROMPT_SECTIONS`、`PREFER_LOWER_TIER_MODELS` | 逗号分隔 |
-| `REQUEST_TIMEOUT` | Go 时长，例如 `30s`、`5m` |
+| `REQUEST_TIMEOUT`、`QUOTA_REFRESH_INTERVAL` | Go 时长，例如 `30s`、`5m`；`QUOTA_REFRESH_INTERVAL` 另接受 `0` |
 
-校验失败时启动报错：`LISTEN` 须为 `host:port`；`AUTH_DIR`、`RUNTIME_DIR` 非空；代理须为 `http`、`https` 或 `socks5` URL；`SYSTEM_PROMPT_SECTIONS` 只含官方段名，`SYSTEM_PROMPT_WRAP` 为 `full`、`time` 或 `none`；`ACCOUNT_CONCURRENCY` 为正整数；`REQUEST_TIMEOUT` 为正数时长；`LOG_MAX_TOTAL_MB` 不小于 20；开启 `ADMIN_AUTH_ENABLED` 须有用户名与密码。
+校验失败时启动报错：`LISTEN` 须为 `host:port`；`AUTH_DIR`、`RUNTIME_DIR` 非空；代理须为 `http`、`https` 或 `socks5` URL；`SYSTEM_PROMPT_SECTIONS` 只含官方段名，`SYSTEM_PROMPT_WRAP` 为 `full`、`time` 或 `none`；`ACCOUNT_CONCURRENCY` 为正整数；`REQUEST_TIMEOUT` 为正数时长；`QUOTA_REFRESH_INTERVAL` 为 0 或不小于 1m；`LOG_MAX_TOTAL_MB` 不小于 20；开启 `ADMIN_AUTH_ENABLED` 须有用户名与密码。
 
 管理端保存设置时，服务读取 `.env`（叠加进程环境变量）、合并提交的项并校验，按配置项清单的顺序写回全部项：含空白、`#` 或引号的值写成双引号形式，文件经同目录临时文件原子替换，权限 0600。运行配置随之替换，`LISTEN`、`AUTH_DIR` 与 `RUNTIME_DIR` 保持启动值，其余项在下一次请求生效；日志级别、格式、日志文件与正文保存立即切换，管理登录配置变化时撤销全部管理会话。
 
@@ -234,7 +234,7 @@ api 层的公开接口规则：
 4. 成功时写回 `project`、`tier`、`paid_tier`、`region`，以目录的公开条目加入账户池并保存到 `RUNTIME_DIR/catalogs/<账户>.json`，记录额度快照并开始周期请求；失败时停止该账户的伴随请求，记下原因并移出调度
 5. 停用与已删除的账户移出调度，停止周期请求
 
-账户池顺序为初始化完成的顺序。周期请求每 6 轮重读目录，更新账户池中的条目与保存的目录。公开模型目录是账户池中各账户目录的合集，再加上尚未就绪的启用账户保存的目录，服务重启后账户初始化完成前即列出全部模型；账户初始化后首次成功生成后读取一次额度摘要。每个账户保留最近一次读到的额度摘要及读取时间：刷新账户池时，还没有读取的账户取请求账本中 7 天内最近一次额度快照；冷启动初始化不读额度，沿用最近一次读取；账户出错或移出调度后保留。
+账户池顺序为初始化完成的顺序。周期请求每 6 轮重读目录，更新账户池中的条目与保存的目录。公开模型目录是账户池中各账户目录的合集，再加上尚未就绪的启用账户保存的目录，服务重启后账户初始化完成前即列出全部模型；账户初始化后首次成功生成后读取一次额度摘要。服务每隔 `QUOTA_REFRESH_INTERVAL`（按整分钟计）读取全部账户的额度摘要，启动约 1 分钟后读取第一次，管理端刷新全部或单个账户时立即读取：已初始化的账户经自己的上游客户端读取，其余账户（含停用账户）以保存的 token、设备档案与代理先发 daily `loadCodeAssist` 取得项目再读取；同时最多读取 5 个账户，与账户池刷新依次进行。每个账户保留最近一次读到的额度摘要及读取时间：刷新账户池时，还没有读取的账户取请求账本中 7 天内最近一次额度快照；冷启动初始化不读额度，沿用最近一次读取；账户出错或移出调度后保留。
 
 管理端“验证”同步重新初始化单个账户（`project` 为空时走登录序列），需要验证或初始化失败的账户由此恢复调度。
 
@@ -310,7 +310,8 @@ api 层的公开接口规则：
 | `POST /api/accounts/{id}/verify` | 重新初始化 `error` 状态的账户，其他状态返回 409，初始化失败返回 502 |
 | `POST /api/accounts/import` | 导入本机官方客户端账户 |
 | `POST /api/accounts/{id}/switch` | 把账户写入本机官方客户端并重新启动它，返回 `{"account": "<邮箱>"}`；账户不存在返回 404，官方客户端未找到、无法结束或凭据写入失败返回 502 |
-| `POST /api/accounts/refresh` | 同步刷新账户池 |
+| `POST /api/accounts/{id}/quota` | 读取该账户的额度并返回账户，读取失败返回 502 |
+| `POST /api/accounts/refresh` | 同步刷新账户池并读取全部账户的额度，返回 `accounts` 与 `failed`（读取额度失败的账户及原因） |
 | `POST /api/logins` | 开始登录，`mode` 为 `browser` 或 `code` |
 | `POST /api/logins/{id}/code` | 提交授权码或回调地址，等到登录结束 |
 | `DELETE /api/logins/{id}` | 取消登录 |
@@ -399,7 +400,7 @@ api 层的公开接口规则：
 | 页面 | 内容 |
 | --- | --- |
 | 仪表盘 | 首次使用三步引导、账户与额度总览、推荐账户、最近请求、额度变化 |
-| 账户 | 添加、刷新、筛选、分页、额度与重置倒计时、家庭组、验证、启停、详情、调度优先级、切换官方客户端、代理、删除 |
+| 账户 | 添加、刷新、筛选、分页、额度与重置倒计时、刷新单个账户额度、家庭组、验证、启停、详情、调度优先级、切换官方客户端、代理、删除 |
 | 接入 | 三种协议的 base URL、API key 管理、客户端配置片段 |
 | 模型 | 额度组、上下文与输出上限、思考档位、可用账户数、模型映射 |
 | 请求 | 请求记录、用量、日志 |
@@ -671,6 +672,7 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 - 托盘菜单：显示窗口、在浏览器中打开、复制 API 地址、开机启动、退出；点击托盘图标显示窗口
 - 带 `--hidden` 启动时只显示托盘；开机启动项是否带它见下表
 - 页面中的外部链接经系统浏览器打开；Windows 上 WebView 数据保存在 `RUNTIME_DIR/webview`
+- Windows 上 WebView2 以 `--disable-lcd-text` 启动，文字使用灰度抗锯齿
 
 窗口地址为 `http://<监听地址的回环形式>/?shell=desktop`。启动时服务在后台协程运行，桌面壳每 50ms 尝试连接监听地址，连上后才运行窗口。
 
