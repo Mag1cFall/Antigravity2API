@@ -1,0 +1,506 @@
+import {
+  Activity,
+  BarChart3,
+  Clock,
+  Coins,
+  Database,
+  Download,
+  Layers,
+  TrendingUp,
+} from 'lucide-react'
+import { useSearchParams } from 'react-router'
+
+import { appMessages } from '@/app/messages'
+import { Button } from '@/components/ui/button'
+import { Card, CardBody, CardHeader, CardToolbar } from '@/components/ui/card'
+import { Meter } from '@/components/ui/meter'
+import { Segmented } from '@/components/ui/segmented'
+import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
+import { StatCards } from '@/components/ui/stats'
+import { Table, Td, Th } from '@/components/ui/table'
+import { rangeQuery, useUsage } from '@/features/usage/queries'
+import type { UsageBucket, UsageStats } from '@/features/usage/types'
+import {
+  formatCompact,
+  formatCost,
+  formatDuration,
+  formatNumber,
+  formatPercent,
+} from '@/lib/format'
+import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
+
+// usageMessages 是用量页的文案
+const usageMessages = defineMessages(
+  {
+    title: '用量',
+    description: '按模型、API key、账户或日汇总的请求数、token、缓存命中、耗时与估算费用',
+    range: '时间范围',
+    range24h: '24 小时',
+    range7d: '7 天',
+    range30d: '30 天',
+    range90d: '90 天',
+    groupBy: '分组',
+    breakdown: '分项',
+    breakdownHint: '按所选维度汇总的请求、token、缓存、耗时与估算费用',
+    model: '模型',
+    api_key: 'API key',
+    account: '账户',
+    day: '日期',
+    export: '导出 CSV',
+    requests: '请求',
+    requestsDetail: '成功 {succeeded} · 失败 {failed} · 限流 {limited}',
+    change: '较上一周期 {change}',
+    cacheRate: '缓存命中率',
+    cacheDetail: '{cached} / {input} 输入 token',
+    tokens: 'Token',
+    tokensDetail: '思考 {reasoning} · 回复 {reply}',
+    latency: '耗时 P50',
+    latencyDetail: 'P95 {p95} · 首个事件 P50 {first}',
+    cost: '估算费用',
+    costDetail: '按各模型官方 API 单价估算',
+    unpriced: '另有 {count} 个请求的模型没有单价',
+    unpricedShort: '未定价 {count}',
+    trend: '趋势',
+    trendDescription: '每{bucket}的请求数',
+    trendLabel: '请求趋势，峰值 {peak} 个请求',
+    recent: '近 {minutes} 分钟 {requests} 个请求、{tokens} token',
+    share: '请求占比',
+    failed: '失败',
+    limited: '限流',
+    cached: '缓存命中',
+    reasoning: '思考 token',
+    reply: '回复 token',
+    p50: 'P50',
+    p95: 'P95',
+    none: '（无）',
+    loadFailed: '无法读取用量',
+    emptyTitle: '这段时间没有请求',
+    emptyDescription: '客户端发出请求后，这里按所选维度汇总。',
+  },
+  {
+    title: 'Usage',
+    description:
+      'Requests, tokens, cache hits, latency and estimated cost by model, API key, account or day',
+    range: 'Time range',
+    range24h: '24 hours',
+    range7d: '7 days',
+    range30d: '30 days',
+    range90d: '90 days',
+    groupBy: 'Group by',
+    breakdown: 'Breakdown',
+    breakdownHint: 'Requests, tokens, cache, latency and estimated cost by the chosen dimension',
+    model: 'Model',
+    api_key: 'API key',
+    account: 'Account',
+    day: 'Day',
+    export: 'Export CSV',
+    requests: 'Requests',
+    requestsDetail: '{succeeded} succeeded · {failed} failed · {limited} rate limited',
+    change: '{change} vs previous period',
+    cacheRate: 'Cache hit rate',
+    cacheDetail: '{cached} of {input} input tokens',
+    tokens: 'Tokens',
+    tokensDetail: 'thinking {reasoning} · reply {reply}',
+    latency: 'Latency P50',
+    latencyDetail: 'P95 {p95} · first event P50 {first}',
+    cost: 'Estimated cost',
+    costDetail: 'Estimated from official API prices per model',
+    unpriced: 'Unpriced requests: {count}',
+    unpricedShort: '{count} unpriced',
+    trend: 'Trend',
+    trendDescription: 'Requests per {bucket}',
+    trendLabel: 'Request trend, peak {peak} requests',
+    recent: '{requests} requests and {tokens} tokens in the last {minutes} minutes',
+    share: 'Share of requests',
+    failed: 'Failed',
+    limited: 'Rate limited',
+    cached: 'Cache hits',
+    reasoning: 'Thinking tokens',
+    reply: 'Reply tokens',
+    p50: 'P50',
+    p95: 'P95',
+    none: '(none)',
+    loadFailed: 'Could not load usage',
+    emptyTitle: 'No requests in this period',
+    emptyDescription:
+      'Once clients send requests, they are summarized here by the selected dimension.',
+  },
+  {
+    title: '用量',
+    description: '依模型、API 金鑰、帳號或日期彙整的請求數、token、快取命中、耗時與估算費用',
+    range: '時間範圍',
+    range24h: '24 小時',
+    range7d: '7 天',
+    range30d: '30 天',
+    range90d: '90 天',
+    groupBy: '分組',
+    breakdown: '明細',
+    breakdownHint: '依所選維度彙整的請求、token、快取、耗時與估算費用',
+    model: '模型',
+    api_key: 'API 金鑰',
+    account: '帳號',
+    day: '日期',
+    export: '匯出 CSV',
+    requests: '請求',
+    requestsDetail: '成功 {succeeded} · 失敗 {failed} · 速率限制 {limited}',
+    change: '較上一期 {change}',
+    cacheRate: '快取命中率',
+    cacheDetail: '{cached} / {input} 輸入 token',
+    tokens: 'Token',
+    tokensDetail: '思考 {reasoning} · 回覆 {reply}',
+    latency: '耗時 P50',
+    latencyDetail: 'P95 {p95} · 首個事件 P50 {first}',
+    cost: '估算費用',
+    costDetail: '依各模型官方 API 單價估算',
+    unpriced: '另有 {count} 個請求的模型沒有單價',
+    unpricedShort: '未定價 {count}',
+    trend: '趨勢',
+    trendDescription: '每 {bucket}的請求數',
+    trendLabel: '請求趨勢，峰值 {peak} 個請求',
+    recent: '近 {minutes} 分鐘 {requests} 個請求、{tokens} token',
+    share: '請求佔比',
+    failed: '失敗',
+    limited: '速率限制',
+    cached: '快取命中',
+    reasoning: '思考 token',
+    reply: '回覆 token',
+    p50: 'P50',
+    p95: 'P95',
+    none: '（無）',
+    loadFailed: '無法讀取用量',
+    emptyTitle: '這段期間沒有請求',
+    emptyDescription: '用戶端送出請求後，會在這裡依所選維度彙整。',
+  },
+)
+
+// ranges 是用量页的时间范围
+const ranges = { '24h': 86_400_000, '7d': 604_800_000, '30d': 2_592_000_000, '90d': 7_776_000_000 }
+type RangeKey = keyof typeof ranges
+
+// groupings 是用量表的分组，day 按本机时区的自然日分桶
+const groupings = ['model', 'api_key', 'account', 'day'] as const
+type Grouping = (typeof groupings)[number]
+
+// cacheRate 返回缓存命中 token 占输入 token 的比例
+function cacheRate(stats: UsageStats) {
+  return stats.input_tokens ? stats.cached_tokens / stats.input_tokens : 0
+}
+
+// Trend 是逐桶请求数的柱状图
+function Trend({ buckets, label }: { buckets: UsageBucket[]; label: string }) {
+  const peak = Math.max(1, ...buckets.map((bucket) => bucket.requests))
+  return (
+    <div role="img" aria-label={label} className="flex h-chart items-end gap-px">
+      {buckets.map((bucket) => (
+        <div
+          key={bucket.at}
+          className="min-w-px flex-1 rounded-t-sm bg-primary"
+          style={{
+            height: `${String(Math.max(bucket.requests ? 2 : 0, (bucket.requests / peak) * 100))}%`,
+          }}
+        />
+      ))}
+    </div>
+  )
+}
+
+// UsagePage 是用量统计，范围与分组保存在 URL
+export function UsagePage() {
+  const m = useMessages(usageMessages)
+  const app = useMessages(appMessages)
+  const { locale } = useI18n()
+  const [params, setParams] = useSearchParams()
+  const range =
+    (Object.keys(ranges) as RangeKey[]).find((key) => key === params.get('range')) ?? '7d'
+  const grouping: Grouping = groupings.find((key) => key === params.get('by')) ?? 'model'
+  const usage = useUsage(ranges[range], grouping === 'day' ? '86400' : 'auto')
+  const update = (key: string, value: string) => {
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current)
+        next.set(key, value)
+        return next
+      },
+      { replace: true },
+    )
+  }
+  const csv = '/api/usage/records.csv?' + rangeQuery(ranges[range]).toString()
+  const rangeLabels: Record<RangeKey, string> = {
+    '24h': m.range24h,
+    '7d': m.range7d,
+    '30d': m.range30d,
+    '90d': m.range90d,
+  }
+  const header = (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <Segmented
+        label={m.range}
+        value={range}
+        onValueChange={(value) => {
+          update('range', value)
+        }}
+        options={(Object.keys(ranges) as RangeKey[]).map((value) => ({
+          value,
+          label: rangeLabels[value],
+        }))}
+      />
+      <Button size="sm" asChild>
+        <a href={csv} download>
+          <Download size={16} aria-hidden />
+          {m.export}
+        </a>
+      </Button>
+    </div>
+  )
+  if (usage.isPending) {
+    return (
+      <>
+        {header}
+        <Loading label={app.loading} />
+      </>
+    )
+  }
+  if (usage.isError) {
+    return (
+      <>
+        {header}
+        <Card>
+          <ErrorState
+            title={m.loadFailed}
+            error={usage.error}
+            retryLabel={app.retry}
+            onRetry={() => void usage.refetch()}
+          />
+        </Card>
+      </>
+    )
+  }
+  const totals = usage.data.totals
+  if (totals.requests === 0) {
+    return (
+      <>
+        {header}
+        <Card>
+          <EmptyState
+            icon={<BarChart3 size={20} aria-hidden />}
+            title={m.emptyTitle}
+            description={m.emptyDescription}
+          />
+        </Card>
+      </>
+    )
+  }
+  const data = usage.data
+  const dayFormat = new Intl.DateTimeFormat(locale, {
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+  })
+  const rows: (UsageStats & { key: string })[] =
+    grouping === 'day'
+      ? data.buckets
+          .filter((bucket) => bucket.requests > 0)
+          .map((bucket) => ({ ...bucket, key: dayFormat.format(new Date(bucket.at)) }))
+          .reverse()
+      : (data.groups[grouping] ?? [])
+  const previous = data.previous.requests
+  const change = previous ? (totals.requests - previous) / previous : undefined
+  return (
+    <>
+      {header}
+      <StatCards
+        items={[
+          {
+            key: 'requests',
+            icon: <Activity size={16} />,
+            tone: 'info',
+            label: m.requests,
+            value: formatNumber(totals.requests, locale),
+            detail: [
+              fill(m.requestsDetail, {
+                succeeded: formatNumber(totals.succeeded, locale),
+                failed: formatNumber(totals.failed, locale),
+                limited: formatNumber(totals.rate_limited, locale),
+              }),
+              change === undefined
+                ? ''
+                : fill(m.change, {
+                    change: (change > 0 ? '+' : '') + formatPercent(change, locale),
+                  }),
+            ]
+              .filter(Boolean)
+              .join(' · '),
+          },
+          {
+            key: 'cache',
+            icon: <Database size={16} />,
+            tone: 'success',
+            label: m.cacheRate,
+            value: formatPercent(cacheRate(totals), locale),
+            detail: fill(m.cacheDetail, {
+              cached: formatCompact(totals.cached_tokens, locale),
+              input: formatCompact(totals.input_tokens, locale),
+            }),
+          },
+          {
+            key: 'tokens',
+            icon: <Layers size={16} />,
+            tone: 'violet',
+            label: m.tokens,
+            value: formatCompact(totals.total_tokens, locale),
+            detail: fill(m.tokensDetail, {
+              reasoning: formatCompact(totals.reasoning_tokens, locale),
+              reply: formatCompact(totals.reply_tokens, locale),
+            }),
+          },
+          {
+            key: 'latency',
+            icon: <Clock size={16} />,
+            tone: 'warning',
+            label: m.latency,
+            value: formatDuration(totals.duration.p50_ms, locale),
+            detail: fill(m.latencyDetail, {
+              p95: formatDuration(totals.duration.p95_ms, locale),
+              first: formatDuration(totals.first_event.p50_ms, locale),
+            }),
+          },
+          {
+            key: 'cost',
+            icon: <Coins size={16} />,
+            tone: 'info',
+            label: m.cost,
+            value: formatCost(totals.cost_usd, locale),
+            detail: totals.unpriced
+              ? fill(m.unpriced, { count: formatNumber(totals.unpriced, locale) })
+              : m.costDetail,
+          },
+        ]}
+      />
+      {grouping !== 'day' && (
+        <Card>
+          <CardHeader
+            icon={<TrendingUp size={16} aria-hidden />}
+            title={m.trend}
+            description={fill(m.trendDescription, {
+              bucket: formatDuration(data.bucket_seconds * 1000, locale),
+            })}
+            actions={
+              <span className="text-sm text-foreground-muted">
+                {fill(m.recent, {
+                  minutes: data.recent.minutes,
+                  requests: formatNumber(data.recent.requests, locale),
+                  tokens: formatCompact(data.recent.tokens, locale),
+                })}
+              </span>
+            }
+          />
+          <CardBody>
+            <Trend
+              buckets={data.buckets}
+              label={fill(m.trendLabel, {
+                peak: formatNumber(
+                  Math.max(0, ...data.buckets.map((item) => item.requests)),
+                  locale,
+                ),
+              })}
+            />
+          </CardBody>
+        </Card>
+      )}
+      <Card>
+        <CardHeader title={m.breakdown} description={m.breakdownHint} />
+        <CardToolbar className="border-t">
+          <Segmented
+            label={m.groupBy}
+            value={grouping}
+            onValueChange={(value) => {
+              update('by', value)
+            }}
+            options={groupings.map((value) => ({ value, label: m[value] }))}
+          />
+        </CardToolbar>
+        <Table label={m.title} fixed minWidth={760}>
+          <colgroup>
+            <col />
+            <col className="w-[88px]" />
+            <col className="w-[120px]" />
+            <col className="w-[72px]" />
+            <col className="w-[72px] max-xl:hidden" />
+            <col className="w-[128px] max-xl:hidden" />
+            <col className="w-[96px] max-xl:hidden" />
+            <col className="w-[96px]" />
+            <col className="w-[80px] max-xl:hidden" />
+            <col className="w-[80px]" />
+            <col className="w-[104px]" />
+          </colgroup>
+          <thead>
+            <tr>
+              <Th>{m[grouping]}</Th>
+              <Th className="text-right">{m.requests}</Th>
+              <Th>{m.share}</Th>
+              <Th className="text-right">{m.failed}</Th>
+              <Th className="text-right max-xl:hidden">{m.limited}</Th>
+              <Th className="text-right max-xl:hidden">{m.cached}</Th>
+              <Th className="text-right max-xl:hidden">{m.reasoning}</Th>
+              <Th className="text-right">{m.reply}</Th>
+              <Th className="text-right max-xl:hidden">{m.p50}</Th>
+              <Th className="text-right">{m.p95}</Th>
+              <Th className="text-right">{m.cost}</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key}>
+                <Td className="truncate font-mono text-xs" title={row.key}>
+                  {row.key || m.none}
+                </Td>
+                <Td className="text-right">{formatNumber(row.requests, locale)}</Td>
+                <Td>
+                  <Meter
+                    value={row.requests / totals.requests}
+                    tone="info"
+                    label={m.share + ' ' + formatPercent(row.requests / totals.requests, locale)}
+                  />
+                </Td>
+                <Td className={'text-right ' + (row.failed ? 'text-error-text' : '')}>
+                  {formatNumber(row.failed, locale)}
+                </Td>
+                <Td
+                  className={
+                    'text-right max-xl:hidden ' + (row.rate_limited ? 'text-warning-text' : '')
+                  }
+                >
+                  {formatNumber(row.rate_limited, locale)}
+                </Td>
+                <Td className="text-right whitespace-nowrap max-xl:hidden">
+                  {formatCompact(row.cached_tokens, locale)}
+                  <span className="text-foreground-muted">
+                    {' · ' + formatPercent(cacheRate(row), locale)}
+                  </span>
+                </Td>
+                <Td className="text-right max-xl:hidden">
+                  {formatCompact(row.reasoning_tokens, locale)}
+                </Td>
+                <Td className="text-right">{formatCompact(row.reply_tokens, locale)}</Td>
+                <Td className="text-right whitespace-nowrap max-xl:hidden">
+                  {formatDuration(row.duration.p50_ms, locale)}
+                </Td>
+                <Td className="text-right whitespace-nowrap">
+                  {formatDuration(row.duration.p95_ms, locale)}
+                </Td>
+                <Td className="text-right whitespace-nowrap">
+                  {formatCost(row.cost_usd, locale)}
+                  {row.unpriced > 0 && (
+                    <div className="text-xs text-foreground-muted">
+                      {fill(m.unpricedShort, { count: formatNumber(row.unpriced, locale) })}
+                    </div>
+                  )}
+                </Td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      </Card>
+    </>
+  )
+}

@@ -1,0 +1,23 @@
+name: "antigravity2api"
+arch: "${GOARCH}"
+platform: "linux"
+version: "${VERSION}"
+section: "net"
+priority: "optional"
+maintainer: "Mag1cFall <107487022+Mag1cFall@users.noreply.github.com>"
+description: "Google Antigravity API proxy"
+vendor: "Mag1cFall"
+homepage: "https://github.com/Mag1cFall/Antigravity2API"
+license: "MIT"
+
+contents:
+  - src: "./bin/antigravity2api"
+    dst: "/usr/bin/antigravity2api"
+  - src: "./build/appicon.png"
+    dst: "/usr/share/pixmaps/antigravity2api.png"
+  - src: "./build/linux/antigravity2api.desktop"
+    dst: "/usr/share/applications/antigravity2api.desktop"
+
+depends:
+  - libgtk-4-1
+  - libwebkitgtk-6.0-4

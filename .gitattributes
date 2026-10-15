@@ -1,0 +1,23 @@
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.bin binary
+
+*.go linguist-language=Go

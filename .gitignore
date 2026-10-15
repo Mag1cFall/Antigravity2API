@@ -1,0 +1,29 @@
+# 构建产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/antigravity2api
+/dist/
+/bin/
+*.syso
+
+# 本地配置与运行状态
+.env
+/auth/
+/runtime/
+*.log
+
+# 前端产物
+/web/node_modules/
+/internal/webui/dist/
+
+# Go 工作区
+go.work
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

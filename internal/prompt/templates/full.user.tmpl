@@ -1,0 +1,9 @@
+<USER_REQUEST>
+{{.Text}}
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: {{.LocalTime}}.
+</ADDITIONAL_METADATA>{{if .First}}
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from None to {{.ModelDisplayName}}. No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>{{end}}

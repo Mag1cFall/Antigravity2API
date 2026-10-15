@@ -1,0 +1,12 @@
+.git
+.github
+web/node_modules
+internal/webui/dist
+auth
+runtime
+.env
+*.exe
+*.log
+antigravity2api
+dist
+build

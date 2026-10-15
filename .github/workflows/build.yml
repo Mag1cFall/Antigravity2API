@@ -1,0 +1,307 @@
+name: Build And Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  GOTOOLCHAIN: local
+  WAILS_VERSION: v3.0.0-beta.29
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      numeric: ${{ steps.version.outputs.numeric }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Resolve Version
+        run: |
+          version="${GITHUB_SHA:0:7}"
+          numeric=0.0.0
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+            numeric="${version#v}"
+            numeric="${numeric%%-*}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "numeric=$numeric" >> "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22.23.3'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Check And Build Frontend
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run lint
+          pnpm run typecheck
+          pnpm run build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: webui
+          path: internal/webui/dist
+          retention-days: 7
+
+  headless:
+    needs: web
+    runs-on: ubuntu-24.04
+    env:
+      CGO_ENABLED: '0'
+      VERSION: ${{ needs.web.outputs.version }}
+      NUMERIC: ${{ needs.web.outputs.numeric }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui
+          path: internal/webui/dist
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Run Unit Tests
+        run: go test -mod=readonly ./...
+      - name: Check Minimum Go Version
+        run: |
+          go version
+          go vet ./...
+          go build -mod=readonly ./cmd/antigravity2api
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Build Packages
+        run: |
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
+          mkdir -p bin dist
+          for file in info.json wails.exe.manifest; do
+            sed "s/\"0\.0\.0\"/\"$NUMERIC\"/g" "build/windows/$file" > "bin/$file"
+          done
+          wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest bin/wails.exe.manifest -info bin/info.json -out cmd/antigravity2api/wails_windows_amd64.syso
+          for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            export GOOS="${target%/*}" GOARCH="${target#*/}"
+            name="antigravity2api-${VERSION}-${GOOS}-${GOARCH}"
+            directory="dist/$name"
+            mkdir -p "$directory"
+            binary=antigravity2api
+            if [[ "$GOOS" == windows ]]; then binary+=.exe; fi
+            go build -mod=readonly -trimpath -ldflags='-s -w' -o "$directory/$binary" ./cmd/antigravity2api
+            cp README*.md LICENSE .env.example "$directory/"
+            cp -r docs "$directory/"
+            if [[ "$GOOS" == windows ]]; then
+              (cd dist && zip -qr "$name.zip" "$name")
+            else
+              tar -czf "dist/$name.tar.gz" -C dist "$name"
+            fi
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-headless
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          retention-days: 7
+
+  desktop-windows:
+    needs: web
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: '0'
+      VERSION: ${{ needs.web.outputs.version }}
+      NUMERIC: ${{ needs.web.outputs.numeric }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui
+          path: internal/webui/dist
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - name: Install Packaging Tools
+        run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
+      - name: Build Portable Desktop Package
+        run: |
+          mkdir -p bin dist
+          for file in info.json wails.exe.manifest; do
+            sed "s/\"0\.0\.0\"/\"$NUMERIC\"/g" "build/windows/$file" > "bin/$file"
+          done
+          wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest bin/wails.exe.manifest -info bin/info.json -out cmd/antigravity2api/wails_windows_amd64.syso
+          name="antigravity2api-desktop-${VERSION}-windows-amd64"
+          mkdir -p "dist/$name"
+          go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w -H windowsgui' -o "dist/$name/antigravity2api.exe" ./cmd/antigravity2api
+          cp README*.md LICENSE "dist/$name/"
+          (cd dist && 7z a -tzip -bso0 "$name.zip" "$name")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-desktop-windows
+          path: dist/*.zip
+          retention-days: 7
+
+  desktop-macos:
+    needs: web
+    runs-on: macos-15
+    env:
+      CGO_ENABLED: '1'
+      CGO_CFLAGS: -mmacosx-version-min=12.0
+      CGO_LDFLAGS: -mmacosx-version-min=12.0
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+      VERSION: ${{ needs.web.outputs.version }}
+      NUMERIC: ${{ needs.web.outputs.numeric }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui
+          path: internal/webui/dist
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - name: Install Packaging Tools
+        run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
+      - name: Build App Bundle And Disk Image
+        run: |
+          for arch in arm64 amd64; do
+            GOARCH="$arch" go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w' -o "bin/antigravity2api-$arch" ./cmd/antigravity2api
+          done
+          lipo -create -output bin/antigravity2api bin/antigravity2api-arm64 bin/antigravity2api-amd64
+          app=bin/Antigravity2API.app
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp bin/antigravity2api "$app/Contents/MacOS/"
+          cp build/darwin/icons.icns "$app/Contents/Resources/"
+          cp build/darwin/Info.plist "$app/Contents/"
+          plutil -replace CFBundleShortVersionString -string "$NUMERIC" "$app/Contents/Info.plist"
+          plutil -replace CFBundleVersion -string "$NUMERIC" "$app/Contents/Info.plist"
+          codesign --force --deep --sign - "$app"
+          wails3 tool package -format dmg -name Antigravity2API -out bin
+          mkdir -p dist
+          mv bin/Antigravity2API.dmg "dist/antigravity2api-desktop-${VERSION}-darwin-universal.dmg"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-desktop-macos
+          path: dist/*.dmg
+          retention-days: 7
+
+  desktop-linux:
+    needs: web
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: '1'
+      VERSION: ${{ needs.web.outputs.version }}
+      NUMERIC: ${{ needs.web.outputs.numeric }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui
+          path: internal/webui/dist
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+      - name: Install Packaging Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
+          go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
+      - name: Build Desktop Packages
+        run: |
+          go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w' -o bin/antigravity2api ./cmd/antigravity2api
+          cp build/appicon.png bin/antigravity2api.png
+          wails3 generate appimage -binary bin/antigravity2api -icon bin/antigravity2api.png -desktopfile build/linux/antigravity2api.desktop -outputdir bin -builddir "$RUNNER_TEMP/appimage"
+          VERSION="$NUMERIC" GOARCH="$ARCH" wails3 tool package -name antigravity2api -format deb -config build/linux/nfpm/nfpm.yaml -out bin
+          name="antigravity2api-desktop-${VERSION}-linux-${ARCH}"
+          mkdir -p dist
+          mv bin/antigravity2api-*.AppImage "dist/$name.AppImage"
+          mv bin/*.deb "dist/$name.deb"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packages-desktop-linux-${{ matrix.arch }}
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [headless, desktop-windows, desktop-macos, desktop-linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: packages-*
+          path: dist
+          merge-multiple: true
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG" "${flags[@]}"
+
+  docker:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: headless
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{raw}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
