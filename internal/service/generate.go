@@ -188,7 +188,7 @@ func attempt(account string, exchange *antigravity.Exchange, started time.Time, 
 	return record
 }
 
-// fail 按上游错误原因处理账户并写日志：认证失败与需要验证的 403 移出调度，违反条款的 403 停用，QUOTA_EXHAUSTED 把该账户与同额度池账户的额度组冷却到重置时间，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
+// fail 按上游错误原因处理账户并写日志：认证失败与需要验证的 403 移出调度，违反条款的 403 停用，QUOTA_EXHAUSTED 把该账户与同额度池账户的额度组冷却到重置时间并在后台读取该账户的额度，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
 func (s *Service) fail(ctx context.Context, current *account, model antigravity.CatalogModel, err error, tier prompt.Tier) bool {
 	var upstream *antigravity.UpstreamError
 	var retrieve *oauth2.RetrieveError
@@ -229,6 +229,11 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 			s.pool.Limit(peer, model.QuotaGroup(), until)
 			slog.WarnContext(ctx, fmt.Sprintf("同额度池账户冷却 | 范围=%s | 时长=%s | 耗尽账户=%s", model.QuotaGroup(), until.Sub(now).Round(time.Second), current.id), "source", peer)
 		}
+		go func() {
+			if err := s.RefreshQuota(context.WithoutCancel(ctx), current.id); err != nil {
+				slog.WarnContext(ctx, "读取额度摘要失败 | 错误="+err.Error(), "source", current.id)
+			}
+		}()
 	case reason == "MODEL_CAPACITY_EXHAUSTED":
 		slog.WarnContext(ctx, "模型容量不足，换账户重试 | 模型="+model.ID, "source", current.id)
 	case upstream.Status == http.StatusTooManyRequests && reason == "" && upstream.RetryAt(now).IsZero():

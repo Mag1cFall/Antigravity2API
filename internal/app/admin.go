@@ -2,6 +2,7 @@ package app
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -199,14 +200,14 @@ func (s *server) verifyAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-// refreshQuota 实时读取一个账户的额度并返回该账户
+// refreshQuota 实时读取一个账户的套餐与额度并返回该账户，管理端断开连接时读取照常完成
 func (s *server) refreshQuota(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if _, ok := s.findAccount(id); !ok {
 		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+id)
 		return
 	}
-	if err := s.deps.Service.RefreshQuota(r.Context(), id); err != nil {
+	if err := s.deps.Service.RefreshQuota(context.WithoutCancel(r.Context()), id); err != nil {
 		slog.WarnContext(r.Context(), "读取额度摘要失败 | 错误="+err.Error(), "source", id)
 		writeError(w, http.StatusBadGateway, "quota_refresh_failed", err.Error())
 		return
@@ -248,11 +249,12 @@ func (s *server) importAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": ids})
 }
 
-// refreshAccounts 同步刷新账户池并读取全部账户的额度，返回刷新后的账户与读取额度失败的账户及原因
+// refreshAccounts 同步刷新账户池并读取全部账户的套餐与额度，返回刷新后的账户与读取额度失败的账户及原因，管理端断开连接时刷新照常完成
 func (s *server) refreshAccounts(w http.ResponseWriter, r *http.Request) {
-	s.refresh(r.Context())
+	ctx := context.WithoutCancel(r.Context())
+	s.refresh(ctx)
 	failed := map[string]string{}
-	for id, err := range s.readQuotas(r.Context()) {
+	for id, err := range s.readQuotas(ctx) {
 		failed[id] = err.Error()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": s.accounts(), "failed": failed})

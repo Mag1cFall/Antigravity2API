@@ -343,6 +343,15 @@ func (s *Service) proxy(record *auth.Account) antigravity.Proxy {
 	return func(request *http.Request) (*url.URL, error) { return s.live.Load().ProxyURL(request) }
 }
 
+// assisted 返回按 loadCodeAssist 响应更新项目、当前套餐与付费套餐后的账户
+func assisted(record auth.Account, assist antigravity.LoadCodeAssistResponse) auth.Account {
+	record.Project, record.Tier, record.PaidTier = assist.CloudAICompanionProject, assist.CurrentTier.ID, ""
+	if assist.PaidTier != nil {
+		record.PaidTier = assist.PaidTier.ID
+	}
+	return record
+}
+
 // tokenSource 返回账户保存的 token 的来源，刷新后写回账户库
 func (s *Service) tokenSource(record *auth.Account, proxy antigravity.Proxy) *antigravity.TokenSource {
 	return antigravity.NewTokenSource(s.store.Token(record.ID), proxy, func(token *oauth2.Token) error {
@@ -363,11 +372,8 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account, login bo
 	companion, initialization, err := boot(ctx, watch, client, record.ID, login)
 	updated := *record
 	if err == nil {
-		assist := initialization.Assist
-		updated.Project, updated.Tier, updated.PaidTier, updated.Region = assist.CloudAICompanionProject, assist.CurrentTier.ID, "", initialization.Settings.RegionCode
-		if assist.PaidTier != nil {
-			updated.PaidTier = assist.PaidTier.ID
-		}
+		updated = assisted(*record, initialization.Assist)
+		updated.Region = initialization.Settings.RegionCode
 		if updated != *record {
 			err = s.store.Save(&updated)
 		}
@@ -446,7 +452,7 @@ func (s *Service) setQuota(id string, summary antigravity.QuotaSummary) {
 // quotaWorkers 是同时读取额度摘要的账户数上限
 const quotaWorkers = 5
 
-// RefreshQuota 实时读取一个账户的额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理先查询项目再读取
+// RefreshQuota 实时读取一个账户的套餐与额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理读取；先发 daily loadCodeAssist，项目或套餐变化时写回账户库并更新调度等级
 func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 	var record *auth.Account
 	for _, item := range s.store.Accounts() {
@@ -463,9 +469,16 @@ func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 	} else {
 		proxy := s.proxy(record)
 		client = antigravity.NewClient(id, s.tokenSource(record, proxy), record.Device, proxy)
-		if _, err := client.LoadCodeAssist(ctx, antigravity.EndpointDaily); err != nil {
+	}
+	assist, err := client.LoadCodeAssist(ctx, antigravity.EndpointDaily)
+	if err != nil {
+		return err
+	}
+	if updated := assisted(*record, assist); updated != *record {
+		if err := s.store.Save(&updated); err != nil {
 			return err
 		}
+		s.pool.Profile(id, updated.Priority, updated.Rank())
 	}
 	summary, err := client.RetrieveUserQuotaSummary(ctx)
 	if err != nil {
