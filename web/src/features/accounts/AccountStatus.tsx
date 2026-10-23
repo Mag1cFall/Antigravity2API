@@ -7,7 +7,7 @@ import type { Account } from '@/features/accounts/types'
 import { quotaMessages } from '@/features/quota/messages'
 import { nameOf } from '@/features/quota/quota'
 import { formatRelative } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, fillNodes, useI18n, useMessages } from '@/lib/i18n'
 
 // AccountStatusBadge 是账户状态的文字标签
 export function AccountStatusBadge({ account }: { account: Account }) {
@@ -16,7 +16,7 @@ export function AccountStatusBadge({ account }: { account: Account }) {
   return <Badge tone={statusTone[status]}>{m[status]}</Badge>
 }
 
-// AccountReason 说明账户当前状态的原因：冷却到何时、为何异常、验证入口或进行中的请求数
+// AccountReason 说明账户当前状态的原因：冷却到何时、为何异常、验证入口或进行中的请求数；列表中待验证账户只显示验证入口，原因在提示中
 export function AccountReason({
   account,
   now,
@@ -30,22 +30,27 @@ export function AccountReason({
   const q = useMessages(quotaMessages)
   const { locale } = useI18n()
   const status = statusOf(account)
-  const clamp = full ? '' : 'line-clamp-2 '
   if (status === 'verify') {
+    const link = (
+      <a
+        href={account.verify_url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={full ? undefined : m.verifyReason}
+        className="rounded-sm text-xs text-primary hover:underline"
+      >
+        {m.openVerify}
+        <span className="whitespace-nowrap">
+          {'\u2060'}
+          <ExternalLink size={12} aria-hidden className="ml-1 inline align-[-1px]" />
+        </span>
+      </a>
+    )
+    if (!full) return link
     return (
       <span className="flex flex-col items-start gap-1 text-xs text-foreground-muted">
-        <span className={clamp}>{m.verifyReason}</span>
-        {account.verify_url && (
-          <a
-            href={account.verify_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 rounded-sm text-primary hover:underline"
-          >
-            {m.openVerify}
-            <ExternalLink size={12} aria-hidden />
-          </a>
-        )}
+        <span>{m.verifyReason}</span>
+        {link}
       </span>
     )
   }
@@ -53,7 +58,7 @@ export function AccountReason({
     return (
       <span
         title={full ? undefined : account.error}
-        className={clamp + 'text-xs break-words text-error-text'}
+        className="text-xs wrap-anywhere text-error-text"
       >
         {account.error}
       </span>
@@ -64,9 +69,13 @@ export function AccountReason({
     if (!cooldown) return null
     return (
       <span className="text-xs text-warning-text">
-        {fill(m.coolingReason, {
+        {fillNodes(m.coolingReason, {
           group: nameOf(q, cooldown[0]),
-          time: formatRelative(new Date(cooldown[1]), now, locale),
+          time: (
+            <span className="whitespace-nowrap">
+              {formatRelative(new Date(cooldown[1]), now, locale)}
+            </span>
+          ),
         })}
       </span>
     )

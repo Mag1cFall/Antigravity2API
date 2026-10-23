@@ -25,12 +25,16 @@ type geminiFileMetadata struct {
 	} `json:"file"`
 }
 
-// geminiUpload 为一次可续传上传的元数据与已接收的内容
+// geminiUploadIdle 为可续传上传在没有分块到达时的保留时长，超过后上传会话失效
+const geminiUploadIdle = time.Hour
+
+// geminiUpload 为一次可续传上传的元数据、已接收的内容与空闲失效计时器
 type geminiUpload struct {
-	mu   sync.Mutex
-	name string
-	mime string
-	data bytes.Buffer
+	mu     sync.Mutex
+	name   string
+	mime   string
+	data   bytes.Buffer
+	expire *time.Timer
 }
 
 // geminiUploads 保存进行中的可续传上传
@@ -97,6 +101,7 @@ func (s *server) startGeminiUpload(w http.ResponseWriter, r *http.Request) {
 		mime: firstMediaType(r.Header.Get("X-Goog-Upload-Header-Content-Type"), metadata.File.MIMEType),
 	}
 	id := rand.Text()
+	upload.expire = time.AfterFunc(geminiUploadIdle, func() { s.uploads.end(id) })
 	s.uploads.mu.Lock()
 	s.uploads.sessions[id] = upload
 	s.uploads.mu.Unlock()
@@ -128,6 +133,7 @@ func (s *server) handleGeminiUploadChunk(w http.ResponseWriter, r *http.Request)
 		writeGeminiError(w, http.StatusNotFound, "NOT_FOUND", "upload session was not found")
 		return
 	}
+	upload.expire.Reset(geminiUploadIdle)
 	upload.mu.Lock()
 	defer upload.mu.Unlock()
 	commands := make(map[string]bool)
@@ -230,7 +236,7 @@ func readGeminiFileMetadata(body io.Reader) (geminiFileMetadata, error) {
 	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
 		return metadata, err
 	}
-	raw, _, err = geminiCamelKeys(raw)
+	raw, _, err = geminiCamelKeys(doubleQuotedJSON(raw))
 	if err == nil {
 		err = json.Unmarshal(raw, &metadata)
 	}
@@ -238,6 +244,41 @@ func readGeminiFileMetadata(body io.Reader) (geminiFileMetadata, error) {
 		return metadata, fmt.Errorf("file metadata: %w", err)
 	}
 	return metadata, nil
+}
+
+// doubleQuotedJSON 把 Google API 请求体接受的单引号字符串改写为 JSON 双引号字符串
+func doubleQuotedJSON(raw []byte) []byte {
+	if !bytes.ContainsRune(raw, '\'') {
+		return raw
+	}
+	converted := make([]byte, 0, len(raw)+8)
+	var quote byte
+	for index := 0; index < len(raw); index++ {
+		char := raw[index]
+		switch {
+		case quote == 0:
+			if char == '\'' || char == '"' {
+				quote = char
+				char = '"'
+			}
+			converted = append(converted, char)
+		case char == '\\' && index+1 < len(raw):
+			index++
+			if quote == '\'' && raw[index] == '\'' {
+				converted = append(converted, '\'')
+			} else {
+				converted = append(converted, char, raw[index])
+			}
+		case char == quote:
+			quote = 0
+			converted = append(converted, '"')
+		case char == '"':
+			converted = append(converted, '\\', '"')
+		default:
+			converted = append(converted, char)
+		}
+	}
+	return converted
 }
 
 // geminiUploadName 依次取 displayName、文件段名称与 X-Goog-Upload-File-Name 作为文件名

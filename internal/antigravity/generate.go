@@ -31,11 +31,12 @@ const (
 	wireRoleModel = "model"
 )
 
-// Conversation 标识一条会话在上游的 cascade、trajectory、已完成的模型轮数与上一次执行
+// Conversation 标识一条会话在上游的 cascade、trajectory、已完成的模型轮数、历史步骤数与上一次执行
 type Conversation struct {
 	CascadeID       string
 	TrajectoryID    string
 	Turn            int
+	Step            int
 	Execution       int
 	LastExecutionID string
 }
@@ -43,7 +44,24 @@ type Conversation struct {
 // ErrIncompleteStream 表示上游流在出现 finishReason 前结束
 var ErrIncompleteStream = errors.New("upstream stream ended without finishReason")
 
-// NewConversation 以会话的 cascade 与 trajectory 标识和规范历史推导步序号：Turn 为历史中的模型轮数，Execution 为当前用户请求的序号
+// promptBlockedText 为上游输入过滤提示的开头，该提示以不带 role 的 candidate 正文代替回答
+const promptBlockedText = "This request was blocked by Gemini's filters."
+
+// PromptBlockedError 表示上游输入过滤拒绝当前请求，Message 为上游提示原文
+type PromptBlockedError struct {
+	Message string
+}
+
+func (e *PromptBlockedError) Error() string {
+	return e.Message
+}
+
+// HTTPStatus 返回输入被拒绝时公开协议使用的状态码
+func (e *PromptBlockedError) HTTPStatus() int {
+	return http.StatusBadRequest
+}
+
+// NewConversation 以会话的 cascade 与 trajectory 标识和规范历史推导步序号：Turn 为历史中的模型轮数，Step 为历史按官方步骤模型展开的步骤数，Execution 为当前用户请求的序号
 func NewConversation(cascade, trajectory string, contents []Content) Conversation {
 	turn, execution := 0, -1
 	for _, content := range contents {
@@ -54,7 +72,7 @@ func NewConversation(cascade, trajectory string, contents []Content) Conversatio
 			execution++
 		}
 	}
-	conversation := Conversation{CascadeID: cascade, TrajectoryID: trajectory, Turn: turn, Execution: max(execution, 0)}
+	conversation := Conversation{CascadeID: cascade, TrajectoryID: trajectory, Turn: turn, Step: len(sessionSteps(contents, nil)), Execution: max(execution, 0)}
 	if execution > 0 {
 		conversation.LastExecutionID = conversation.ExecutionID(execution - 1)
 	}
@@ -95,7 +113,12 @@ type Envelope struct {
 	Model       string      `json:"model"`
 	UserAgent   string      `json:"userAgent"`
 	RequestType string      `json:"requestType"`
+	// EnabledCreditTypes 是额度用尽后可用的积分类型，账户开启 AI 积分超额使用时为 GOOGLE_ONE_AI
+	EnabledCreditTypes []string `json:"enabledCreditTypes,omitempty"`
 }
+
+// CreditGoogleOneAI 是官方客户端开启 Enable AI Credit Overages 后 agent 信封带的积分类型
+const CreditGoogleOneAI = "GOOGLE_ONE_AI"
 
 // WireRequest 表示信封内的 Gemini 形状请求
 type WireRequest struct {
@@ -252,7 +275,7 @@ func BuildEnvelope(project string, model CatalogModel, conversation Conversation
 	}
 	return Envelope{
 		Project:     project,
-		RequestID:   fmt.Sprintf("%s/%s/%d/%s/%d", requestTypeAgent, conversation.CascadeID, now.UnixMilli(), conversation.TrajectoryID, 2*conversation.Turn+1),
+		RequestID:   fmt.Sprintf("%s/%s/%d/%s/%d", requestTypeAgent, conversation.CascadeID, now.UnixMilli(), conversation.TrajectoryID, conversation.Step),
 		Request:     request,
 		Model:       model.ID,
 		UserAgent:   envelopeUserAgent,
@@ -268,7 +291,7 @@ func labels(model CatalogModel, conversation Conversation) map[string]string {
 		"root_cascade_id":          conversation.CascadeID,
 		"trajectory_id":            conversation.TrajectoryID,
 		"request_id":               conversation.TrajectoryID + "-" + strconv.Itoa(conversation.Turn),
-		"last_step_index":          strconv.Itoa(2 * conversation.Turn),
+		"last_step_index":          strconv.Itoa(conversation.Step - 1),
 		"model_enum":               model.Model,
 		"used_claude":              strconv.FormatBool(claude),
 		"used_claude_conservative": strconv.FormatBool(claude),
@@ -280,7 +303,7 @@ func labels(model CatalogModel, conversation Conversation) map[string]string {
 	return values
 }
 
-// wireContents 把规范消息转成上游消息：函数结果按调用补齐名称，结果所在轮的角色 Claude 族为 user、其余族为 model，同一消息中的其余 part 在其他族另成 user 轮；Gemini 族缺签名的函数调用连同结果转写为文本
+// wireContents 把规范消息转成上游消息：Claude 族没有 ID 的函数调用生成 ID，函数结果按调用补齐名称与 ID，结果所在轮的角色 Claude 族为 user、其余族为 model，相邻消息的结果并入同一轮，同一消息中的其余 part 在其他族另成 user 轮；Gemini 族缺签名的函数调用连同结果转写为文本
 func wireContents(contents []Content, model CatalogModel) ([]WireContent, error) {
 	claude := model.ModelProvider == ProviderAnthropic
 	google := model.ModelProvider == ProviderGoogle
@@ -288,6 +311,9 @@ func wireContents(contents []Content, model CatalogModel) ([]WireContent, error)
 	var wired []WireContent
 	var pendingCalls []FunctionCall
 	for index, content := range contents {
+		if claude {
+			content = identifyCalls(content, index)
+		}
 		content, err := linkFunctionResults(content, &pendingCalls)
 		if err != nil {
 			return nil, fmt.Errorf("contents[%d]: %w", index, err)
@@ -311,13 +337,25 @@ func wireContents(contents []Content, model CatalogModel) ([]WireContent, error)
 			}
 			ordered = append(ordered, item)
 		}
-		if claude || len(results) == 0 {
+		switch {
+		case len(results) == 0:
 			wired = appendContent(wired, wireRoleUser, ordered)
-			continue
+		case claude:
+			wired = appendResults(wired, wireRoleUser, ordered)
+		default:
+			wired = appendContent(appendResults(wired, wireRoleModel, results), wireRoleUser, rest)
 		}
-		wired = appendContent(appendContent(wired, wireRoleModel, results), wireRoleUser, rest)
 	}
 	return wired, nil
+}
+
+// appendResults 追加含函数结果的上游消息，前一条消息同角色且只含函数结果时并入该消息
+func appendResults(wired []WireContent, role string, parts []WirePart) []WireContent {
+	if last := len(wired) - 1; last >= 0 && wired[last].Role == role && !slices.ContainsFunc(wired[last].Parts, func(part WirePart) bool { return part.FunctionResponse == nil }) {
+		wired[last].Parts = append(wired[last].Parts, parts...)
+		return wired
+	}
+	return appendContent(wired, role, parts)
 }
 
 // appendContent 追加一条上游消息，parts 为空时不追加
@@ -432,7 +470,25 @@ func transcript(kind string, value map[string]any) string {
 	return string(data)
 }
 
-// linkFunctionResults 记录消息中的函数调用，为缺少名称的函数结果先按调用 ID、再按唯一待返回调用补齐名称；不含函数结果的 user 轮清空待返回调用，无法关联时返回错误
+// identifyCalls 为消息中没有 ID 的函数调用生成 call_<消息序号>_<part 序号>
+func identifyCalls(content Content, index int) Content {
+	cloned := false
+	for position, part := range content.Parts {
+		if part.FunctionCall == nil || part.FunctionCall.ID != "" {
+			continue
+		}
+		if !cloned {
+			content.Parts = slices.Clone(content.Parts)
+			cloned = true
+		}
+		call := *part.FunctionCall
+		call.ID = fmt.Sprintf("call_%d_%d", index, position)
+		content.Parts[position].FunctionCall = &call
+	}
+	return content
+}
+
+// linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按唯一待返回调用补齐；不含函数结果的 user 轮清空待返回调用，无法关联时返回错误
 func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content, error) {
 	if content.Role == RoleUser && !slices.ContainsFunc(content.Parts, func(part Part) bool { return part.FunctionResult != nil }) {
 		*pendingCalls = nil
@@ -456,14 +512,14 @@ func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content
 			}
 			continue
 		}
-		if result.Name == "" {
+		if result.Name == "" || result.ID == "" {
 			if !cloned {
 				content.Parts = slices.Clone(content.Parts)
 				cloned = true
 			}
-			named := *result
-			named.Name = (*pendingCalls)[matched].Name
-			content.Parts[index].FunctionResult = &named
+			linked := *result
+			linked.Name, linked.ID = cmp.Or(result.Name, (*pendingCalls)[matched].Name), cmp.Or(result.ID, (*pendingCalls)[matched].ID)
+			content.Parts[index].FunctionResult = &linked
 		}
 		*pendingCalls = slices.Delete(*pendingCalls, matched, matched+1)
 	}
@@ -507,11 +563,11 @@ func marshal(value any) ([]byte, error) {
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
 }
 
-// hubJSON 按官方 Hub language_server 的 protojson 输出编码请求正文：在 marshal 结果的每个结构逗号后加一个空格
-func hubJSON(value any) ([]byte, error) {
+// hubJSON 按档案系统的官方 Hub language_server 的 protojson 输出编码请求正文：构建号为奇数时在 marshal 结果的每个结构逗号后加一个空格，否则为紧凑写法
+func (d Device) hubJSON(value any) ([]byte, error) {
 	data, err := marshal(value)
-	if err != nil {
-		return nil, err
+	if err != nil || !d.spaced() {
+		return data, err
 	}
 	out := make([]byte, 0, len(data)+len(data)/16)
 	quoted, escaped := false, false
@@ -537,6 +593,7 @@ type streamChunk struct {
 		Candidates []struct {
 			Content           WireContent `json:"content"`
 			FinishReason      string      `json:"finishReason"`
+			FinishMessage     string      `json:"finishMessage"`
 			GroundingMetadata *Grounding  `json:"groundingMetadata"`
 		} `json:"candidates"`
 		UsageMetadata *struct {
@@ -566,7 +623,7 @@ type Exchange struct {
 
 // StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回本次请求与响应的正文；Tab 补全信封以编辑器版的 User-Agent 发出
 func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (<-chan Event, *Exchange, error) {
-	encode := hubJSON
+	encode := c.device.hubJSON
 	if envelope.RequestType == requestTypeTab {
 		encode = marshal
 	}
@@ -605,7 +662,7 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 	return events, exchange, nil
 }
 
-// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion；结束时发出 usage 与 finish，没有 finishReason 时以 ErrIncompleteStream 结束
+// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；不带 role 的输入过滤提示以 PromptBlockedError 结束
 func DecodeStream(reader io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1<<20), 64<<20)
@@ -640,14 +697,21 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 			}
 		}
 		for _, candidate := range chunk.Response.Candidates {
+			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, promptBlockedText) {
+				events <- Event{Kind: EventError, Err: &PromptBlockedError{Message: parts[0].Text}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+				return
+			}
 			for _, part := range candidate.Content.Parts {
 				emitPart(part, chunk.Response.UsageMetadata != nil, usage, chunk.Response.ModelVersion, events)
 			}
 			if candidate.GroundingMetadata != nil {
 				events <- Event{Kind: EventGrounding, ProviderModel: chunk.Response.ModelVersion, Grounding: candidate.GroundingMetadata}
 			}
-			if candidate.FinishReason != "" {
-				finish.FinishReason = candidate.FinishReason
+			switch {
+			case candidate.FinishReason != "":
+				finish.FinishReason, finish.FinishMessage = candidate.FinishReason, candidate.FinishMessage
+			case candidate.FinishMessage != "":
+				finish.FinishReason, finish.FinishMessage = "IMAGE_OTHER", candidate.FinishMessage
 			}
 		}
 	}

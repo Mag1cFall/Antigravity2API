@@ -4,7 +4,7 @@ package prompt
 type Tier string
 
 const (
-	// TierFull 保留官方全部 10 段与 user 轮包装
+	// TierFull 保留官方全部段与 user 轮包装
 	TierFull Tier = "full"
 	// TierMedium 保留 identity、guidelines、communication_style 三段与 user 轮包装
 	TierMedium Tier = "medium"

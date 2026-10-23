@@ -8,6 +8,7 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { useStatus } from '@/features/service/queries'
 import { newerVersion } from '@/features/service/version'
+import { UpdateItem } from '@/features/settings/UpdateItem'
 import { formatFullDateTime, formatRelative } from '@/lib/format'
 import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
@@ -18,6 +19,7 @@ const aboutMessages = defineMessages(
     title: '关于',
     tagline: 'Google Antigravity 的多账户 API 代理',
     version: '版本',
+    update: '在线更新',
     host: '运行方式',
     hostWeb: '浏览器（serve）',
     hostDesktop: '桌面窗口',
@@ -40,6 +42,7 @@ const aboutMessages = defineMessages(
     title: 'About',
     tagline: 'Multi-account API proxy for Google Antigravity',
     version: 'Version',
+    update: 'Updates',
     host: 'Running as',
     hostWeb: 'Browser (serve)',
     hostDesktop: 'Desktop window',
@@ -62,6 +65,7 @@ const aboutMessages = defineMessages(
     title: '關於',
     tagline: 'Google Antigravity 的多帳號 API 代理',
     version: '版本',
+    update: '線上更新',
     host: '執行方式',
     hostWeb: '瀏覽器（serve）',
     hostDesktop: '桌面視窗',
@@ -130,6 +134,9 @@ export function AboutSection() {
         <Item label={m.version}>
           <span className="font-mono">{data.version}</span>
           <CopyButton value={summary} label={m.copyVersion} copiedLabel={m.copied} />
+        </Item>
+        <Item label={m.update}>
+          <UpdateItem />
         </Item>
         <Item label={m.host}>{data.host === 'desktop' ? m.hostDesktop : m.hostWeb}</Item>
         <Item label={m.listen}>

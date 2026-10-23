@@ -6,6 +6,7 @@ import (
 	"io"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -33,6 +34,12 @@ var clientIdentity = regexp.MustCompile(`(?im)^([ \t]*)(?:you are|you're)\s+(?:a
 // neutralIdentity 为替换客户端身份句的中性身份句
 const neutralIdentity = "You are an AI Agent."
 
+// featuredSection 为推荐插件段的段名，没有推荐插件时该段为空
+const featuredSection = "featured_plugins"
+
+// funcs 为 system 模板可用的函数
+var funcs = template.FuncMap{"sections": joinSections}
+
 // builtins 为内置三档的模板
 var builtins = map[Tier]templates{
 	TierFull:       {System: fullSystem, User: fullUser},
@@ -54,6 +61,7 @@ var previewData = systemData{
 	Separator:        `\`,
 	OS:               "windows",
 	ModelDisplayName: "<model>",
+	FeaturedPlugins:  "<featured plugins>\n\n",
 }
 
 // Section 为一个官方段的段名与以预览数据渲染的原文
@@ -69,7 +77,7 @@ type Preview struct {
 	Sections []Section `json:"sections"`
 }
 
-// systemData 为 system 模板与官方段模板的数据，Separator 为设备系统的路径分隔符
+// systemData 为 system 模板与官方段模板的数据，Separator 为设备系统的路径分隔符，FeaturedPlugins 为推荐插件段的货架正文
 type systemData struct {
 	Sections         map[string]string
 	Client           string
@@ -78,6 +86,7 @@ type systemData struct {
 	Separator        string
 	OS               string
 	ModelDisplayName string
+	FeaturedPlugins  string
 }
 
 // userData 为 user 模板的数据
@@ -122,7 +131,7 @@ func New(tier Tier, custom Custom) (*Composer, error) {
 	return c, nil
 }
 
-// templates 按官方顺序拼接选中的段，客户端系统提示接在最后，user 模板取包装方式对应的模板
+// templates 按官方顺序以 sections 拼接选中的段，客户端系统提示接在最后，user 模板取包装方式对应的模板
 func (c Custom) templates() (templates, error) {
 	user, ok := wrapTemplates[c.Wrap]
 	if !ok {
@@ -136,13 +145,13 @@ func (c Custom) templates() (templates, error) {
 	}
 	for _, name := range SectionNames {
 		if slices.Contains(c.Sections, name) {
-			parts = append(parts, "{{.Sections."+name+"}}")
+			parts = append(parts, strconv.Quote(name))
 		}
 	}
 	if len(parts) == 0 {
 		return templates{System: "{{.Client}}", User: user}, nil
 	}
-	return templates{System: strings.Join(parts, "\n") + "{{if .Client}}\n\n{{.Client}}{{end}}", User: user}, nil
+	return templates{System: "{{sections .Sections " + strings.Join(parts, " ") + "}}{{if .Client}}\n\n{{.Client}}{{end}}", User: user}, nil
 }
 
 // Render 以预览数据渲染档位的系统指令与首轮 user 消息，并列出全部官方段的原文
@@ -168,25 +177,41 @@ func (c *Composer) Tier() Tier {
 	return c.tier
 }
 
-// Compose 以会话 ID 与账户设备档案渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，工具声明保持不变
-func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device) antigravity.GenerateRequest {
-	data := systemData{
-		Client:           clientIdentity.ReplaceAllString(request.System, "${1}"+neutralIdentity+"${2}"),
-		ConversationID:   conversation,
-		AppDataDir:       device.AppDataDir,
-		Separator:        "/",
-		OS:               device.OS,
-		ModelDisplayName: model.DisplayName,
-	}
-	if device.OS == "windows" {
-		data.Separator = `\`
-	}
+// Compose 以会话 ID、账户设备档案与推荐插件段的货架正文渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，工具声明保持不变
+func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string) antigravity.GenerateRequest {
+	data := deviceData(model, conversation, device, plugins)
+	data.Client = clientIdentity.ReplaceAllString(request.System, "${1}"+neutralIdentity+"${2}")
 	data.Sections = renderSections(data)
 	request.System = execute(c.system, data)
 	if c.user != nil {
 		request.Contents = c.wrap(request.Contents, times, model.DisplayName)
 	}
 	return request
+}
+
+// deviceData 返回以会话、设备档案与推荐插件段的货架正文填写的 system 模板数据
+func deviceData(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string) systemData {
+	data := systemData{
+		ConversationID:   conversation,
+		AppDataDir:       device.AppDataDir,
+		Separator:        "/",
+		OS:               device.OS,
+		ModelDisplayName: model.DisplayName,
+		FeaturedPlugins:  plugins,
+	}
+	if device.OS == "windows" {
+		data.Separator = `\`
+	}
+	return data
+}
+
+// SectionTokens 返回以会话、设备档案与推荐插件段的货架正文渲染的各官方段按 ceil(UTF-8 字节数/3) 计的 token 数，键为段名
+func SectionTokens(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string) map[string]int {
+	tokens := make(map[string]int, len(officialSections))
+	for name, text := range renderSections(deviceData(model, conversation, device, plugins)) {
+		tokens[name] = (len(text) + 2) / 3
+	}
+	return tokens
 }
 
 // validate 以各字段都有值的数据试渲染模板，提前暴露字段名与段名错误
@@ -243,7 +268,7 @@ func userTurn(content antigravity.Content) bool {
 
 // parse 解析模板，引用不存在的段名时执行报错
 func parse(name, text string) (*template.Template, error) {
-	t, err := template.New(name).Option("missingkey=error").Parse(text)
+	t, err := template.New(name).Option("missingkey=error").Funcs(funcs).Parse(text)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s template: %w", name, err)
 	}
@@ -264,13 +289,32 @@ func parseSections(text string) (map[string]*template.Template, []string) {
 	return sections, names
 }
 
-// renderSections 以运行时字段渲染全部官方段
+// renderSections 以运行时字段渲染全部官方段，没有推荐插件时推荐插件段为空
 func renderSections(data systemData) map[string]string {
 	rendered := make(map[string]string, len(officialSections))
 	for name, section := range officialSections {
+		if name == featuredSection && data.FeaturedPlugins == "" {
+			rendered[name] = ""
+			continue
+		}
 		rendered[name] = execute(section, data)
 	}
 	return rendered
+}
+
+// joinSections 按 names 的顺序以换行连接已渲染的非空官方段，段名不存在时报错
+func joinSections(rendered map[string]string, names ...string) (string, error) {
+	var parts []string
+	for _, name := range names {
+		text, ok := rendered[name]
+		if !ok {
+			return "", fmt.Errorf("没有名为 %s 的官方段", name)
+		}
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 // execute 渲染模板，模板已在 New 中以完整数据试渲染

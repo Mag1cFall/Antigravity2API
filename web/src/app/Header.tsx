@@ -16,7 +16,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router'
 
 import { appMessages } from '@/app/messages'
@@ -48,24 +48,29 @@ interface NavItem {
 const roundButton =
   'size-control rounded-full border-card-border bg-surface text-foreground shadow-card no-drag enabled:hover:border-border enabled:hover:bg-muted enabled:hover:text-foreground enabled:active:bg-hover'
 
-// MainNav 是居中的等宽胶囊导航，当前页的深色胶囊滑到该项；compact 用于窄屏顶栏下方可横向滚动的一行
+// MainNav 是居中的等宽胶囊导航，当前页的深色胶囊滑到该项；compact 用于窄屏顶栏下方每行三项的两行
 function MainNav({ items, label, compact }: { items: NavItem[]; label: string; compact: boolean }) {
   return (
     <nav
       aria-label={label}
-      className={
-        'relative mx-auto w-fit ' +
-        (compact ? 'max-w-full no-scrollbar overflow-x-auto' : 'min-w-0')
-      }
+      className={'relative mx-auto ' + (compact ? 'w-full' : 'w-fit min-w-0')}
     >
       <Indicator active="[aria-current=page]" className="rounded-full bg-foreground" />
-      <ul className="grid w-max auto-cols-fr grid-flow-col gap-1 rounded-full border border-card-border bg-surface p-1 shadow-card">
+      <ul
+        className={
+          'grid gap-1 border border-card-border bg-surface p-1 shadow-card ' +
+          (compact ? 'grid-cols-3 rounded-[20px]' : 'w-max auto-cols-fr grid-flow-col rounded-full')
+        }
+      >
         {items.map((item) => (
           <li key={item.to} className="flex">
             <NavLink
               to={item.to}
               end={item.to === '/'}
-              className="relative flex h-control-sm w-full items-center justify-center gap-2 rounded-full px-4 text-sm font-medium whitespace-nowrap text-foreground-muted transition-colors duration-200 ease-out no-drag hover:text-foreground not-aria-[current=page]:hover:bg-muted aria-[current=page]:text-surface max-lg:px-3 pointer-coarse:h-touch"
+              className={
+                'relative flex h-control-sm w-full items-center justify-center gap-2 rounded-full text-sm font-medium whitespace-nowrap text-foreground-muted transition-colors duration-200 ease-out no-drag hover:text-foreground not-aria-[current=page]:hover:bg-muted aria-[current=page]:text-surface pointer-coarse:h-touch ' +
+                (compact ? 'px-2' : 'px-4 max-lg:px-3')
+              }
             >
               <item.icon
                 size={16}
@@ -157,6 +162,7 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
   const m = useMessages(appMessages)
   const { language, setLanguage } = useI18n()
   const [theme, setTheme] = useState(readTheme)
+  const themeButton = useRef<HTMLButtonElement>(null)
   const client = useQueryClient()
   const navigate = useNavigate()
   const session = useSession()
@@ -199,7 +205,7 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
             <MainNav items={items} label={m.navLabel} compact={false} />
           </div>
         )}
-        <div className="flex items-center justify-end gap-2">
+        <div className="col-start-3 flex items-center justify-end gap-2">
           <DropdownMenu>
             <Tooltip label={m.language}>
               <DropdownMenuTrigger asChild>
@@ -232,6 +238,7 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
             <Tooltip label={m.theme}>
               <DropdownMenuTrigger asChild>
                 <Button
+                  ref={themeButton}
                   variant="secondary"
                   size="icon"
                   aria-label={m.theme}
@@ -245,8 +252,12 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
               <DropdownMenuRadioGroup
                 value={theme}
                 onValueChange={(value) => {
+                  const rect = themeButton.current?.getBoundingClientRect()
                   setTheme(value as ThemePreference)
-                  saveTheme(value as ThemePreference)
+                  saveTheme(
+                    value as ThemePreference,
+                    rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+                  )
                 }}
               >
                 <DropdownMenuRadioItem value="system">{m.themeSystem}</DropdownMenuRadioItem>

@@ -381,7 +381,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	events, err := s.generateResponses(r.Context(), request, &prepared)
 	if err == nil {
-		events = s.hostedImages(r.Context(), request.Tools, prepared.generate.Contents, events)
+		events = s.hostedImages(r.Context(), request.Tools, prepared.generate.Session, prepared.generate.Contents, events)
 	}
 	if err == nil && request.Stream {
 		events, _, err = awaitStreamStart(r.Context(), events)
@@ -413,6 +413,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 // generateResponses 发起生成；truncation 为 auto 且上游报告上下文超限时，按完整轮次从最早处删除历史后重试，删除量按本地计数与上游给出的上限估算
 func (s *server) generateResponses(ctx context.Context, request responsesRequest, prepared *responsesPreparation) (<-chan antigravity.Event, error) {
+	prepared.generate.Unary = !request.Stream
 	for {
 		events, err := s.service.Generate(ctx, prepared.generate)
 		var upstream *antigravity.UpstreamError
@@ -727,7 +728,7 @@ type responsesInput struct {
 	effort       string
 }
 
-// responsesContents 转换 Responses 输入项：首部 system、developer 消息为指令，对话中的作为 system-reminder 并入下一个 user 消息；reasoning 项的摘要与签名并入其后的 assistant 消息
+// responsesContents 转换 Responses 输入项：首部 system、developer 消息为指令，对话中的作为 system-reminder 并入下一个 user 消息；reasoning 项的摘要与签名并入其后的 assistant 消息，调用项并入其前的 assistant 消息
 func responsesContents(raw json.RawMessage) (responsesInput, error) {
 	var input responsesInput
 	if value := strings.TrimSpace(string(raw)); value == "" || value == "null" {
@@ -894,6 +895,11 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 			call.ThoughtSignature = reasoning[last].ThoughtSignature
 			reasoning = reasoning[:last]
 		}
+		if last := len(contents) - 1; last >= 0 && contents[last].Role == antigravity.RoleAssistant {
+			contents[last].Parts = slices.Concat(contents[last].Parts, reasoning, []antigravity.Part{{FunctionCall: &call}})
+			reasoning = nil
+			continue
+		}
 		add(antigravity.Content{Role: antigravity.RoleAssistant, Parts: []antigravity.Part{{FunctionCall: &call}}})
 	}
 	flushReasoning()
@@ -936,13 +942,19 @@ func responsesHostedItem(kind string, raw json.RawMessage) (antigravity.Content,
 		content.Role = antigravity.RoleUser
 		var output struct {
 			ImageURL string `json:"image_url"`
+			FileID   string `json:"file_id"`
 		}
-		if json.Unmarshal(item["output"], &output) == nil && output.ImageURL != "" {
+		switch {
+		case json.Unmarshal(item["output"], &output) != nil:
+		case output.ImageURL != "":
 			part, err := mediaURLPart(output.ImageURL, "", "")
 			if err != nil {
 				return antigravity.Content{}, fmt.Errorf("output: %w", err)
 			}
 			media = append(media, part)
+			delete(item, "output")
+		case output.FileID != "":
+			media = append(media, antigravity.Part{File: &antigravity.FileRef{ID: output.FileID}})
 			delete(item, "output")
 		}
 	case "mcp_approval_response":
@@ -1006,7 +1018,19 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 				}
 			}
 		case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
-			mapped.GoogleSearch = json.RawMessage(`{}`)
+			var filters struct {
+				AllowedDomains []string `json:"allowed_domains"`
+			}
+			if rawJSONConfigured(tool.Filters) {
+				if err := json.Unmarshal(tool.Filters, &filters); err != nil {
+					return antigravity.Tools{}, fmt.Errorf("web_search filters: %w", err)
+				}
+			}
+			search, err := searchOptions(tool.SearchContextSize, tool.UserLocation, filters.AllowedDomains, nil)
+			if err != nil {
+				return antigravity.Tools{}, err
+			}
+			mapped.GoogleSearch, mapped.Search = json.RawMessage(`{}`), search
 		case "image_generation":
 			if err := addDeclaration(imageToolDeclaration); err != nil {
 				return antigravity.Tools{}, err
@@ -1156,7 +1180,7 @@ func buildResponsesObject(id string, created int64, request responsesRequest, re
 		return nil
 	}
 	if search {
-		add = holdUntilGrounding(add)
+		add, _ = holdUntilGrounding(add)
 	}
 	for _, event := range result.events {
 		_ = add(event)
@@ -1358,13 +1382,13 @@ func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter
 			return err
 		}
 	}
-	emit := writer.live
+	emit, release := writer.live, func() error { return nil }
 	if searchOnly(prepared.generate.Tools) {
-		emit = holdUntilGrounding(writer.live)
+		emit, release = holdUntilGrounding(writer.live)
 	}
 	result, err := consumeStreamEvents(ctx, events, emit, func() error { return writeSSEHeartbeat(w) })
 	if err != nil {
-		if report(err) {
+		if report(err) && release() == nil {
 			_ = writer.failed(err)
 		}
 		return err
@@ -1582,7 +1606,7 @@ func (writer *responsesStreamWriter) failed(err error) error {
 		output = append(output, item)
 	}
 	response["output"] = output
-	response["error"] = map[string]any{"code": responsesErrorCode(err), "message": err.Error()}
+	response["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}
 	return writer.emit("response.failed", map[string]any{"response": response})
 }
 

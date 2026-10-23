@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import type { ReactNode } from 'react'
+import { Fragment, type ReactNode } from 'react'
 import { Link } from 'react-router'
 
 import { appMessages } from '@/app/messages'
@@ -8,11 +8,15 @@ import { Callout } from '@/components/ui/callout'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { ErrorState, Loading } from '@/components/ui/states'
+import { DotList } from '@/components/ui/stats'
 import { Table, Td, Th } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { quotaMessages } from '@/features/quota/messages'
+import { nameOf } from '@/features/quota/quota'
 import { requestMessages } from '@/features/requests/messages'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import type { Body, RequestDetail } from '@/features/requests/types'
+import { settingsMessages } from '@/features/settings/messages'
 import { api } from '@/lib/api'
 import {
   formatBytes,
@@ -54,6 +58,16 @@ function BodyView({ text, size }: { text: string; size: number }) {
   )
 }
 
+// breakableURL 在 URL 的 /、.、?、&、= 与 : 之后放换行机会，长地址只在这些位置折行
+function breakableURL(url: string) {
+  return url.split(/(?<=[/.?&=:])/).map((part, index) => (
+    <Fragment key={index}>
+      {index > 0 && <wbr />}
+      {part}
+    </Fragment>
+  ))
+}
+
 // Row 是概览中的一行键值
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -67,9 +81,23 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 // DetailBody 是请求详情的全部内容
 function DetailBody({ detail }: { detail: RequestDetail }) {
   const m = useMessages(requestMessages)
+  const q = useMessages(quotaMessages)
+  const s = useMessages(settingsMessages)
   const { locale } = useI18n()
   const record = detail.record
   const n = (value: number) => formatNumber(value, locale)
+  const typeNames: Record<string, string> = {
+    agent: m.typeAgent,
+    image_gen: m.typeImage,
+    tab: m.typeTab,
+    checkpoint: m.typeCheckpoint,
+  }
+  const tierNames: Record<string, string> = {
+    full: s.promptFull,
+    medium: s.promptMedium,
+    aggressive: s.promptAggressive,
+    custom: s.promptCustom,
+  }
   const attempts = detail.upstream ?? []
   const bodies: { key: string; label: string; body: Body | null; side: 'request' | 'response' }[] =
     [
@@ -141,28 +169,42 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
           <span className="font-mono">{record.model}</span>
         </Row>
         <Row label={m.upstreamModel}>
-          <span className="font-mono">{record.upstream_model || m.none}</span>
-          {record.model_version && (
-            <span className="text-foreground-muted"> · {record.model_version}</span>
-          )}
+          <DotList
+            items={[
+              <span className="font-mono">{record.upstream_model || m.none}</span>,
+              record.model_version && (
+                <span className="text-foreground-muted">{record.model_version}</span>
+              ),
+            ].filter(Boolean)}
+          />
         </Row>
         <Row label={m.account}>
-          {record.account || m.none}
-          {record.quota_group && (
-            <span className="text-foreground-muted"> · {record.quota_group}</span>
-          )}
+          <DotList
+            items={[
+              record.account || m.none,
+              record.quota_group && (
+                <span className="text-foreground-muted">{nameOf(q, record.quota_group)}</span>
+              ),
+            ].filter(Boolean)}
+          />
         </Row>
         <Row label={m.timing}>
           {[record.queue_ms, record.first_event_ms, record.duration_ms]
             .map((value) => formatDuration(value, locale))
             .join(' · ')}
         </Row>
-        <Row label={m.tokens}>
-          <span className="tabular-nums">
-            {m.input} {n(record.input_tokens)} · {m.cached} {n(record.cached_tokens)} ·{' '}
-            {m.reasoning} {n(record.reasoning_tokens)} · {m.reply} {n(record.reply_tokens)} ·{' '}
-            {m.total} {n(record.input_tokens + record.reasoning_tokens + record.reply_tokens)}
-          </span>
+        <Row label={m.tokenUsage}>
+          <DotList
+            items={[
+              m.input + ' ' + n(record.input_tokens),
+              m.cached + ' ' + n(record.cached_tokens),
+              m.reasoning + ' ' + n(record.reasoning_tokens),
+              m.reply + ' ' + n(record.reply_tokens),
+              m.total +
+                ' ' +
+                n(record.input_tokens + record.reasoning_tokens + record.reply_tokens),
+            ]}
+          />
         </Row>
         <Row label={m.cost}>
           {record.cost_usd === null ? m.unpriced : formatCost(record.cost_usd, locale)}
@@ -171,7 +213,12 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
         <Row label={m.stream}>{record.stream ? m.yes : m.no}</Row>
         {(record.request_type || record.prompt_tier) && (
           <Row label={m.requestType}>
-            {[record.request_type, record.prompt_tier].filter(Boolean).join(' · ')}
+            {[
+              typeNames[record.request_type] ?? record.request_type,
+              tierNames[record.prompt_tier] ?? record.prompt_tier,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
           </Row>
         )}
         {record.cascade_id && (
@@ -201,7 +248,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
       {record.attempts && record.attempts.length > 0 && (
         <section className="flex flex-col gap-3">
           <h3 className="text-md font-semibold">{m.attempts}</h3>
-          <Table label={m.attempts} framed>
+          <Table label={m.attempts} framed stack>
             <thead>
               <tr>
                 <Th>{m.account}</Th>
@@ -213,15 +260,16 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
             <tbody>
               {record.attempts.map((attempt, index) => (
                 <tr key={index}>
-                  <Td className="text-xs wrap-anywhere">
+                  <Td className="text-xs break-words max-sm:basis-full">
                     {attempt.account}
                     <span className="mt-1 block font-mono text-foreground-muted">
-                      {attempt.url}
+                      {breakableURL(attempt.url)}
                     </span>
                   </Td>
                   <Td
+                    label={m.status}
                     className={
-                      'text-right whitespace-nowrap ' +
+                      'text-right whitespace-nowrap max-sm:text-left ' +
                       (attempt.status === 200 ? '' : 'text-error-text')
                     }
                   >
@@ -230,7 +278,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
                       <span className="block font-mono text-xs">{attempt.code}</span>
                     )}
                   </Td>
-                  <Td className="text-right whitespace-nowrap">
+                  <Td label={m.duration} className="text-right whitespace-nowrap max-sm:text-left">
                     {formatDuration(attempt.duration_ms, locale)}
                     {attempt.retry_delay && (
                       <span className="block text-xs text-foreground-muted">
@@ -238,7 +286,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
                       </span>
                     )}
                   </Td>
-                  <Td className="text-xs break-words">
+                  <Td label={m.error} className="text-xs break-words max-sm:basis-full">
                     {attempt.error ?? m.none}
                     {attempt.trace_id && (
                       <span className="mt-1 block font-mono text-foreground-muted">

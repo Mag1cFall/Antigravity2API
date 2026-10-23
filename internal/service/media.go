@@ -54,7 +54,7 @@ func (s *Service) generateImage(ctx context.Context, request antigravity.Generat
 	}
 	conversation := antigravity.NewConversation(session.Cascade, session.Trajectory, request.Contents)
 	contents := slices.DeleteFunc(cloneContents(request.Contents), func(content antigravity.Content) bool { return len(content.Parts) == 0 })
-	return s.dispatch(ctx, request, model, session, digests, "image_gen", 2*conversation.Turn+2, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
+	return s.dispatch(ctx, request, model, session, digests, "image_gen", conversation.Step+1, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
 		envelope, err := antigravity.BuildImageEnvelope(current.client.Project(), catalog, conversation, request.System, contents, request.Config, time.Now())
 		if err != nil {
 			return nil, nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
@@ -103,11 +103,12 @@ func (s *Service) transcribe(ctx context.Context, request antigravity.GenerateRe
 	})
 }
 
-// dispatch 按 Generate 的账户选择、401 重发与换号规则执行 call，requestType 与 step 写入账本
+// dispatch 按 Generate 的账户选择、401 重发、限速等待与换号规则执行 call，requestType 与 step 写入账本
 func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequest, model antigravity.CatalogModel, session conversation, digests []string, requestType string, step int, tier prompt.Tier, call upstreamCall) (<-chan antigravity.Event, error) {
 	trace := requestdb.TraceFrom(ctx)
-	deadline, cancel := context.WithTimeout(ctx, s.live.Load().RequestTimeout)
+	deadline := watch(ctx, s.live.Load().RequestTimeout)
 	tried := make(map[string]bool)
+	waited := make(map[string]bool)
 	if request.AccountID != "" {
 		s.mu.Lock()
 		for id := range s.accounts {
@@ -119,12 +120,12 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 	for attempts := 1; ; attempts++ {
 		lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, tried, s.lowerTier(model))
 		if err != nil {
-			cancel()
+			deadline.stop()
 			var cooldown *balancer.CooldownError
 			if last != nil && errors.As(err, &cooldown) {
-				return nil, last
+				return nil, cooled(last, s.pool.Until(model.ID))
 			}
-			return nil, err
+			return nil, deadline.failure(err)
 		}
 		tried[lease.ID] = true
 		current := s.account(lease.ID)
@@ -144,14 +145,24 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 			upstream, exchange, err = call(deadline, current, lease.Model)
 		}
 		if err == nil {
-			return s.relay(ctx, cancel, lease, current, upstream, exchange, started, nil, digests, session.Cascade, tier), nil
+			return s.relay(ctx, deadline, &upstreamStream{lease: lease, current: current, events: upstream, exchange: exchange, started: started}, nil, false, digests, session.Cascade, tier), nil
 		}
 		trace.AddAttempt(attempt(lease.ID, exchange, started, err, antigravity.Event{}))
 		lease.Release()
 		var local *Error
-		if errors.As(err, &local) || !s.fail(ctx, current, lease.Model, err, tier) || attempts == maxAccounts || deadline.Err() != nil {
-			cancel()
+		if errors.As(err, &local) {
+			deadline.stop()
 			return nil, err
+		}
+		switched := s.fail(ctx, current, lease.Model, err, tier)
+		if switched && waitRateLimit(deadline, lease.ID, err, waited) {
+			delete(tried, lease.ID)
+			attempts--
+			continue
+		}
+		if !switched || attempts >= accountLimit(err) || deadline.Err() != nil {
+			deadline.stop()
+			return nil, deadline.failure(err)
 		}
 		last = err
 	}

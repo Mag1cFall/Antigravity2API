@@ -17,6 +17,10 @@ type Options struct {
 	APIKeys func() []string
 	// FilesDir 为 Files API 上传文件的保存目录
 	FilesDir string
+	// MediaDir 为以本服务链接输出时生成媒体的保存目录
+	MediaDir string
+	// MediaLinks 返回是否以本服务链接输出生成的媒体，以及设置的服务地址
+	MediaLinks func() (bool, string)
 }
 
 type server struct {
@@ -25,6 +29,8 @@ type server struct {
 	interactions   *responseStateStore
 	files          *fileStore
 	uploads        *geminiUploads
+	mediaDir       string
+	mediaLinks     func() (bool, string)
 	// background 按响应 ID 保存进行中的 Responses 后台响应
 	background sync.Map
 }
@@ -33,7 +39,7 @@ var idSequence atomic.Uint64
 
 // NewHandler 返回挂载四个公开协议与目录端点的 http.Handler
 func NewHandler(service antigravity.Service, options Options) http.Handler {
-	s := &server{service: service, responseStates: newResponseStateStore(), interactions: newResponseStateStore(), files: &fileStore{dir: options.FilesDir}, uploads: &geminiUploads{sessions: make(map[string]*geminiUpload)}}
+	s := &server{service: service, responseStates: newResponseStateStore(), interactions: newResponseStateStore(), files: &fileStore{dir: options.FilesDir}, uploads: &geminiUploads{sessions: make(map[string]*geminiUpload)}, mediaDir: options.MediaDir, mediaLinks: options.MediaLinks}
 	public := http.NewServeMux()
 	public.HandleFunc("GET /v1/models", s.handleOpenAIModels)
 	public.HandleFunc("GET /v1/models/{model...}", s.handleOpenAIModel)
@@ -55,10 +61,12 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	public.HandleFunc("GET /v1/files/{file}", s.handleFileGet)
 	public.HandleFunc("GET /v1/files/{file}/content", s.handleFileContent)
 	public.HandleFunc("DELETE /v1/files/{file}", s.handleFileDelete)
-	public.HandleFunc("POST /v1beta/interactions", s.handleInteraction)
-	public.HandleFunc("GET /v1beta/interactions/{id}", s.handleInteractionGet)
-	public.HandleFunc("DELETE /v1beta/interactions/{id}", s.handleInteractionDelete)
-	public.HandleFunc("POST /v1beta/interactions/{id}/cancel", s.handleInteractionCancel)
+	for _, prefix := range []string{"/v1", "/v1beta"} {
+		public.HandleFunc("POST "+prefix+"/interactions", s.handleInteraction)
+		public.HandleFunc("GET "+prefix+"/interactions/{id}", s.handleInteractionGet)
+		public.HandleFunc("DELETE "+prefix+"/interactions/{id}", s.handleInteractionDelete)
+		public.HandleFunc("POST "+prefix+"/interactions/{id}/cancel", s.handleInteractionCancel)
+	}
 	public.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
 	public.HandleFunc("POST /v1/messages/count_tokens", s.handleAnthropicCountTokens)
 	public.HandleFunc("GET /v1beta/models", s.handleGeminiModels)
@@ -68,6 +76,7 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	public.HandleFunc("GET /v1beta/files", s.handleGeminiFileList)
 	public.HandleFunc("GET /v1beta/files/{file}", s.handleGeminiFileGet)
 	public.HandleFunc("DELETE /v1beta/files/{file}", s.handleGeminiFileDelete)
+	public.HandleFunc("/", writeRouteNotFound)
 
 	keys := func() []string {
 		var keys []string
@@ -83,6 +92,9 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	root.Handle("/v1/", handler)
 	root.Handle("/v1beta/", handler)
 	root.Handle("/upload/", corsMiddleware(s.geminiUploadHandler(handler)))
+	if options.MediaDir != "" {
+		root.Handle("GET /media/{file}", corsMiddleware(http.HandlerFunc(s.handleMedia)))
+	}
 	return root
 }
 

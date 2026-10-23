@@ -14,9 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -66,7 +67,7 @@ func dispatch(ctx context.Context, args []string) (bool, error) {
 	case "status":
 		return true, statusCommand(ctx, args[1:])
 	case "version":
-		fmt.Println(version())
+		fmt.Println(app.Version())
 		return true, nil
 	}
 	return true, fmt.Errorf("未知子命令 %q，可用：serve、login、import、switch、accounts、status、version", args[0])
@@ -75,13 +76,11 @@ func dispatch(ctx context.Context, args []string) (bool, error) {
 // options 是各子命令共用的启动参数
 type options struct {
 	overrides config.Overrides
-	proxy     string
 }
 
 // bind 在 flags 上注册 --listen、--auth、--runtime 与 --proxy
 func (o *options) bind(flags *flag.FlagSet) {
 	o.overrides.BindFlags(flags)
-	flags.StringVar(&o.proxy, "proxy", "", "上游代理地址，覆盖 .env 的 PROXY")
 }
 
 // load 读取当前目录的 .env 并应用命令行覆盖
@@ -90,13 +89,10 @@ func (o options) load() (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	o.overrides.Apply(&cfg)
-	if o.proxy != "" {
-		if err := config.ValidateProxy(o.proxy); err != nil {
-			return config.Config{}, err
-		}
-		cfg.Proxy = o.proxy
+	if err := config.ValidateProxies(o.overrides.Proxy); err != nil {
+		return config.Config{}, err
 	}
+	o.overrides.Apply(&cfg)
 	return cfg, nil
 }
 
@@ -114,7 +110,7 @@ func proxyOf(live *atomic.Pointer[config.Config]) antigravity.Proxy {
 	}
 }
 
-// serveCommand 解析 serve 的参数并运行服务，openDefault 为 --open-ui 的默认值
+// serveCommand 解析 serve 的参数并运行服务，openDefault 为 --open-ui 的默认值；在线更新完成后以原参数启动新版本
 func serveCommand(ctx context.Context, args []string, openDefault bool) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	var o options
@@ -127,11 +123,33 @@ func serveCommand(ctx context.Context, args []string, openDefault bool) error {
 	if err != nil {
 		return err
 	}
-	return serve(ctx, "web", cfg, o.overrides, *openUI)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var updated atomic.Bool
+	err = serve(ctx, "web", cfg, o.overrides, *openUI, func() { updated.Store(true); cancel() })
+	if !updated.Load() {
+		return err
+	}
+	return relaunch(args)
 }
 
-// serve 装配日志、账本、账户库与服务，在 cfg.Listen 上运行到 ctx 结束
-func serve(ctx context.Context, host string, cfg config.Config, overrides config.Overrides, openUI bool) error {
+// relaunch 以 serve 子命令与原参数启动替换后的可执行文件且不再打开管理端：Windows 上新进程沿用当前控制台，其他系统原地替换进程
+func relaunch(args []string) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	args = append(append([]string{"serve"}, args...), "--open-ui=false")
+	if runtime.GOOS == "windows" {
+		command := exec.Command(executable, args...)
+		command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return command.Start()
+	}
+	return syscall.Exec(executable, append([]string{executable}, args...), os.Environ())
+}
+
+// serve 装配日志、账本、账户库与服务，在 cfg.Listen 上运行到 ctx 结束，restart 在在线更新安装完成后调用
+func serve(ctx context.Context, host string, cfg config.Config, overrides config.Overrides, openUI bool, restart func()) error {
 	live := liveOf(cfg)
 	logger, err := logging.New(filepath.Join(cfg.RuntimeDir, "logs"), cfg.LogLevel, cfg.LogFormat, cfg.LogFile, cfg.LogMaxTotalMB)
 	if err != nil {
@@ -157,7 +175,7 @@ func serve(ctx context.Context, host string, cfg config.Config, overrides config
 	if openUI {
 		go openWhenReady(ctx, cfg.Listen)
 	}
-	return app.Serve(ctx, live, app.Deps{Service: svc, Store: store, Ledger: ledger, Logger: logger, Overrides: overrides, Host: host, UI: webui.Handler()})
+	return app.Serve(ctx, live, app.Deps{Service: svc, Store: store, Ledger: ledger, Logger: logger, Overrides: overrides, Host: host, UI: webui.Handler(), Restart: restart})
 }
 
 // openWhenReady 等管理 API 可访问后用系统浏览器打开管理端
@@ -182,10 +200,15 @@ func loginCommand(ctx context.Context, args []string) error {
 	var o options
 	o.bind(flags)
 	code := flags.Bool("code", false, "打印授权链接并粘贴授权码，用于没有浏览器的环境")
+	cloud := flags.Bool("cloud", false, "以 Continue with Google Cloud 的企业 WIF 方式登录")
+	provider := flags.String("provider", "", "企业 WIF 登录的 provider 名")
 	remote := flags.String("remote", "", "把账户添加到远程服务，值为其管理端地址，例如 http://server:8017")
 	token := flags.String("token", "", "远程服务管理端生成的配对令牌")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *cloud && (*remote != "" || *code) {
+		return errors.New("--cloud 在本机以浏览器登录并写入本机账户库，不能与 --remote、--code 同时使用")
 	}
 	if *remote != "" && *token == "" {
 		return errors.New("--remote 需要同时提供 --token")
@@ -195,6 +218,30 @@ func loginCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	proxy := proxyOf(liveOf(cfg))
+	device := antigravity.NewLoginDevice()
+	if *cloud {
+		login, err := antigravity.LoginWIF(ctx, *provider, proxy, func(link string) error {
+			fmt.Println("在浏览器中完成 Continue with Google Cloud 登录：")
+			fmt.Println(link)
+			return openBrowser(link)
+		})
+		if err != nil {
+			return err
+		}
+		store, err := auth.Open(cfg.AuthDir, proxy)
+		if err != nil {
+			return err
+		}
+		account, err := store.AddWIF(ctx, login, device)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("已添加企业账户 %s\n", account.Email)
+		return nil
+	}
+	prelogin, stop := context.WithCancel(ctx)
+	defer stop()
+	go antigravity.NewPrelogin(device, proxy).Run(prelogin)
 	var authorized *oauth2.Token
 	if *code {
 		authorized, err = antigravity.LoginTerminal(ctx, proxy, promptCode)
@@ -205,6 +252,7 @@ func loginCommand(ctx context.Context, args []string) error {
 			return openBrowser(link)
 		})
 	}
+	stop()
 	if err != nil {
 		return err
 	}
@@ -215,7 +263,7 @@ func loginCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	account, err := store.Add(ctx, authorized)
+	account, err := store.AddWithDevice(ctx, authorized, device)
 	if err != nil {
 		return err
 	}
@@ -433,12 +481,4 @@ func loopback(listen string) string {
 		host = "127.0.0.1"
 	}
 	return net.JoinHostPort(host, port)
-}
-
-// version 返回构建时记录的模块版本
-func version() string {
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
-		return info.Main.Version
-	}
-	return "(devel)"
 }

@@ -1,5 +1,3 @@
-.git
-.github
 web/node_modules
 internal/webui/dist
 auth
@@ -9,4 +7,3 @@ runtime
 *.log
 antigravity2api
 dist
-build

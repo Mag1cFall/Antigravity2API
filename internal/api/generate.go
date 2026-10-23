@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +26,7 @@ type generationResult struct {
 	media         []antigravity.Blob
 	usage         *antigravity.Usage
 	finishReason  string
+	finishMessage string
 	stopSequence  string
 	providerModel string
 	grounding     *antigravity.Grounding
@@ -69,7 +69,7 @@ func (result *generationResult) apply(event antigravity.Event) error {
 	case antigravity.EventGrounding:
 		result.grounding = event.Grounding
 	case antigravity.EventFinish:
-		result.finishReason = event.FinishReason
+		result.finishReason, result.finishMessage = event.FinishReason, event.FinishMessage
 		result.stopSequence = event.StopSequence
 		result.finished = true
 	}
@@ -180,17 +180,8 @@ func consumeEventsWithHeartbeat(
 	}
 }
 
-// mediaMarkdown 把内联媒体写成 data URL 形式的 Markdown，图片用图片语法
-func mediaMarkdown(media antigravity.Blob) string {
-	url := "data:" + media.MIME + ";base64," + base64.StdEncoding.EncodeToString(media.Data)
-	if strings.HasPrefix(media.MIME, "image/") {
-		return "![image](" + url + ")"
-	}
-	return "[media](" + url + ")"
-}
-
 // renderedText 按事件顺序拼接正文与媒体 Markdown，媒体前后各起一行
-func renderedText(events []antigravity.Event) string {
+func renderedText(events []antigravity.Event, media mediaOutput) string {
 	var content strings.Builder
 	for _, event := range events {
 		switch event.Kind {
@@ -200,7 +191,7 @@ func renderedText(events []antigravity.Event) string {
 			if content.Len() > 0 && !strings.HasSuffix(content.String(), "\n") {
 				content.WriteByte('\n')
 			}
-			content.WriteString(mediaMarkdown(*event.Media) + "\n")
+			content.WriteString(media.markdown(*event.Media) + "\n")
 		}
 	}
 	return content.String()
@@ -230,7 +221,12 @@ func clientSession(r *http.Request, values ...string) string {
 	return requestAPIKey(r) + "\x00"
 }
 
-// functionResultContent 把工具结果转成函数结果内容与媒体：字符串与其他 JSON 原样保留；内容块数组中带 text 的块以换行相连写成 JSON 字符串，其余块由 parse 转成函数结果的媒体 part
+// headerSession 返回 Images 与 Audio 请求的会话分区，客户端会话标识只取 session_id 与 conversation_id 请求头
+func headerSession(r *http.Request) string {
+	return clientSession(r, r.Header.Get("session_id"), r.Header.Get("conversation_id"))
+}
+
+// functionResultContent 把工具结果转成函数结果内容与媒体：字符串与其他 JSON 原样保留；内容块数组中带 text 的块与 parse 转出的文本以换行相连写成 JSON 字符串，其余块由 parse 转成函数结果的媒体 part
 func functionResultContent(raw json.RawMessage, parse func(json.RawMessage) ([]antigravity.Part, error)) (json.RawMessage, []antigravity.Part, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return json.RawMessage(`""`), nil, nil
@@ -243,24 +239,29 @@ func functionResultContent(raw json.RawMessage, parse func(json.RawMessage) ([]a
 		return raw, nil, nil
 	}
 	var texts []string
-	var others []json.RawMessage
+	var media []antigravity.Part
 	for _, block := range blocks {
 		var text struct {
 			Text *string `json:"text"`
 		}
 		if json.Unmarshal(block, &text) == nil && text.Text != nil {
 			texts = append(texts, *text.Text)
-		} else {
-			others = append(others, block)
+			continue
+		}
+		parts, err := parse(json.RawMessage("[" + string(block) + "]"))
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, part := range parts {
+			if part.Text != "" {
+				texts = append(texts, part.Text)
+			} else {
+				media = append(media, part)
+			}
 		}
 	}
 	output, _ := json.Marshal(strings.Join(texts, "\n"))
-	if len(others) == 0 {
-		return output, nil, nil
-	}
-	encoded, _ := json.Marshal(others)
-	parts, err := parse(encoded)
-	return output, parts, err
+	return output, media, nil
 }
 
 // systemReminder 把对话中的 system 消息写成 system-reminder 文本 part

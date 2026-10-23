@@ -2,19 +2,21 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
-// citation 表示正文中一段文字引用的一个网页来源，Start 与 End 为字符下标
+// citation 表示正文中一段文字引用的一个网页来源，Start 与 End 为字符下标，Offset 为 Text 的字节下标
 type citation struct {
-	URL   string
-	Title string
-	Text  string
-	Start int
-	End   int
+	URL    string
+	Title  string
+	Text   string
+	Offset int
+	Start  int
+	End    int
 }
 
 // groundingCitations 把搜索来源对应到正文区间，片段按出现顺序在正文中查找，不在正文中的片段跳过
@@ -34,7 +36,7 @@ func groundingCitations(text string, grounding *antigravity.Grounding) []citatio
 				continue
 			}
 			web := grounding.GroundingChunks[index].Web
-			citations = append(citations, citation{URL: web.URI, Title: web.Title, Text: text[start:end], Start: utf8.RuneCountInString(text[:start]), End: utf8.RuneCountInString(text[:end])})
+			citations = append(citations, citation{URL: web.URI, Title: web.Title, Text: text[start:end], Offset: start, Start: utf8.RuneCountInString(text[:start]), End: utf8.RuneCountInString(text[:end])})
 		}
 	}
 	return citations
@@ -71,25 +73,41 @@ func responsesAnnotations(text string, grounding *antigravity.Grounding) []any {
 	return annotations
 }
 
-// holdUntilGrounding 返回声明搜索时的写出函数：首个正文起暂存事件，直到搜索来源或结束事件到达，先写出搜索来源再补发暂存的事件，使搜索结果排在正文之前
-func holdUntilGrounding(live func(antigravity.Event) error) func(antigravity.Event) error {
+// interactionAnnotations 返回 Interactions text 内容的 url_citation 注释，下标按字节计
+func interactionAnnotations(text string, grounding *antigravity.Grounding) []map[string]any {
+	var annotations []map[string]any
+	for _, item := range groundingCitations(text, grounding) {
+		annotations = append(annotations, map[string]any{"type": "url_citation", "url": item.URL, "title": item.Title, "start_index": item.Offset, "end_index": item.Offset + len(item.Text)})
+	}
+	return annotations
+}
+
+// holdUntilGrounding 返回声明搜索时的写出函数与补发函数：首个正文起暂存事件，直到搜索来源或结束事件到达，先写出搜索来源再补发暂存的事件，使搜索结果排在正文之前；生成中途失败时由补发函数写出暂存的事件
+func holdUntilGrounding(live func(antigravity.Event) error) (func(antigravity.Event) error, func() error) {
 	var held []antigravity.Event
 	holding, released := false, false
-	return func(event antigravity.Event) error {
+	release := func() error {
+		released = true
+		for _, previous := range held {
+			if err := live(previous); err != nil {
+				return err
+			}
+		}
+		held = nil
+		return nil
+	}
+	emit := func(event antigravity.Event) error {
 		switch {
 		case released:
 			return live(event)
 		case event.Kind == antigravity.EventGrounding || event.Kind == antigravity.EventFinish:
-			released = true
 			if event.Kind == antigravity.EventGrounding {
 				if err := live(event); err != nil {
 					return err
 				}
 			}
-			for _, previous := range held {
-				if err := live(previous); err != nil {
-					return err
-				}
+			if err := release(); err != nil {
+				return err
 			}
 			if event.Kind == antigravity.EventFinish {
 				return live(event)
@@ -102,6 +120,49 @@ func holdUntilGrounding(live func(antigravity.Event) error) func(antigravity.Eve
 		}
 		return live(event)
 	}
+	return emit, release
+}
+
+// searchOptions 转换搜索工具的上下文大小、用户位置与来源站点，都没有时返回 nil
+func searchOptions(size string, location json.RawMessage, allowed, blocked []string) (*antigravity.SearchOptions, error) {
+	switch size {
+	case "", "low", "medium", "high":
+	default:
+		return nil, fmt.Errorf("search_context_size must be low, medium or high")
+	}
+	options := &antigravity.SearchOptions{ContextSize: size, AllowedDomains: allowed, BlockedDomains: blocked}
+	if rawJSONConfigured(location) {
+		type place struct {
+			City     string `json:"city"`
+			Region   string `json:"region"`
+			Country  string `json:"country"`
+			Timezone string `json:"timezone"`
+		}
+		var value struct {
+			place
+			Approximate *place `json:"approximate"`
+		}
+		if err := json.Unmarshal(location, &value); err != nil {
+			return nil, fmt.Errorf("user_location must be an object")
+		}
+		if value.Approximate != nil {
+			value.place = *value.Approximate
+		}
+		var parts []string
+		for _, part := range []string{value.City, value.Region, value.Country} {
+			if part != "" {
+				parts = append(parts, part)
+			}
+		}
+		options.Location = strings.Join(parts, ", ")
+		if value.Timezone != "" {
+			options.Location = strings.TrimPrefix(options.Location+"; time zone "+value.Timezone, "; ")
+		}
+	}
+	if options.ContextSize == "" && options.Location == "" && len(allowed) == 0 && len(blocked) == 0 {
+		return nil, nil
+	}
+	return options, nil
 }
 
 // searchOnly 判断请求声明了 Google 搜索且没有函数，此时上游输出搜索来源

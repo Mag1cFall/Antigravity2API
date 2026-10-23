@@ -103,7 +103,7 @@ function KeyDialog({
       )}
       <DialogContent
         title={editing ? fill(m.editKeyTitle, { index: index + 1 }) : m.addKey}
-        description={m.keyDialogHint}
+        description={editing ? m.editKeyHint : m.addKeyHint}
         closeLabel={app.closeDialog}
         footer={
           <>

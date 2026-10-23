@@ -122,7 +122,7 @@ func parameters(config antigravity.GenerationConfig) string {
 		text(config.Temperature), text(config.TopP), cmp.Or(config.ReasoningEffort, "-"), integer(config.ThinkingBudget), integer(config.MaxOutputTokens))
 }
 
-// recordPublic 为通过 API key 校验的 POST 请求建立 Trace、REQUEST_TIMEOUT 上限与停止入口，结束后写入请求账本并推送请求事件与日志；Responses 后台请求的 context 不随客户端连接关闭而取消
+// recordPublic 为通过 API key 校验的 POST 请求建立 Trace 与停止入口，结束后写入请求账本并推送请求事件与日志；Responses 后台请求的 context 不随客户端连接关闭而取消
 func (s *server) recordPublic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.live.Load()
@@ -135,8 +135,9 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		id := logging.RequestID(r.Context())
 		trace := requestdb.NewTrace(started, requestdb.Row{
 			ID: id, ClientRequestID: r.Header.Get("X-Request-ID"), Protocol: protocolOf(r.URL.Path), Path: r.URL.Path,
-			APIKey: key, ClientIP: s.clientIP(r), UserAgent: r.UserAgent(), PromptTier: cfg.SystemPrompt,
+			APIKey: key, ClientIP: clientIP(r), UserAgent: r.UserAgent(), PromptTier: cfg.SystemPrompt,
 		})
+		trace.Watch(s.events.begin)
 		body, _ := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		trace.SetRequest(probe(r.URL.Path, body))
@@ -146,8 +147,6 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		}
 		ctx, cancel := context.WithCancelCause(base)
 		defer cancel(nil)
-		ctx, stop := context.WithTimeoutCause(ctx, cfg.RequestTimeout, requestdb.ErrRequestTimeout)
-		defer stop()
 		active := &activeRequest{trace: trace, cancel: cancel}
 		s.events.track(id, active)
 		capture := s.ledger.BodyCapture()

@@ -21,6 +21,8 @@ const (
 	officialFile = "jetski-standalone-oauth-token"
 	// officialMarker 为 ~/.gemini/cache 下的标记文件，修改时间在 1 小时内时官方客户端改用文件保存凭据
 	officialMarker = "antigravity-keyring-unavailable"
+	// cliFile 为官方 agy CLI 在系统凭据库不可用时保存凭据的会话文件，相对 ~/.gemini
+	cliFile = "antigravity-cli/antigravity-oauth-token"
 )
 
 // officialCredential 表示官方客户端保存的凭据 JSON
@@ -66,7 +68,7 @@ func SwitchOfficial(store *Store, id string) error {
 	return startOfficial(app, args)
 }
 
-// writeOfficial 按官方客户端登录后保存的格式写入凭据：keyring 不可用标记 1 小时内有效时写 ~/.gemini/jetski-standalone-oauth-token，系统凭据库已有可读凭据时一并更新（官方客户端优先读取它），否则写系统凭据库；系统凭据库不可写时与官方客户端一样写入标记并改写该文件
+// writeOfficial 按官方客户端登录后保存的格式写入凭据：keyring 不可用标记 1 小时内有效时写 ~/.gemini/jetski-standalone-oauth-token，系统凭据库已有可读凭据时一并更新（官方客户端优先读取它），否则写系统凭据库；系统凭据库不可写时与官方客户端一样写入标记并改写该文件；agy CLI 的会话文件存在时同样改写
 func writeOfficial(token *oauth2.Token) error {
 	data, err := json.Marshal(officialCredential{
 		Token:      oauth2.Token{AccessToken: token.AccessToken, TokenType: token.Type(), RefreshToken: token.RefreshToken, Expiry: token.Expiry},
@@ -78,6 +80,12 @@ func writeOfficial(token *oauth2.Token) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
+	}
+	cli := filepath.Join(home, ".gemini", filepath.FromSlash(cliFile))
+	if _, err := os.Stat(cli); err == nil {
+		if err := os.WriteFile(cli, data, 0o600); err != nil {
+			return err
+		}
 	}
 	if marker, err := os.Stat(filepath.Join(home, ".gemini", "cache", officialMarker)); err == nil && time.Since(marker.ModTime()) < time.Hour {
 		if err := os.WriteFile(filepath.Join(home, ".gemini", officialFile), data, 0o600); err != nil {

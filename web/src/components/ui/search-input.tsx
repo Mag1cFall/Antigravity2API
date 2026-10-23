@@ -16,10 +16,15 @@ export function SearchInput({ className, ...props }: ComponentProps<'input'>) {
         aria-hidden
         className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-foreground-muted"
       />
-      <Input ref={ref} type="search" className="pr-8 pl-8" {...props} />
+      <Input
+        ref={ref}
+        type="search"
+        className="pr-8 pl-8 max-sm:pr-3 pointer-coarse:pr-3"
+        {...props}
+      />
       <kbd
         aria-hidden
-        className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-sm border border-border px-1 font-mono text-xs text-foreground-subtle pointer-coarse:hidden"
+        className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-sm border border-border px-1 font-mono text-xs text-foreground-subtle max-sm:hidden pointer-coarse:hidden"
       >
         /
       </kbd>

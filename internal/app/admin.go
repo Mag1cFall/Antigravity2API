@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/Mag1cFall/Antigravity2API/internal/auth"
 	"github.com/Mag1cFall/Antigravity2API/internal/config"
+	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
@@ -34,6 +34,10 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("POST /api/session", s.login)
 	mux.HandleFunc("DELETE /api/session", s.logout)
 	mux.HandleFunc("GET /api/status", s.getStatus)
+	mux.HandleFunc("GET /api/update", s.getUpdate)
+	mux.HandleFunc("GET /api/proxies", s.listProxies)
+	mux.HandleFunc("POST /api/proxies/check", s.checkProxies)
+	mux.HandleFunc("POST /api/update", s.postUpdate)
 	mux.HandleFunc("GET /api/accounts", s.listAccounts)
 	mux.HandleFunc("PATCH /api/accounts/{id}", s.updateAccount)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
@@ -68,16 +72,12 @@ func (s *server) admin() http.Handler {
 
 // getStatus 返回宿主、版本、监听地址、启动时间、模拟的官方客户端版本与官方更新清单中的最新版本，尚未读到更新清单时最新版本为空
 func (s *server) getStatus(w http.ResponseWriter, _ *http.Request) {
-	version := "(devel)"
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
-		version = info.Main.Version
-	}
 	latest := ""
 	if value := s.latest.Load(); value != nil {
 		latest = *value
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"host": s.deps.Host, "version": version, "listen": s.boot.Listen, "started_at": s.started,
+		"host": s.deps.Host, "version": Version(), "listen": s.boot.Listen, "started_at": s.started,
 		"client_version": antigravity.ClientVersion, "latest_version": latest,
 	})
 }
@@ -107,7 +107,7 @@ func (s *server) stored(id string) *auth.Account {
 	return nil
 }
 
-// updateAccount 启用或停用账户、设置账户代理与调度优先级并在后台刷新账户池，代理变化的账户在刷新时重新初始化
+// updateAccount 启用或停用账户、设置账户代理、调度优先级、备注名与 AI 积分超额使用并在后台刷新账户池，代理变化的账户在刷新时重新初始化
 func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Enabled *bool `json:"enabled"`
@@ -115,6 +115,10 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		Proxy *string `json:"proxy"`
 		// Priority 为调度优先级，越大越先使用
 		Priority *int `json:"priority"`
+		// Label 为备注名，空串时清除
+		Label *string `json:"label"`
+		// AICredits 为真时额度用尽后以 AI 积分继续生成
+		AICredits *bool `json:"ai_credits"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -127,7 +131,7 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Proxy != nil {
 		proxy := strings.TrimSpace(*input.Proxy)
-		if err := config.ValidateProxy(proxy); err != nil {
+		if err := config.ValidateProxy(proxy); err != nil && proxy != proxypool.Direct {
 			writeError(w, http.StatusBadRequest, "invalid_proxy", err.Error())
 			return
 		}
@@ -138,6 +142,12 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Priority != nil {
 		stored.Priority = *input.Priority
+	}
+	if input.Label != nil {
+		stored.Label = strings.TrimSpace(*input.Label)
+	}
+	if input.AICredits != nil {
+		stored.AICredits = *input.AICredits
 	}
 	if err := s.deps.Store.Save(stored); err != nil {
 		writeError(w, http.StatusInternalServerError, "account_update_failed", err.Error())
@@ -155,6 +165,12 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Priority != nil {
 		slog.InfoContext(r.Context(), "账户优先级已设置 | 优先级="+strconv.Itoa(stored.Priority), "source", stored.ID)
+	}
+	if input.Label != nil {
+		slog.InfoContext(r.Context(), "账户备注名已设置 | 备注名="+stored.Label, "source", stored.ID)
+	}
+	if input.AICredits != nil {
+		slog.InfoContext(r.Context(), "账户 AI 积分超额使用已设置 | 开启="+strconv.FormatBool(stored.AICredits), "source", stored.ID)
 	}
 	s.refreshLater()
 	item, _ := s.findAccount(stored.ID)
@@ -527,4 +543,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 // writeError 写出 {"error":{"code","message"}} 错误响应
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
+// listProxies 返回 PROXY 代理池中每个代理的状态与绑定的账户
+func (s *server) listProxies(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"proxies": s.deps.Service.ProxyStatus()})
+}
+
+// checkProxies 立即检测代理池并返回检测后的状态，管理端断开时检测照常完成
+func (s *server) checkProxies(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"proxies": s.deps.Service.CheckProxies(context.WithoutCancel(r.Context()))})
 }

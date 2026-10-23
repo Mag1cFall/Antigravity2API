@@ -18,7 +18,7 @@ import { Callout } from '@/components/ui/callout'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page'
 import { ErrorState, Loading } from '@/components/ui/states'
-import { StatCards } from '@/components/ui/stats'
+import { dots, StatCards } from '@/components/ui/stats'
 import { useRefreshAccounts } from '@/features/accounts/actions'
 import { AddAccountButton } from '@/features/accounts/AddAccountDialog'
 import { accountMessages } from '@/features/accounts/messages'
@@ -245,11 +245,13 @@ function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
       value: percent(value),
       detail:
         value === null
-          ? m.quotaNone
-          : fill(m.quotaDetail, {
-              short: percent(windowAverage(pools, group, '5h')),
-              weekly: percent(windowAverage(pools, group, 'weekly')),
-            }),
+          ? [m.quotaNone]
+          : dots(
+              fill(m.quotaDetail, {
+                short: percent(windowAverage(pools, group, '5h')),
+                weekly: percent(windowAverage(pools, group, 'weekly')),
+              }),
+            ),
     }
   }
   const gemini = quotaStat('gemini')
@@ -265,7 +267,7 @@ function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
             tone: 'info',
             value:
               formatNumber(count('ready'), locale) + ' / ' + formatNumber(accounts.length, locale),
-            detail: notReady.length ? notReady.join(' · ') : m.accountsAllReady,
+            detail: notReady.length ? notReady : [m.accountsAllReady],
           },
           {
             key: 'gemini',
@@ -281,7 +283,7 @@ function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
             icon: <TriangleAlert size={16} />,
             tone: low > 0 ? 'warning' : 'success',
             value: formatNumber(low, locale),
-            detail: m.lowDetail,
+            detail: [m.lowDetail],
           },
           {
             key: 'requests',
@@ -290,11 +292,13 @@ function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
             tone: 'info',
             value: totals ? formatNumber(totals.requests, locale) : '—',
             detail: totals
-              ? fill(m.requestsDetail, {
-                  failed: formatNumber(totals.failed, locale),
-                  cost: formatCost(totals.cost_usd, locale),
-                })
-              : undefined,
+              ? dots(
+                  fill(m.requestsDetail, {
+                    failed: formatNumber(totals.failed, locale),
+                    cost: formatCost(totals.cost_usd, locale),
+                  }),
+                )
+              : [],
           },
         ]}
       />
@@ -324,15 +328,23 @@ export function DashboardPage() {
   const a = useMessages(accountMessages)
   const [guiding, setGuiding] = useState(false)
   if (accounts.data?.accounts.length === 0 && !guiding) setGuiding(true)
-  if (accounts.isPending) return <Loading label={app.loading} />
-  if (accounts.isError) {
+  if (accounts.isPending || accounts.isError) {
     return (
-      <ErrorState
-        title={m.accountsFailed}
-        error={accounts.error}
-        retryLabel={app.retry}
-        onRetry={() => void accounts.refetch()}
-      />
+      <>
+        <PageHeader title={m.title} />
+        <Card>
+          {accounts.isPending ? (
+            <Loading label={app.loading} />
+          ) : (
+            <ErrorState
+              title={m.accountsFailed}
+              error={accounts.error}
+              retryLabel={app.retry}
+              onRetry={() => void accounts.refetch()}
+            />
+          )}
+        </Card>
+      </>
     )
   }
   const list = accounts.data.accounts

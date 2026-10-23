@@ -12,7 +12,7 @@ Antigravity2API 的上游请求以官方客户端的现场为准。本文说明�
 | language server | `resources/bin/language_server[.exe]` | OAuth 登录与刷新、cloudcode `v1internal`、userinfo、头像、unleash、clearcut、`aicode.googleapis.com` 的 `fetchConfig` 与 gRPC 语音转写 | `internal/antigravity` |
 | 界面 | LS 内嵌的网页包 | 只访问本机 LS | 管理端（`web/`） |
 
-LS 的出站请求全部使用 Go 标准库：cloudcode 请求为 HTTP/1.1；userinfo 使用 Go 默认 User-Agent；头像经 HTTP/2；gRPC 使用 grpc-go。产品以同一套 Go 标准库发送这些请求，TLS ClientHello 与 HTTP 形态由 Go 版本决定，官方 LS 的 Go 工具链升级后需要重新对照（第 4 节）。
+LS 的出站请求全部使用 Go 标准库：cloudcode 请求为 HTTP/1.1；userinfo 使用 Go 默认 User-Agent；头像经 HTTP/2；gRPC 使用 grpc-go 1.86.0-dev。产品以同一套 Go 标准库发送这些请求，TLS ClientHello 与 HTTP 形态由 Go 版本决定，官方 LS 的 Go 工具链升级后需要重新对照（第 4 节）。
 
 ## 2. 抓包
 
@@ -20,18 +20,27 @@ LS 的出站请求全部使用 Go 标准库：cloudcode 请求为 HTTP/1.1；use
 
 | 项 | 做法 |
 | --- | --- |
-| 代理 | mitmproxy 以 regular 模式开两个端口：LS 经环境变量 `HTTPS_PROXY`、`HTTP_PROXY` 使用一个，Electron 经启动参数 `--proxy-server` 使用另一个，`NO_PROXY=localhost,127.0.0.1` 保留本机连接；按端口区分发送方 |
-| 证书 | mitmproxy 根证书装入系统根证书库（Windows 为 `LocalMachine\Root`），LS 使用系统根证书；抓包结束后移除 |
+| 代理 | mitmproxy regular 模式的两个端口，见表下 |
+| 证书 | mitmproxy 根证书装入系统根证书库，见表下 |
 | 发送进程 | 按连接的本地端口查出发送进程，区分 LS 与 Electron |
-| TLS | mitmproxy 的 `tls_clienthello` 钩子记录每个 ClientHello；同时在回环网卡抓包（Windows 用 Npcap 的 dumpcap），保留原始 TLS 字节供逐字节对照 |
-| 正文 | SSE 响应、gRPC 请求流与响应流逐块保存，记录分块时刻与 gRPC trailer |
-| 界面操作 | 启动参数 `--remote-debugging-port=<端口>` 与 `--inspect=127.0.0.1:<端口>`，经 CDP 操作界面，经 inspector 替换主进程的 `shell.openExternal` 取得登录链接 |
-| 隔离用户目录 | `USERPROFILE`、`HOME`、`APPDATA`、`LOCALAPPDATA` 指向独立目录，Electron 加 `--user-data-dir`；在 `<目录>\.gemini\cache\antigravity-keyring-unavailable` 写入标记后，LS 把 token 保存到 `<目录>\.gemini\jetski-standalone-oauth-token`；系统凭据库已有 `gemini:antigravity` 时 LS 仍读取它，要隔离账户须在没有该凭据的系统用户或虚拟机中运行 |
+| TLS | 记录 ClientHello 并在回环网卡抓包，见表下 |
+| 正文 | SSE 与 gRPC 流逐块保存，见表下 |
+| 界面操作 | 经 CDP 操作界面，经 inspector 取得登录链接 |
+| 隔离用户目录 | 用户目录环境变量指向独立目录 |
+
+- 代理：LS 经环境变量 `HTTPS_PROXY`、`HTTP_PROXY` 使用一个端口，Electron 经启动参数 `--proxy-server` 使用另一个，`NO_PROXY=localhost,127.0.0.1` 保留本机连接；按端口区分发送方
+- 证书：Windows 装入 `LocalMachine\Root`，LS 使用系统根证书；抓包结束后移除
+- TLS：mitmproxy 的 `tls_clienthello` 钩子记录每个 ClientHello；同时在回环网卡抓包（Windows 用 Npcap 的 dumpcap），保留原始 TLS 字节供逐字节对照
+- 正文：SSE 响应、gRPC 请求流与响应流逐块保存，记录分块时刻与 gRPC trailer
+- 界面操作：Electron 启动参数加 `--remote-debugging-port=<端口>` 与 `--inspect=127.0.0.1:<端口>`；经 inspector 替换主进程的 `shell.openExternal`，登录链接由此取得
+- 隔离用户目录：`USERPROFILE`、`HOME`、`APPDATA`、`LOCALAPPDATA` 指向独立目录，Electron 加 `--user-data-dir`
+- 在 `<目录>\.gemini\cache\antigravity-keyring-unavailable` 写入标记后，LS 把 token 保存到 `<目录>\.gemini\jetski-standalone-oauth-token`
+- 系统凭据库已有 `gemini:antigravity` 时 LS 仍读取它；隔离账户在没有该凭据的系统用户或虚拟机中运行
 
 每个 HTTP 交换记录一行：
 
 ```json
-{"sequence": 59, "sender": "language_server", "client": ["127.0.0.1", 61486], "startedAt": 1791960442.96527, "endedAt": 1791960449.91067, "method": "POST", "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", "httpVersion": "HTTP/1.1", "tls": {"sni": "daily-cloudcode-pa.googleapis.com", "alpn": "", "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"}, "requestHeaders": [["Host", "daily-cloudcode-pa.googleapis.com"], ["User-Agent", "antigravity/hub/2.23.0 (aidev_client; os_type=windows; arch=amd64; cl=998057262)"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer <token>"], ["Content-Type", "application/json"], ["Accept-Encoding", "gzip"]], "requestBody": "00059.request.bin", "status": 200, "responseHeaders": [["Content-Type", "text/event-stream"], ["Transfer-Encoding", "chunked"]], "responseBody": "00059.response.sse"}
+{"sequence": 59, "sender": "language_server", "client": ["127.0.0.1", 61486], "startedAt": 1791960442.96527, "endedAt": 1791960449.91067, "method": "POST", "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", "httpVersion": "HTTP/1.1", "tls": {"sni": "daily-cloudcode-pa.googleapis.com", "alpn": "", "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"}, "requestHeaders": [["Host", "daily-cloudcode-pa.googleapis.com"], ["User-Agent", "antigravity/hub/2.25.0 (aidev_client; os_type=windows; arch=amd64; cl=1003374690)"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer <token>"], ["Content-Type", "application/json"], ["Accept-Encoding", "gzip"]], "requestBody": "00059.request.bin", "status": 200, "responseHeaders": [["Content-Type", "text/event-stream"], ["Transfer-Encoding", "chunked"]], "responseBody": "00059.response.sse"}
 ```
 
 请求头保持发送顺序与重复项，正文保存原始字节。对照时比较头集合与顺序、正文字段顺序、分块方式与连接复用，压缩或重新序列化会隐藏这些差异。
@@ -91,26 +100,62 @@ x-app-version: <当前版本>
 user-agent: electron-builder
 ```
 
-服务以官方 Electron 44（Chromium 152）网络栈的形态读取清单（`internal/app/updater.go` 为传输层，`internal/app/version.go` 为请求与节奏）：
+服务以官方 Electron 44（Chromium 152）网络栈的形态读取清单（`internal/app/updater.go` 为传输层，`updater_quic.go` 与 `updater_h3.go` 为 QUIC 与 HTTP/3，`internal/app/version.go` 为请求与节奏）：
 
 | 项 | 取值 |
 | --- | --- |
-| ClientHello | uTLS `Chrome_152_PSK` 去掉扩展 `0xca34`，有缓存的会话时末尾带 `pre_shared_key`；TLS 会话缓存跨连接保留 |
-| HTTP/2 前言之后 | SETTINGS `HEADER_TABLE_SIZE=65536`、`ENABLE_PUSH=0`、`INITIAL_WINDOW_SIZE=6291456`、`MAX_HEADER_LIST_SIZE=262144`，接着连接级 WINDOW_UPDATE 15663105，三者在同一 TLS 记录中 |
+| ClientHello | uTLS `Chrome_152_PSK` 去掉扩展 `0xca34` |
+| HTTP/2 前言之后 | SETTINGS 与连接级 WINDOW_UPDATE，见表下 |
 | 连接 | 一条连接保持到对端关闭或 GOAWAY，TCP keep-alive 45 秒 |
-| HEADERS | 独占、依赖 0、权重 110；伪头依次为 `:method`、`:authority`、`:scheme`、`:path`，`:path` 为不索引字面量，值在 Huffman 更短时用 Huffman |
-| 请求头顺序 | `x-user-staging-id`、`x-app-version`、`user-agent: electron-builder`、`cache-control: no-cache`、`sec-fetch-site: none`、`sec-fetch-mode: no-cors`、`sec-fetch-dest: empty`、`accept-encoding: gzip, deflate, br, zstd`、`accept-language`、`priority: u=4, i` |
+| HEADERS | 独占、依赖 0、权重字节 109 |
+| 伪头顺序 | `:method`、`:authority`、`:scheme`、`:path` |
+| 请求头顺序 | 见表下 |
 | `noCache` | 当前毫秒时间戳的 32 进制 |
-| `x-user-staging-id` | `RUNTIME_DIR/.updaterId` 的内容；文件不存在时以 4096 个随机字节为名称、OID 命名空间生成 UUID v5 并写入 |
-| `accept-language` | 系统语言（Windows 为 `GetUserDefaultLocaleName`，其他系统依次取 `LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG`）按 Chromium 规则解析为 Electron 随附的 55 个语言包之一：精确匹配，再按地区回退（`es-*` 为 `es-419`，`pt-*` 为 `pt-PT`，`zh-HK`、`zh-MO` 为 `zh-TW`，其余 `zh-*` 为 `zh-CN`，`en-LR`、`en-PH` 为 `en-US`，其余 `en-*` 为 `en-GB`，其他语言回退到语言代码），再按语言代码查别名（`en`→`en-US`、`iw`→`he`、`no`→`nb`、`pt`→`pt-BR`、`tl`→`fil`、`zh`→`zh-CN`），都不成时为 `en-US` |
-| 代理 | 按 `PROXY` 与系统代理选择；经 HTTP 代理时 CONNECT 带 `Host`、`Proxy-Connection: keep-alive` 与 User-Agent `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/<ClientVersion> Chrome/152.0.7977.78 Electron/44.3.0 Safari/537.36` |
-| 时限与解析 | 单次读取 1 分钟；非 200 为失败；正文中第一行 `version:` 之后的值为最新版本 |
+| `x-user-staging-id` | `RUNTIME_DIR/.updaterId` 的内容 |
+| `accept-language` | 系统语言解析出的语言包名，规则见下方 |
+| 代理 | 按 `PROXY` 与系统代理选择；经代理时只走 TCP |
+| HTTP/3 替代服务 | 响应 `alt-svc` 中的 `h3=":443"`，有效期取 `ma`，缺省 24 小时 |
+| 竞速 | 不经代理且替代服务未过期时，先发出 QUIC 的 Initial，再使用现有 HTTP/2 连接或开始 TCP，先就绪的连接承载请求；QUIC 连接收到 HANDSHAKE_DONE 后才算就绪 |
+| 落后的连接 | QUIC 照常完成握手并发出控制流；TCP 照常完成 TLS 握手，不发 HTTP/2 前言，闲置到下一次读取时关闭 |
+| QUIC Initial | 1250 字节数据报，8 字节 DCID、空 SCID，包号从 1 开始，ClientHello 分布在两个 Initial 中 |
+| HTTP/3 | 控制流 SETTINGS `QPACK_MAX_TABLE_CAPACITY=65536`、`MAX_FIELD_SECTION_SIZE=262144`、`QPACK_BLOCKED_STREAMS=100`、`H3_DATAGRAM=1`；请求前发 PRIORITY_UPDATE，请求头经 QPACK 动态表 |
+| QUIC 空闲 | 30 秒无活动后静默关闭 |
+| 时限与解析 | 单次读取 1 分钟，见表下 |
+
+- HTTP/2 前言之后为 SETTINGS `HEADER_TABLE_SIZE=65536`、`ENABLE_PUSH=0`、`INITIAL_WINDOW_SIZE=6291456`、`MAX_HEADER_LIST_SIZE=262144`，接着连接级 WINDOW_UPDATE 15663105，三者在同一 TLS 记录中
+- HEADERS 帧的优先级字段写入 Go `http2.PriorityParam{Exclusive: true, Weight: 109}`：帧中的权重字节为 109，按 RFC 9113 表示权重 110
+- 请求头顺序为 `x-user-staging-id`、`x-app-version`、`user-agent: electron-builder`、`cache-control: no-cache`、`sec-fetch-site: none`、`sec-fetch-mode: no-cors`、`sec-fetch-dest: empty`、`accept-encoding: gzip, deflate, br, zstd`、`accept-language`、`priority: u=4, i`
+- `.updaterId` 不存在时以 4096 个随机字节为名称、OID 命名空间生成 UUID v5 并写入
+- 非 200 为失败；正文中第一行 `version:` 之后的值为最新版本
+- ClientHello 取 `github.com/bogdanfinn/tls-client` v1.16.0 的 `profiles.Chrome_152_PSK`（TLS 层为 `github.com/bogdanfinn/utls` v1.7.8-barnius），去掉 `0xca34` 扩展；有缓存的会话时末尾带 `pre_shared_key`，TLS 会话缓存跨连接保留
+- `:path` 为不索引字面量；各头的值在 Huffman 编码更短时用 Huffman
+- QUIC 取 `github.com/refraction-networking/uquic` 的 `QUICSpec`（TLS 层为 `github.com/refraction-networking/utls`）：ClientHello 只含 TLS 1.3 的三个密码套件，扩展与传输参数每次连接重新排列，`version_information` 带一个 GREASE 版本，另有一个 GREASE 传输参数与 AES-128-GCM 的 GREASE ECH
+- Initial 按 Chromium `QuicPacketCreator::MultiPacketChaosProtect` 与 `QuicChaosProtector` 布置：第一个 Initial 放 ClientHello 开头 55–86 字节与末尾，第二个放中间；每个包再把 CRYPTO 帧拆成多段，加 2–10 个 PING，PADDING 分散在各帧之间，帧序随机
+- HTTP/3 握手完成后依次打开控制、QPACK 解码器、QPACK 编码器单向流，控制流的 SETTINGS 按标识符升序并带一个 GREASE 设置，其后是一个 GREASE 帧；收到对端 SETTINGS 后发出请求：编码器流设置动态表容量并插入静态表中没有精确匹配的字段，HEADERS 只引用表项，引用动态表的响应头块在解码器流上确认
+- 经 HTTP 代理时 CONNECT 带 `Host`、`Proxy-Connection: keep-alive` 与 User-Agent `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/<ClientVersion> Chrome/152.0.7977.130 Electron/44.4.3 Safari/537.36`
+
+`accept-language` 按 Chromium 规则把系统语言解析为 Electron 随附的 55 个语言包之一：
+
+- 来源：Windows 为 `GetUserDefaultLocaleName`；其他系统取环境变量 `LANGUAGE`、`LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空的，按 `:` 分成多个名称，依次解析，取第一个能解析的
+- 规范化：去掉 `.` 之后的字符集，`_` 换成 `-`，Windows 名称中的排序后缀（如 `es-ES_tradnl`）换成 `@` 变体
+- 精确匹配：与语言包名比较，不区分大小写；带 `@` 的名称只做精确匹配
+- 地区回退：`es-ES` 为 `es`，其余 `es-*` 为 `es-419`；`pt-BR` 为 `pt-BR`，其余 `pt-*` 为 `pt-PT`；`zh-HK`、`zh-MO` 为 `zh-TW`，其余 `zh-*` 为 `zh-CN`；`en-LR`、`en-PH` 为 `en-US`，其余 `en-*` 为 `en-GB`；其他语言回退到语言代码
+- 别名：语言代码 `en` 为 `en-US`、`iw` 为 `he`、`no` 为 `nb`、`pt` 为 `pt-BR`、`tl` 为 `fil`、`zh` 为 `zh-CN`
+- 默认：以上都不成时为 `en-US`
+
+Electron 44 随附的 55 个语言包（`internal/app/locale.go` 的 `electronLocales`）：
+
+```text
+af am ar bg bn ca cs da de el en-GB en-US es es-419 et fa fi fil fr gu
+he hi hr hu id it ja kn ko lt lv ml mr ms nb nl pl pt-BR pt-PT ro
+ru sk sl sr sv sw ta te th tr uk ur vi zh-CN zh-TW
+```
 
 响应中的 `version` 高于 `internal/antigravity` 的 `ClientVersion` 时，管理端提示有新版本。对齐步骤：
 
-1. 下载并安装新版本，记下 `package.json` 的版本与 `language_server --stamp` 的 CL
-2. 更新 `internal/antigravity/client.go` 的 `ClientVersion` 与 `ClientChangelist`
-3. 用 `go version -m` 比较 LS 的 Go 工具链；主版本变化时，用新版本现场的 ClientHello 与产品逐字节对照；Electron 版本变化时，用新版本的更新清单现场对照 `internal/app/updater.go` 的 ClientHello、HTTP/2 帧与 CONNECT 的 User-Agent
+1. 下载并安装新版本，记下 `package.json` 的版本与各系统 `language_server --stamp` 的 CL；灰度版本只对部分 `x-user-staging-id` 返回，换随机标识多次读取各系统的清单可得到下载地址
+2. 更新 `internal/antigravity/client.go` 的 `ClientVersion`、`internal/antigravity/device.go` 的 `changelists` 与 `internal/antigravity/companion.go` 的 `serverRuntimes`（unleash `platformVersion`，取自各系统 `go version -m` 的工具链行）
+3. 用 `go version -m` 比较 LS 的 Go 工具链；主版本变化时，用新版本现场的 ClientHello 与产品逐字节对照；Electron 版本变化时，用新版本的更新清单现场对照 `internal/app/updater.go` 的 ClientHello、HTTP/2 帧与 CONNECT 的 User-Agent，不经代理的现场对照 `updater_quic.go` 的 QUIC Initial 与 `updater_h3.go` 的 HTTP/3 帧
 4. 抓登录、冷启动、空闲与各模型最小请求（第 2 节）
 5. 逐项对照：初始化与冷启动序列、周期请求清单与间隔、信封字段与顺序、`labels`、系统提示各段原文、模型目录字段、伴随请求
 6. 有差异的层按下表修改，并更新 [协议参考](protocol.md)
@@ -118,8 +163,11 @@ user-agent: electron-builder
 | 变化 | 位置 | 是否改码 |
 | --- | --- | --- |
 | 模型增删、档位、上限 | 账户实时目录 | 否 |
-| 版本号与构建号 | `ClientVersion`、`ClientChangelist` | 是 |
+| 版本号、构建号与 Go 运行时 | `ClientVersion`、`changelists`、`serverRuntimes` | 是 |
 | 系统提示段落原文 | `internal/prompt/official.txt` | 是 |
+| 系统提示中随实验开关与远端目录生成的内容 | `official.txt` 的模板字段与 `internal/antigravity` 中的取值，如推荐插件段与插件市场目录 | 是 |
+| 会话 clearcut 事件的执行配置、内置工具、提示段与实验开关名 | `internal/antigravity/session.json` | 是 |
+| 登录前的 clearcut 上报 | `internal/antigravity/prelogin_*.bin.gz` | 是 |
 | 初始化、冷启动或周期请求的顺序与节奏 | `internal/antigravity` 的初始化与伴随请求 | 是 |
 | 信封字段、`labels`、`requestId` 格式 | `internal/antigravity/generate.go` | 是 |
 | SSE 字段或新的 `finishReason` | `DecodeStream` 与四个协议的投影 | 是 |

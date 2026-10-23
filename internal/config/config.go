@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -34,12 +33,15 @@ var Keys = []string{
 	"SYSTEM_PROMPT_SECTIONS",
 	"SYSTEM_PROMPT_WRAP",
 	"MODEL_MAPPING",
+	"MEDIA_OUTPUT",
+	"MEDIA_BASE_URL",
 	"ACCOUNT_CONCURRENCY",
 	"ROUTING_STRATEGY",
 	"PREFER_LOWER_TIER_MODELS",
 	"REQUEST_TIMEOUT",
 	"QUOTA_REFRESH_INTERVAL",
-	"TRUSTED_PROXIES",
+	"QUOTA_RESERVE_PERCENT",
+	"WEEKLY_QUOTA_WARMUP",
 	"LOG_LEVEL",
 	"LOG_FORMAT",
 	"LOG_FILE",
@@ -55,6 +57,9 @@ var RestartKeys = []string{"LISTEN", "AUTH_DIR", "RUNTIME_DIR"}
 
 // SystemPrompts 是系统提示档位：全保留、中等、激进与自定义
 var SystemPrompts = []string{"full", "medium", "aggressive", "custom"}
+
+// MediaOutputs 是 MEDIA_OUTPUT 的取值：inline 以 data URL 内联，url 保存后以本服务链接引用
+var MediaOutputs = []string{"inline", "url"}
 
 // RoutingStrategies 是账户调度策略：轮询与先用满一个账户
 var RoutingStrategies = []string{"round-robin", "fill-first"}
@@ -81,7 +86,11 @@ type Config struct {
 	// SystemPromptWrap 是 custom 档的 user 轮包装方式
 	SystemPromptWrap string
 	// ModelMapping 是客户端模型名到目录模型 ID 的映射，按书写顺序匹配
-	ModelMapping       []ModelAlias
+	ModelMapping []ModelAlias
+	// MediaOutput 是 Chat、Messages 正文与 Images url 格式中生成媒体的输出方式
+	MediaOutput string
+	// MediaBaseURL 是媒体链接使用的服务地址，为空时取请求的地址
+	MediaBaseURL       string
 	AccountConcurrency int
 	RoutingStrategy    string
 	// PreferLowerTierModels 是同优先级内先用套餐低的账户的模型 ID
@@ -89,16 +98,18 @@ type Config struct {
 	RequestTimeout        time.Duration
 	// QuotaRefreshInterval 是后台刷新全部账户额度的间隔，为 0 时不刷新
 	QuotaRefreshInterval time.Duration
-	// TrustedProxies 是可信反向代理的地址段，来自这些地址的请求以 X-Forwarded-For 确定客户端 IP
-	TrustedProxies   []netip.Prefix
-	LogLevel         string
-	LogFormat        string
-	LogFile          bool
-	LogMaxTotalMB    int
-	RequestLogBodies bool
-	AdminAuthEnabled bool
-	AdminUsername    string
-	AdminPassword    string
+	LogLevel             string
+	LogFormat            string
+	LogFile              bool
+	LogMaxTotalMB        int
+	RequestLogBodies     bool
+	AdminAuthEnabled     bool
+	AdminUsername        string
+	AdminPassword        string
+	// QuotaReservePercent 是额度保留比例，额度组剩余比例不高于它时调度视为该组耗尽
+	QuotaReservePercent int
+	// WeeklyQuotaWarmup 为真时在定时额度刷新后为周额度窗口未开始计时的账户发一次最小请求
+	WeeklyQuotaWarmup bool
 }
 
 // Default 返回可直接启动的默认配置
@@ -110,6 +121,7 @@ func Default() Config {
 		SystemPrompt:         "full",
 		SystemPromptSections: []string{"identity", "guidelines", "communication_style"},
 		SystemPromptWrap:     prompt.WrapTime,
+		MediaOutput:          "inline",
 		AccountConcurrency:   2,
 		RoutingStrategy:      "round-robin",
 		RequestTimeout:       5 * time.Minute,
@@ -187,6 +199,9 @@ func (c *Config) Set(values map[string]string) error {
 	if value, ok := values["MODEL_MAPPING"]; ok && err == nil {
 		c.ModelMapping, err = parseModelMapping(value)
 	}
+	text("MEDIA_OUTPUT", &c.MediaOutput)
+	c.MediaOutput = strings.ToLower(c.MediaOutput)
+	text("MEDIA_BASE_URL", &c.MediaBaseURL)
 	integer("ACCOUNT_CONCURRENCY", &c.AccountConcurrency)
 	text("ROUTING_STRATEGY", &c.RoutingStrategy)
 	if value, ok := values["PREFER_LOWER_TIER_MODELS"]; ok {
@@ -194,9 +209,8 @@ func (c *Config) Set(values map[string]string) error {
 	}
 	duration("REQUEST_TIMEOUT", &c.RequestTimeout)
 	duration("QUOTA_REFRESH_INTERVAL", &c.QuotaRefreshInterval)
-	if value, ok := values["TRUSTED_PROXIES"]; ok && err == nil {
-		c.TrustedProxies, err = parsePrefixes(value)
-	}
+	integer("QUOTA_RESERVE_PERCENT", &c.QuotaReservePercent)
+	boolean("WEEKLY_QUOTA_WARMUP", &c.WeeklyQuotaWarmup)
 	text("LOG_LEVEL", &c.LogLevel)
 	c.LogLevel = strings.ToLower(c.LogLevel)
 	text("LOG_FORMAT", &c.LogFormat)
@@ -214,13 +228,6 @@ func (c *Config) Set(values map[string]string) error {
 
 // Values 返回各配置项的 env 文本值
 func (c Config) Values() map[string]string {
-	prefixes := make([]string, len(c.TrustedProxies))
-	for index, prefix := range c.TrustedProxies {
-		prefixes[index] = prefix.String()
-		if prefix.IsSingleIP() {
-			prefixes[index] = prefix.Addr().String()
-		}
-	}
 	return map[string]string{
 		"LISTEN":                   c.Listen,
 		"API_KEYS":                 strings.Join(c.APIKeys, ","),
@@ -231,12 +238,15 @@ func (c Config) Values() map[string]string {
 		"SYSTEM_PROMPT_SECTIONS":   strings.Join(c.SystemPromptSections, ","),
 		"SYSTEM_PROMPT_WRAP":       c.SystemPromptWrap,
 		"MODEL_MAPPING":            formatModelMapping(c.ModelMapping),
+		"MEDIA_OUTPUT":             c.MediaOutput,
+		"MEDIA_BASE_URL":           c.MediaBaseURL,
 		"ACCOUNT_CONCURRENCY":      strconv.Itoa(c.AccountConcurrency),
 		"ROUTING_STRATEGY":         c.RoutingStrategy,
 		"PREFER_LOWER_TIER_MODELS": strings.Join(c.PreferLowerTierModels, ","),
 		"REQUEST_TIMEOUT":          formatDuration(c.RequestTimeout),
 		"QUOTA_REFRESH_INTERVAL":   formatDuration(c.QuotaRefreshInterval),
-		"TRUSTED_PROXIES":          strings.Join(prefixes, ","),
+		"QUOTA_RESERVE_PERCENT":    strconv.Itoa(c.QuotaReservePercent),
+		"WEEKLY_QUOTA_WARMUP":      strconv.FormatBool(c.WeeklyQuotaWarmup),
 		"LOG_LEVEL":                c.LogLevel,
 		"LOG_FORMAT":               c.LogFormat,
 		"LOG_FILE":                 strconv.FormatBool(c.LogFile),
@@ -284,7 +294,7 @@ func (c Config) Validate() error {
 	if c.RuntimeDir == "" {
 		return fmt.Errorf("RUNTIME_DIR 不能为空")
 	}
-	if err := ValidateProxy(c.Proxy); err != nil {
+	if err := ValidateProxies(c.Proxy); err != nil {
 		return err
 	}
 	if !slices.Contains(SystemPrompts, c.SystemPrompt) {
@@ -292,6 +302,14 @@ func (c Config) Validate() error {
 	}
 	if _, err := prompt.New(prompt.TierCustom, prompt.Custom{Sections: c.SystemPromptSections, Wrap: c.SystemPromptWrap}); err != nil {
 		return fmt.Errorf("SYSTEM_PROMPT_SECTIONS 或 SYSTEM_PROMPT_WRAP 无效: %w", err)
+	}
+	if !slices.Contains(MediaOutputs, c.MediaOutput) {
+		return fmt.Errorf("MEDIA_OUTPUT 必须是 %s", strings.Join(MediaOutputs, "、"))
+	}
+	if c.MediaBaseURL != "" {
+		if base, err := url.Parse(c.MediaBaseURL); err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+			return fmt.Errorf("MEDIA_BASE_URL 必须是 http 或 https 地址")
+		}
 	}
 	if c.AccountConcurrency <= 0 {
 		return fmt.Errorf("ACCOUNT_CONCURRENCY 必须是正整数")
@@ -304,6 +322,9 @@ func (c Config) Validate() error {
 	}
 	if c.QuotaRefreshInterval != 0 && c.QuotaRefreshInterval < time.Minute {
 		return fmt.Errorf("QUOTA_REFRESH_INTERVAL 必须是 0 或不小于 1m 的时长")
+	}
+	if c.QuotaReservePercent < 0 || c.QuotaReservePercent > 99 {
+		return fmt.Errorf("QUOTA_RESERVE_PERCENT 必须是 0 到 99 的整数")
 	}
 	if !slices.Contains(LogLevels, c.LogLevel) {
 		return fmt.Errorf("LOG_LEVEL 必须是 %s", strings.Join(LogLevels, "、"))
@@ -320,23 +341,17 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// ProxyURL 返回请求使用的上游代理：PROXY 非空时用它，否则跟随系统代理
+// ProxyURL 返回不属于某个账户的请求使用的上游代理：PROXY 的第一个代理，为空时跟随系统代理
 func (c *Config) ProxyURL(r *http.Request) (*url.URL, error) {
-	if c.Proxy != "" {
-		return url.Parse(c.Proxy)
+	if proxies := c.Proxies(); len(proxies) > 0 {
+		return url.Parse(proxies[0])
 	}
 	return systemProxy(r)
 }
 
-// Trusted 判断地址是否属于可信反向代理
-func (c *Config) Trusted(addr netip.Addr) bool {
-	addr = addr.Unmap()
-	for _, prefix := range c.TrustedProxies {
-		if prefix.Contains(addr) {
-			return true
-		}
-	}
-	return false
+// Proxies 返回 PROXY 中逗号分隔的代理
+func (c *Config) Proxies() []string {
+	return SplitList(c.Proxy)
 }
 
 // Overrides 是本次启动由命令行覆盖的配置项，空值表示未覆盖
@@ -344,13 +359,15 @@ type Overrides struct {
 	Listen     string
 	AuthDir    string
 	RuntimeDir string
+	Proxy      string
 }
 
-// BindFlags 在 flags 上注册 --listen、--auth 与 --runtime
+// BindFlags 在 flags 上注册 --listen、--auth、--runtime 与 --proxy
 func (o *Overrides) BindFlags(flags *flag.FlagSet) {
 	flags.StringVar(&o.Listen, "listen", "", "监听地址，覆盖 LISTEN")
 	flags.StringVar(&o.AuthDir, "auth", "", "账户目录，覆盖 AUTH_DIR")
 	flags.StringVar(&o.RuntimeDir, "runtime", "", "运行数据目录，覆盖 RUNTIME_DIR")
+	flags.StringVar(&o.Proxy, "proxy", "", "上游代理，多个以逗号分隔，覆盖 PROXY")
 }
 
 // Apply 把命令行覆盖写入配置
@@ -363,6 +380,9 @@ func (o Overrides) Apply(c *Config) {
 	}
 	if value := strings.TrimSpace(o.RuntimeDir); value != "" {
 		c.RuntimeDir = value
+	}
+	if value := strings.TrimSpace(o.Proxy); value != "" {
+		c.Proxy = value
 	}
 }
 
@@ -406,6 +426,16 @@ func SplitList(value string) []string {
 	return items
 }
 
+// ValidateProxies 校验逗号分隔的代理列表中的每一项
+func ValidateProxies(value string) error {
+	for _, proxy := range SplitList(value) {
+		if err := ValidateProxy(proxy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ValidateProxy 校验 HTTP、HTTPS 或 SOCKS5 代理 URL，空值表示跟随系统代理
 func ValidateProxy(value string) error {
 	if value == "" {
@@ -416,24 +446,6 @@ func ValidateProxy(value string) error {
 		return fmt.Errorf("代理必须是 http、https 或 socks5 URL")
 	}
 	return nil
-}
-
-// parsePrefixes 解析逗号分隔的 IP 或 CIDR
-func parsePrefixes(value string) ([]netip.Prefix, error) {
-	var prefixes []netip.Prefix
-	for _, item := range SplitList(value) {
-		prefix, err := netip.ParsePrefix(item)
-		if err != nil {
-			addr, addrErr := netip.ParseAddr(item)
-			if addrErr != nil {
-				return nil, fmt.Errorf("TRUSTED_PROXIES 必须是逗号分隔的 IP 或 CIDR: %s", item)
-			}
-			addr = addr.Unmap()
-			prefix = netip.PrefixFrom(addr, addr.BitLen())
-		}
-		prefixes = append(prefixes, prefix.Masked())
-	}
-	return prefixes, nil
 }
 
 // formatDuration 去掉时长文本末尾的零分零秒，例如 5m0s 写作 5m

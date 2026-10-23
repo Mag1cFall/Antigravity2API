@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 
 // badgeVariants 定义状态标签的五种语气
 const badgeVariants = cva(
-  'inline-flex h-6 shrink-0 items-center gap-1 rounded-sm px-2 text-xs font-medium whitespace-nowrap',
+  'inline-flex h-6 shrink-0 items-center gap-1 justify-self-start rounded-sm px-2 text-xs font-medium whitespace-nowrap',
   {
     variants: {
       tone: {
@@ -47,7 +47,7 @@ export function Badge({ tone, children }: { tone: BadgeTone; children: ReactNode
 // Tag 是不表达状态的中性小标签，用于能力、方法等枚举值
 export function Tag({ children }: { children: ReactNode }) {
   return (
-    <span className="inline-flex h-6 shrink-0 items-center rounded-sm bg-muted px-2 font-mono text-xs whitespace-nowrap text-foreground-muted">
+    <span className="inline-flex h-6 shrink-0 items-center justify-self-start rounded-sm bg-muted px-2 font-mono text-xs whitespace-nowrap text-foreground-muted">
       {children}
     </span>
   )

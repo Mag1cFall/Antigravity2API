@@ -54,46 +54,55 @@ export function formatPercent(fraction: number, locale: Locale) {
   return numberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(fraction)
 }
 
-// formatCost 以美元输出估算费用，不足 1 美元时保留到 4 位有效数字
+// formatCost 以美元输出估算费用，不足 1 美元时固定 4 位小数，不足 0.0001 美元时输出 <$0.0001
 export function formatCost(usd: number, locale: Locale) {
-  return numberFormat(locale, {
+  const small = usd > 0 && usd < 1
+  const format = numberFormat(locale, {
     style: 'currency',
     currency: 'USD',
     currencyDisplay: 'narrowSymbol',
-    ...(usd > 0 && usd < 1 ? { maximumSignificantDigits: 4 } : { maximumFractionDigits: 2 }),
-  }).format(usd)
+    ...(small ? { minimumFractionDigits: 4, maximumFractionDigits: 4 } : {}),
+  })
+  return usd > 0 && usd < 0.0001 ? '<' + format.format(0.0001) : format.format(usd)
 }
 
-// formatDuration 把毫秒输出为 ms、s、min、h 中最合适的单位
+// spaced 在中文的数字与汉字之间放一个不换行空格，例如“3小时前”输出为“3 小时前”
+function spaced(text: string, locale: Locale) {
+  return locale === 'en' ? text : text.replace(/(\d)\s?([\u4e00-\u9fff])/g, '$1\u00a0$2')
+}
+
+// formatDuration 把毫秒输出为毫秒、秒、分钟、小时中最合适的单位，英文用 ms、s、m、h 缩写
 export function formatDuration(ms: number, locale: Locale) {
   const unit = (value: number, name: string, digits: number) =>
-    numberFormat(locale, {
-      style: 'unit',
-      unit: name,
-      unitDisplay: 'narrow',
-      maximumFractionDigits: digits,
-    }).format(value)
+    spaced(
+      numberFormat(locale, {
+        style: 'unit',
+        unit: name,
+        unitDisplay: locale === 'en' ? 'narrow' : 'short',
+        maximumFractionDigits: digits,
+      }).format(value),
+      locale,
+    )
   if (ms < 1000) return unit(Math.round(ms), 'millisecond', 0)
   if (ms < 60_000) return unit(ms / 1000, 'second', ms < 10_000 ? 2 : 1)
   if (ms < 3_600_000) return unit(ms / 60_000, 'minute', 1)
   return unit(ms / 3_600_000, 'hour', 1)
 }
 
-// formatBytes 以 1024 进制输出字节数
+// formatBytes 以 1024 进制输出字节数，单位为 B、KB、MB、GB
 export function formatBytes(bytes: number, locale: Locale) {
-  const units = ['byte', 'kilobyte', 'megabyte', 'gigabyte'] as const
+  const units = ['B', 'KB', 'MB', 'GB']
   let value = bytes
   let index = 0
   while (value >= 1024 && index < units.length - 1) {
     value /= 1024
     index++
   }
-  return numberFormat(locale, {
-    style: 'unit',
-    unit: units[index],
-    unitDisplay: 'short',
-    maximumFractionDigits: index === 0 ? 0 : 1,
-  }).format(value)
+  return (
+    numberFormat(locale, { maximumFractionDigits: index === 0 ? 0 : 1 }).format(value) +
+    '\u00a0' +
+    (units[index] ?? '')
+  )
 }
 
 // relativeSteps 是相对时间从秒到天的进位
@@ -113,10 +122,11 @@ export function formatRelative(target: Date, now: Date, locale: Locale) {
     relativeFormats.set(locale, format)
   }
   for (const [unit, size] of relativeSteps) {
-    if (Math.abs(Math.round(value)) < size) return format.format(Math.round(value), unit)
+    if (Math.abs(Math.round(value)) < size)
+      return spaced(format.format(Math.round(value), unit), locale)
     value /= size
   }
-  return format.format(Math.round(value), 'day')
+  return spaced(format.format(Math.round(value), 'day'), locale)
 }
 
 // formatDateTime 输出到秒的本地日期时间，同一天只输出时间

@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
@@ -22,13 +21,13 @@ type chatChoices struct {
 
 // startChatChoices 在各自 goroutine 中启动每个 choice 并立即读取其事件；非流式请求返回前等待各 Generate 返回，流式请求等待首个就绪的 choice，其余 choice 的启动错误作为该 choice 的流内错误
 func (s *server) startChatChoices(ctx context.Context, request antigravity.GenerateRequest, count int, stream bool) *chatChoices {
+	request.Unary = !stream
 	choices := &chatChoices{events: make([]<-chan antigravity.Event, count)}
 	choices.ctx, choices.cancel = context.WithCancel(ctx)
 	started := make(chan error, count)
 	for index := range count {
 		choice := request
 		if index > 0 {
-			choice.ID = fmt.Sprintf("%s-%d", request.ID, index)
 			choice.Contents = cloneResponseContents(request.Contents)
 			if request.Config.Seed != nil {
 				seed := *request.Config.Seed + int64(index)

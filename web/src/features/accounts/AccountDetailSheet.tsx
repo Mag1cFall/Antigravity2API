@@ -1,17 +1,18 @@
-import { Network, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react'
+import { Network, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
 import { AccountReason, AccountStatusBadge } from '@/features/accounts/AccountStatus'
 import type { RowActions } from '@/features/accounts/AccountTable'
 import { QuotaCell } from '@/features/accounts/AccountTable'
-import { useSetPriority } from '@/features/accounts/actions'
+import { useSetCredits, useSetLabel, useSetPriority } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
 import { statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
@@ -96,7 +97,66 @@ function PriorityField({ account }: { account: Account }) {
   )
 }
 
-// AccountDetailSheet 是从右侧滑入的账户详情：状态与原因、额度、近 30 天用量、资料与全部操作
+// LabelField 编辑账户的备注名，改动后点保存或按 Enter 提交，留空时清除
+function LabelField({ account }: { account: Account }) {
+  const m = useMessages(accountMessages)
+  const save = useSetLabel()
+  const [value, setValue] = useState(account.label ?? '')
+  const unchanged = value.trim() === (account.label ?? '')
+  return (
+    <form
+      className="flex flex-wrap items-center gap-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (!unchanged) save.mutate({ account, label: value.trim() })
+      }}
+    >
+      <Input
+        aria-label={m.label}
+        value={value}
+        placeholder={m.labelPlaceholder}
+        autoComplete="off"
+        onChange={(event) => {
+          setValue(event.target.value)
+        }}
+        className="max-w-field"
+      />
+      <Tooltip disabledReason={unchanged && m.labelUnchanged}>
+        <Button
+          type="submit"
+          aria-label={m.labelSaveName}
+          size="sm"
+          variant="primary"
+          disabled={unchanged}
+          loading={save.isPending}
+        >
+          {m.labelSave}
+        </Button>
+      </Tooltip>
+    </form>
+  )
+}
+
+// CreditsField 开启或关闭账户的 AI 积分超额使用
+function CreditsField({ account }: { account: Account }) {
+  const m = useMessages(accountMessages)
+  const save = useSetCredits()
+  return (
+    <label className="flex items-center gap-2 text-sm">
+      <Switch
+        checked={account.ai_credits}
+        disabled={save.isPending}
+        aria-label={fill(m.creditsOf, { email: account.id })}
+        onCheckedChange={(enabled) => {
+          save.mutate({ account, enabled })
+        }}
+      />
+      {m.credits}
+    </label>
+  )
+}
+
+// AccountDetailSheet 是从右侧滑入的账户详情：状态与原因、额度、调度优先级、备注名、AI 积分超额使用、近 30 天用量、资料、设备档案与全部操作
 export function AccountDetailSheet({
   account,
   usage,
@@ -132,6 +192,9 @@ export function AccountDetailSheet({
           title={account.id}
           description={
             <span className="flex flex-wrap items-center gap-2">
+              {account.label && (
+                <span className="font-medium text-foreground">{account.label}</span>
+              )}
               <TierBadge tier={account.tier} />
               <FamilyBadge account={account} />
               <AccountStatusBadge account={account} />
@@ -150,7 +213,7 @@ export function AccountDetailSheet({
                     actions.onVerify(account)
                   }}
                 >
-                  <ShieldCheck size={16} aria-hidden />
+                  <RotateCcw size={16} aria-hidden />
                   {m.verifyAction}
                 </Button>
               )}
@@ -244,6 +307,14 @@ export function AccountDetailSheet({
               <p className="text-sm text-foreground-muted">{m.priorityHint}</p>
               <PriorityField key={account.id + ':' + String(account.priority)} account={account} />
             </Block>
+            <Block title={m.label}>
+              <p className="text-sm text-foreground-muted">{m.labelHint}</p>
+              <LabelField key={account.id + ':' + (account.label ?? '')} account={account} />
+            </Block>
+            <Block title={m.credits}>
+              <p className="text-sm text-foreground-muted">{m.creditsHint}</p>
+              <CreditsField account={account} />
+            </Block>
             <Block
               title={m.detailUsage}
               aside={
@@ -288,6 +359,16 @@ export function AccountDetailSheet({
                     {formatFullDateTime(new Date(account.token_expiry), locale)}
                   </Row>
                 )}
+              </dl>
+            </Block>
+            <Block title={m.device}>
+              <p className="text-sm text-foreground-muted">{m.deviceHint}</p>
+              <dl>
+                {Object.entries(account.device).map(([key, value]) => (
+                  <Row key={key} label={key}>
+                    <span className="font-mono text-xs">{value || '—'}</span>
+                  </Row>
+                ))}
               </dl>
             </Block>
           </div>

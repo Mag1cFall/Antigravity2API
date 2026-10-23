@@ -11,6 +11,7 @@
   --color-nav-active: #d8dae3;
   --color-border: #d7dee3;
   --color-border-strong: #d1d2d3;
+  --color-switch-off: #8e939c;
   --color-foreground: #151515;
   --color-foreground-muted: #4a4b50;
   --color-foreground-subtle: #6e6e6e;
@@ -104,6 +105,7 @@
   --container-field: 360px;
   --container-prose: 640px;
   --container-login: 380px;
+  --container-toast: 360px;
 
   --radius-*: initial;
   --radius-sm: 6px;
@@ -179,13 +181,13 @@
   @keyframes toast-in {
     from {
       opacity: 0;
-      transform: translateY(-16px);
+      transform: translateY(16px);
     }
   }
   @keyframes toast-out {
     to {
       opacity: 0;
-      transform: translateY(-8px);
+      transform: translateY(8px);
     }
   }
   @keyframes pulse {
@@ -198,6 +200,15 @@
       transform: rotate(360deg);
     }
   }
+}
+
+/* 中文界面的弯引号用中文字体的全角字形 */
+@font-face {
+  font-family: 'CJK Quotes';
+  src:
+    local('PingFang SC'), local('Microsoft YaHei'), local('MicrosoftYaHei'),
+    local('Noto Sans CJK SC'), local('Noto Sans SC'), local('Source Han Sans SC');
+  unicode-range: U+2018-2019, U+201C-201D;
 }
 
 @utility z-sticky {
@@ -224,15 +235,9 @@
 @utility grid-cols-log {
   grid-template-columns: auto 48px minmax(0, 160px) minmax(0, 1fr);
 }
-@utility h-log {
-  height: max(320px, calc(100dvh - 380px));
-}
 @utility safe-x {
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
-}
-@utility no-scrollbar {
-  scrollbar-width: none;
 }
 @utility drag-region {
   --wails-draggable: drag;
@@ -252,6 +257,7 @@
     --color-nav-active: #212225;
     --color-border: #2b2b2b;
     --color-border-strong: #606166;
+    --color-switch-off: #6b6c72;
     --color-foreground: #ffffff;
     --color-foreground-muted: #aeaeae;
     --color-foreground-subtle: #8a8a8a;
@@ -288,6 +294,9 @@
 }
 
 @layer base {
+  html:lang(zh) {
+    font-family: 'CJK Quotes', var(--font-sans);
+  }
   html {
     background-color: var(--color-background);
     color: var(--color-foreground);
@@ -302,12 +311,13 @@
   }
   * {
     scrollbar-width: thin;
+    outline-color: var(--color-primary);
   }
   ::selection {
     background-color: var(--color-selection);
   }
   :focus-visible {
-    outline: 2px solid var(--color-primary-border);
+    outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }
   input:-webkit-autofill {
@@ -324,6 +334,22 @@
   [role='button']:not(:disabled) {
     cursor: pointer;
   }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+:root[data-theme='dark']::view-transition-old(root) {
+  z-index: 1;
+}
+
+:root[data-theme-switching] *,
+:root[data-theme-switching] *::before,
+:root[data-theme-switching] *::after {
+  transition: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

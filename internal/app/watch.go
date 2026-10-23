@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
 
@@ -17,6 +18,8 @@ const pollInterval = 2 * time.Second
 type account struct {
 	// ID 是账户邮箱
 	ID string `json:"id"`
+	// Label 是账户备注名
+	Label string `json:"label,omitempty"`
 	// State 为 ready、cooling、pending、error 或 disabled
 	State string `json:"state"`
 	// Tier 是套餐，有付费套餐时为付费套餐 ID
@@ -43,6 +46,17 @@ type account struct {
 	QuotaAt *time.Time `json:"quota_at,omitempty"`
 	// Shared 按额度组（gemini、3p）列出与该账户共享额度池的其他就绪账户
 	Shared map[string][]string `json:"shared,omitempty"`
+	// AICredits 为真时额度用尽后以 AI 积分继续生成
+	AICredits bool `json:"ai_credits"`
+	// Device 是账户的设备档案
+	Device device `json:"device"`
+}
+
+// device 是账户的设备档案及由它决定的主机名与 User-Agent
+type device struct {
+	antigravity.Device
+	Hostname  string `json:"hostname"`
+	UserAgent string `json:"user_agent"`
 }
 
 // quotaBucket 是一个额度桶，BucketID 为 gemini-5h、gemini-weekly、3p-5h 或 3p-weekly
@@ -111,8 +125,9 @@ func (s *server) accounts() []account {
 // account 投影一个账户，只保留未到期的冷却
 func (s *server) account(status service.AccountStatus, now time.Time) account {
 	item := account{
-		ID: status.ID, Tier: status.Tier, Project: status.Project, Proxy: redactProxy(status.Proxy), Priority: status.Priority, AddedAt: status.AddedAt.UTC(),
-		Active: status.Active, Error: status.Error, VerifyURL: verifyURL(status.Error), Quota: []quotaBucket{}, Shared: status.Shared,
+		ID: status.ID, Label: status.Label, Tier: status.Tier, Project: status.Project, Proxy: redactProxy(status.Proxy), Priority: status.Priority, AddedAt: status.AddedAt.UTC(),
+		Active: status.Active, Error: status.Error, VerifyURL: verifyURL(status.Error), Quota: []quotaBucket{}, Shared: status.Shared, AICredits: status.AICredits,
+		Device: device{Device: status.Device, Hostname: status.Device.Hostname(), UserAgent: status.Device.UserAgent()},
 	}
 	if status.PaidTier != "" {
 		item.Tier = status.PaidTier

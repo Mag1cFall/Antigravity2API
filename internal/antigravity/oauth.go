@@ -56,28 +56,49 @@ func LoginBrowser(ctx context.Context, proxy Proxy, open func(url string) error)
 	config.RedirectURL = fmt.Sprintf("http://localhost:%d/auth/callback", listener.Addr().(*net.TCPAddr).Port)
 	verifier := oauth2.GenerateVerifier()
 	state := randomState()
-	codes := make(chan string, 1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("state") != state {
-			http.Error(w, "state mismatch", http.StatusBadRequest)
-			return
-		}
-		codes <- r.URL.Query().Get("code")
-		http.Redirect(w, r, successURL, http.StatusFound)
-	})
-	server := &http.Server{Handler: mux}
+	callbacks := make(chan callback, 1)
+	server := &http.Server{Handler: callbackHandler(state, callbacks)}
 	go server.Serve(listener)
 	defer server.Close()
 	if err := open(config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce, oauth2.S256ChallengeOption(verifier))); err != nil {
 		return nil, err
 	}
 	select {
-	case code := <-codes:
-		return config.Exchange(exchangeContext(ctx, proxy), code, oauth2.VerifierOption(verifier))
+	case result := <-callbacks:
+		if result.err != nil {
+			return nil, result.err
+		}
+		return config.Exchange(exchangeContext(ctx, proxy), result.code, oauth2.VerifierOption(verifier))
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// callback 为回环回调的结果：授权码或授权页返回的错误
+type callback struct {
+	code string
+	err  error
+}
+
+// callbackHandler 返回回环监听的 /auth/callback 处理器：state 不符时返回 400 并继续等待，带 error 时返回 400 并以该错误结束登录，否则交出授权码并 302 到成功页
+func callbackHandler(state string, callbacks chan<- callback) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("state") != state {
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			return
+		}
+		if reason := query.Get("error"); reason != "" {
+			message := "OAuth error: " + reason
+			http.Error(w, message, http.StatusBadRequest)
+			callbacks <- callback{err: errors.New(message)}
+			return
+		}
+		callbacks <- callback{code: query.Get("code")}
+		http.Redirect(w, r, successURL, http.StatusFound)
+	})
+	return mux
 }
 
 // LoginTerminal 打印授权链接并从 prompt 取回用户粘贴的授权码，授权码经 proxy 换取 token
@@ -101,16 +122,21 @@ const refreshAhead = 300 * time.Second
 // TokenSource 是自动刷新的 token 源，access token 距到期不足 refreshAhead 时由下一次请求触发刷新，变化时调用 save 写回，可并发使用
 type TokenSource struct {
 	ctx    context.Context
+	config oauth2.Config
 	save   func(*oauth2.Token) error
 	mu     sync.Mutex
 	source oauth2.TokenSource
 	token  *oauth2.Token
 }
 
-// NewTokenSource 以已保存的 token 创建 token 源，刷新请求经克隆的 http.DefaultTransport 与账户代理发出
-func NewTokenSource(token *oauth2.Token, proxy Proxy, save func(*oauth2.Token) error) *TokenSource {
+// NewTokenSource 以已保存的 token 创建 token 源，认证方式为 AuthMethodEnterprise 时经 OAuthConfigWIF 的 STS 刷新，其余经 OAuthConfig 刷新；刷新请求经克隆的 http.DefaultTransport 与账户代理发出
+func NewTokenSource(token *oauth2.Token, method string, proxy Proxy, save func(*oauth2.Token) error) *TokenSource {
+	config := OAuthConfig
+	if method == AuthMethodEnterprise {
+		config = OAuthConfigWIF
+	}
 	ctx := exchangeContext(context.Background(), proxy)
-	return &TokenSource{ctx: ctx, save: save, source: oauth2.ReuseTokenSourceWithExpiry(token, OAuthConfig.TokenSource(ctx, token), refreshAhead), token: token}
+	return &TokenSource{ctx: ctx, config: config, save: save, source: oauth2.ReuseTokenSourceWithExpiry(token, config.TokenSource(ctx, token), refreshAhead), token: token}
 }
 
 // Token 返回有效的 access token，过期时刷新并写回
@@ -130,12 +156,37 @@ func (s *TokenSource) Token() (*oauth2.Token, error) {
 	return token, nil
 }
 
-// Expire 丢弃当前 access token，下一次 Token 用 refresh token 换新
+// Stale 判断 access token 是否已到刷新时机
+func (s *TokenSource) Stale() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.token.AccessToken == "" || time.Until(s.token.Expiry) < refreshAhead
+}
+
+// Refresh 不经缓存以 refresh token 换新 access token，写回并作为此后 Token 的结果；并发调用各自发出刷新请求
+func (s *TokenSource) Refresh() (*oauth2.Token, error) {
+	s.mu.Lock()
+	expired := &oauth2.Token{RefreshToken: s.token.RefreshToken}
+	s.mu.Unlock()
+	token, err := s.config.TokenSource(s.ctx, expired).Token()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.save(token); err != nil {
+		return nil, err
+	}
+	s.token, s.source = token, oauth2.ReuseTokenSourceWithExpiry(token, s.config.TokenSource(s.ctx, token), refreshAhead)
+	return token, nil
+}
+
+// Expire 丢弃当前 access token，下一次 Token 以创建时选定的 OAuth 客户端用 refresh token 换新
 func (s *TokenSource) Expire() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	expired := &oauth2.Token{RefreshToken: s.token.RefreshToken}
-	s.source = oauth2.ReuseTokenSourceWithExpiry(expired, OAuthConfig.TokenSource(s.ctx, expired), refreshAhead)
+	s.source = oauth2.ReuseTokenSourceWithExpiry(expired, s.config.TokenSource(s.ctx, expired), refreshAhead)
 }
 
 // randomState 生成 16 字节的 state 参数

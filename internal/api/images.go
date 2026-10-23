@@ -123,6 +123,7 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 	results, err := s.generateImages(r.Context(), antigravity.GenerateRequest{
 		ID:       newID("img"),
 		Model:    request.Model,
+		Session:  headerSession(r),
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: append([]antigravity.Part{{Text: request.Prompt}}, inputs...)}},
 		Config:   antigravity.GenerationConfig{ResponseModalities: []string{"IMAGE"}, ImageConfig: config},
 	}, request.N)
@@ -133,6 +134,7 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		return
 	}
 	created := time.Now().Unix()
+	output := s.mediaOutputFor(r)
 	var data []map[string]any
 	for _, result := range results {
 		if len(result.media) == 0 {
@@ -148,7 +150,11 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 				item["output_format"] = strings.TrimPrefix(media.MIME, "image/")
 				item["size"], item["quality"], item["background"] = cmp.Or(request.Size, "auto"), cmp.Or(request.Quality, "auto"), "auto"
 			case request.ResponseFormat == "url":
-				item["url"] = "data:" + media.MIME + ";base64," + encoded
+				if err := output.save(media); err != nil {
+					writeOpenAIRequestError(w, err)
+					return
+				}
+				item["url"] = output.link(media)
 			default:
 				item["b64_json"] = encoded
 			}

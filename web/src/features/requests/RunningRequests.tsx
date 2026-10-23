@@ -13,7 +13,7 @@ import { formatDateTime, formatDuration } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
-// RunningRequests 是事件流推送的进行中请求，可逐个停止
+// RunningRequests 是事件流推送的进行中请求，可逐个停止；宽度小于 640px 时每个请求一张卡片，模型与账户在下方单独成行
 export function RunningRequests() {
   const m = useMessages(requestMessages)
   const { locale } = useI18n()
@@ -40,7 +40,7 @@ export function RunningRequests() {
         title={m.runningTitle}
         description={m.runningDescription}
       />
-      <Table label={m.runningTitle}>
+      <Table label={m.runningTitle} stack>
         <thead>
           <tr>
             <Th>{m.time}</Th>
@@ -59,17 +59,19 @@ export function RunningRequests() {
                 {formatDateTime(new Date(record.time), now, locale)}
                 <div className="mt-1 text-xs text-foreground-muted">{record.protocol}</div>
               </Td>
-              <Td className="max-w-field font-mono text-xs wrap-anywhere">{record.model}</Td>
-              <Td className="max-w-field text-xs wrap-anywhere text-foreground-muted">
+              <Td className="max-w-field font-mono text-xs wrap-anywhere max-sm:order-1 max-sm:basis-full">
+                {record.model}
+              </Td>
+              <Td className="max-w-field text-xs wrap-anywhere text-foreground-muted max-sm:order-1 max-sm:basis-full">
                 {record.account || m.none}
               </Td>
-              <Td className="text-right whitespace-nowrap">
+              <Td label={m.elapsed} className="text-right whitespace-nowrap max-sm:text-left">
                 {formatDuration(
                   Math.max(0, now.getTime() - new Date(record.time).getTime()),
                   locale,
                 )}
               </Td>
-              <Td className="text-right">
+              <Td className="text-right max-sm:ml-auto">
                 <Button
                   size="sm"
                   aria-label={fill(m.stopLabel, { id: record.id })}

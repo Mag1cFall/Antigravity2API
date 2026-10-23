@@ -4,7 +4,6 @@ import (
 	"flag"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,7 +39,6 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	cfg.RoutingStrategy = "fill-first"
 	cfg.RequestTimeout = 90 * time.Minute
 	cfg.LogFormat = "text"
-	cfg.TrustedProxies, _ = parsePrefixes("10.0.0.0/8, 127.0.0.1")
 	cfg.AdminAuthEnabled = true
 	cfg.AdminPassword = `p a#s"s'`
 	if err := cfg.Save(path); err != nil {
@@ -131,7 +129,6 @@ func TestOverrides(t *testing.T) {
 // TestSetRejects 验证无法解析的文本值被拒绝
 func TestSetRejects(t *testing.T) {
 	cases := map[string]string{
-		"TRUSTED_PROXIES":  "10.0.0.0/8,proxy.local",
 		"REQUEST_TIMEOUT":  "5",
 		"LOG_FILE":         "yes",
 		"LOG_MAX_TOTAL_MB": "1g",
@@ -141,22 +138,6 @@ func TestSetRejects(t *testing.T) {
 		if err := cfg.Set(map[string]string{key: value}); err == nil {
 			t.Errorf("%s=%s 被接受", key, value)
 		}
-	}
-}
-
-// TestTrusted 验证可信代理按单个 IP 与 CIDR 匹配，含 IPv4 映射的 IPv6 地址
-func TestTrusted(t *testing.T) {
-	cfg := Default()
-	if err := cfg.Set(map[string]string{"TRUSTED_PROXIES": "10.1.0.0/16, 127.0.0.1"}); err != nil {
-		t.Fatal(err)
-	}
-	for address, want := range map[string]bool{"10.1.2.3": true, "10.2.0.1": false, "127.0.0.1": true, "::ffff:127.0.0.1": true, "::1": false} {
-		if got := cfg.Trusted(netip.MustParseAddr(address)); got != want {
-			t.Errorf("%s: %v", address, got)
-		}
-	}
-	if value := cfg.Values()["TRUSTED_PROXIES"]; value != "10.1.0.0/16,127.0.0.1" {
-		t.Errorf("TRUSTED_PROXIES=%s", value)
 	}
 }
 

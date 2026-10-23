@@ -9,7 +9,7 @@ import { PageHeader } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
-import { Table, Td, Th } from '@/components/ui/table'
+import { stackThird as third, Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccounts } from '@/features/accounts/queries'
 import { modelMessages } from '@/features/models/messages'
@@ -41,7 +41,7 @@ function Limit({ value }: { value: number | undefined }) {
   )
 }
 
-// ModelRow 是模型表的一行
+// ModelRow 是模型表的一行，宽度小于 640px 时额度组标签显示在名称旁
 function ModelRow({
   model,
   alias,
@@ -61,11 +61,21 @@ function ModelRow({
     completion: m.kindCompletion,
   }[kind]
   const group = model.quota_group ?? ''
+  const groupBadge = group ? (
+    <span
+      className={
+        'inline-flex h-icon items-center rounded-sm px-2 text-xs font-medium whitespace-nowrap ' +
+        (groupTone[group] ?? 'bg-muted text-foreground-muted')
+      }
+    >
+      {nameOf(q, group)}
+    </span>
+  ) : null
   return (
     <tr>
-      <Td>
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-medium">{model.name || model.id}</span>
+      <Td className="max-sm:basis-full">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="min-w-0 text-sm font-medium break-words">{model.name || model.id}</span>
           {alias && (
             <span className="inline-flex h-icon shrink-0 items-center rounded-sm bg-warning-soft px-2 font-mono text-xs text-warning-text">
               {fill(m.alias, { target: alias })}
@@ -76,33 +86,23 @@ function ModelRow({
               {kindLabel}
             </span>
           )}
+          {groupBadge && <span className="hidden max-sm:inline-flex">{groupBadge}</span>}
         </div>
         <div className="flex min-w-0 items-center gap-1">
           <code className="truncate font-mono text-xs text-foreground-muted">{model.id}</code>
           <CopyButton value={model.id} label={m.copyId + ' ' + model.id} copiedLabel={m.copied} />
         </div>
       </Td>
-      <Td>
-        {group ? (
-          <span
-            className={
-              'inline-flex h-icon items-center rounded-sm px-2 text-xs font-medium ' +
-              (groupTone[group] ?? 'bg-muted text-foreground-muted')
-            }
-          >
-            {nameOf(q, group)}
-          </span>
-        ) : (
-          <span className="text-foreground-subtle">—</span>
-        )}
+      <Td className="max-sm:hidden">
+        {groupBadge ?? <span className="text-foreground-subtle">—</span>}
       </Td>
-      <Td className="text-right">
+      <Td label={m.context} className={'text-right max-sm:text-left ' + third}>
         <Limit value={model.input_token_limit} />
       </Td>
-      <Td className="text-right">
+      <Td label={m.output} className={'text-right max-sm:text-left ' + third}>
         <Limit value={model.output_token_limit} />
       </Td>
-      <Td>
+      <Td label={m.thinking} className="max-sm:order-1 max-sm:basis-full">
         {model.thinking_levels?.length ? (
           <div className="flex flex-wrap gap-1">
             {model.thinking_levels.map((level) =>
@@ -126,7 +126,7 @@ function ModelRow({
           <span className="text-foreground-subtle">—</span>
         )}
       </Td>
-      <Td className="text-right">
+      <Td label={m.accounts} className={'text-right max-sm:text-left ' + third}>
         {model.accounts > 0 ? (
           <span>
             {model.accounts}
@@ -142,7 +142,7 @@ function ModelRow({
   )
 }
 
-// ModelsPage 是模型目录：按额度组筛选与搜索，列出上下文、输出上限、思考档位与可用账户，下方编辑模型映射
+// ModelsPage 是模型目录：按额度组筛选与搜索，列出上下文、输出上限、思考档位与可用账户，宽度小于 640px 时每个模型一张卡片，下方编辑模型映射
 export function ModelsPage() {
   const m = useMessages(modelMessages)
   const q = useMessages(quotaMessages)
@@ -260,7 +260,7 @@ export function ModelsPage() {
                 }
               />
             ) : (
-              <Table label={m.title} fixed minWidth={860}>
+              <Table label={m.title} fixed stack minWidth={860}>
                 <colgroup>
                   <col />
                   <col className="w-[140px]" />

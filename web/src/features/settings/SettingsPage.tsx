@@ -23,7 +23,7 @@ import { Callout } from '@/components/ui/callout'
 import { Card } from '@/components/ui/card'
 import { FormRow } from '@/components/ui/form-row'
 import { Indicator } from '@/components/ui/indicator'
-import { Input } from '@/components/ui/input'
+import { Input, Textarea } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
 import { PageHeader } from '@/components/ui/page'
 import { RadioGroup } from '@/components/ui/radio-group'
@@ -41,12 +41,13 @@ import {
   PromptSectionsField,
   PromptWrapField,
 } from '@/features/settings/PromptSection'
+import { ProxyPool } from '@/features/settings/ProxyPool'
 import { settingsKey, splitList, useSettings } from '@/features/settings/queries'
 import { type SettingsForm, settingsSchema, toForm, toValues } from '@/features/settings/schema'
 import type { Settings } from '@/features/settings/types'
 import { api } from '@/lib/api'
 import { isDesktop } from '@/lib/desktop'
-import { fill, useMessages } from '@/lib/i18n'
+import { codeText, fill, useI18n, useMessages } from '@/lib/i18n'
 
 // sections 是设置分区，顺序即左侧目录顺序
 const sections = [
@@ -76,8 +77,9 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   LISTEN: 'service',
   AUTH_DIR: 'service',
   RUNTIME_DIR: 'service',
+  MEDIA_OUTPUT: 'service',
+  MEDIA_BASE_URL: 'service',
   PROXY: 'network',
-  TRUSTED_PROXIES: 'network',
   SYSTEM_PROMPT: 'prompt',
   SYSTEM_PROMPT_SECTIONS: 'prompt',
   SYSTEM_PROMPT_WRAP: 'prompt',
@@ -86,6 +88,8 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   PREFER_LOWER_TIER_MODELS: 'scheduling',
   REQUEST_TIMEOUT: 'scheduling',
   QUOTA_REFRESH_INTERVAL: 'scheduling',
+  QUOTA_RESERVE_PERCENT: 'scheduling',
+  WEEKLY_QUOTA_WARMUP: 'scheduling',
   LOG_LEVEL: 'logging',
   LOG_FORMAT: 'logging',
   LOG_FILE: 'logging',
@@ -99,7 +103,17 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
 // restartKeys 是 internal/config 的 RestartKeys，重启服务后才生效
 const restartKeys = new Set(['LISTEN', 'AUTH_DIR', 'RUNTIME_DIR'])
 
-// LinkRow 是在其他页面管理的配置项：当前状态与前往的链接
+// restartLabels 返回重启后生效的配置项在界面上的名称
+function restartLabels(m: (typeof settingsMessages)['zh'], keys: string[]) {
+  const names: Record<string, string> = {
+    LISTEN: m.listen,
+    AUTH_DIR: m.authDir,
+    RUNTIME_DIR: m.runtimeDir,
+  }
+  return keys.map((key) => names[key] ?? key)
+}
+
+// LinkRow 是在其他页面管理的配置项：当前状态与前往的链接，布局与 FormRow 一致
 function LinkRow({
   label,
   hint,
@@ -114,19 +128,21 @@ function LinkRow({
   action: string
 }) {
   return (
-    <div className="flex flex-col gap-3 border-t border-border py-4 first:border-t-0 md:flex-row md:items-start md:justify-between md:gap-8">
-      <div className="flex min-w-0 flex-col gap-1 md:max-w-prose">
-        <span className="text-base font-medium">{label}</span>
-        <p className="text-sm text-foreground-muted">{hint}</p>
-      </div>
-      <div className="flex w-full shrink-0 items-center justify-between gap-3 md:w-field">
-        <span className="text-sm text-foreground-muted">{status}</span>
-        <Button size="sm" asChild>
-          <Link to={to}>
-            {action}
-            <ArrowRight size={16} aria-hidden />
-          </Link>
-        </Button>
+    <div className="@container border-t border-border py-4 first:border-t-0">
+      <div className="flex flex-col gap-3 @min-[720px]:flex-row @min-[720px]:items-start @min-[720px]:justify-between @min-[720px]:gap-8">
+        <div className="flex min-w-0 flex-col gap-1 @min-[720px]:max-w-prose">
+          <span className="text-base font-medium">{label}</span>
+          <p className="text-sm text-foreground-muted">{hint}</p>
+        </div>
+        <div className="flex w-full shrink-0 items-center justify-between gap-3 @min-[720px]:w-field">
+          <span className="text-sm text-foreground-muted">{status}</span>
+          <Button size="sm" asChild>
+            <Link to={to}>
+              {action}
+              <ArrowRight size={16} aria-hidden />
+            </Link>
+          </Button>
+        </div>
       </div>
     </div>
   )
@@ -192,7 +208,7 @@ function LowerTierField({
   )
 }
 
-// SectionNav 是设置卡片左侧的分区目录，含错误的分区带红点
+// SectionNav 是设置卡片左侧的分区目录，窄屏时在卡片顶部换行排列，含错误的分区带红点
 function SectionNav({ section, invalid }: { section: Section; invalid: Set<Section> }) {
   const m = useMessages(settingsMessages)
   return (
@@ -200,9 +216,9 @@ function SectionNav({ section, invalid }: { section: Section; invalid: Set<Secti
       aria-label={m.sections}
       className="shrink-0 border-border p-3 max-md:border-b md:w-[200px] md:border-r"
     >
-      <div className="relative overflow-x-auto">
+      <div className="relative">
         <Indicator active="[aria-current=page]" className="rounded-md bg-muted" />
-        <ul className="flex gap-1 md:flex-col">
+        <ul className="flex flex-wrap gap-1 md:flex-col">
           {sections.map((item) => {
             const Icon = sectionIcons[item]
             return (
@@ -334,9 +350,8 @@ function SettingsEditor({
       | 'LISTEN'
       | 'AUTH_DIR'
       | 'RUNTIME_DIR'
-      | 'PROXY'
+      | 'MEDIA_BASE_URL'
       | 'ADMIN_USERNAME'
-      | 'TRUSTED_PROXIES'
       | 'REQUEST_TIMEOUT'
       | 'QUOTA_REFRESH_INTERVAL',
     label: string,
@@ -358,7 +373,7 @@ function SettingsEditor({
     </FormRow>
   )
   const toggle = (
-    key: 'LOG_FILE' | 'REQUEST_LOG_BODIES' | 'ADMIN_AUTH_ENABLED',
+    key: 'LOG_FILE' | 'REQUEST_LOG_BODIES' | 'ADMIN_AUTH_ENABLED' | 'WEEKLY_QUOTA_WARMUP',
     label: string,
     hint: string,
   ) => (
@@ -378,7 +393,7 @@ function SettingsEditor({
     </FormRow>
   )
   const number = (
-    key: 'ACCOUNT_CONCURRENCY' | 'LOG_MAX_TOTAL_MB',
+    key: 'ACCOUNT_CONCURRENCY' | 'LOG_MAX_TOTAL_MB' | 'QUOTA_RESERVE_PERCENT',
     label: string,
     hint: string,
     min: number,
@@ -426,14 +441,43 @@ function SettingsEditor({
           to="/connect"
           action={m.apiKeysManage}
         />
+        <FormRow id="MEDIA_OUTPUT" label={m.mediaOutput} hint={m.mediaOutputHint}>
+          <Controller
+            control={form.control}
+            name="MEDIA_OUTPUT"
+            render={({ field }) => (
+              <RadioGroup
+                label={m.mediaOutput}
+                value={field.value}
+                onValueChange={field.onChange}
+                options={[
+                  { value: 'inline', label: m.mediaInline, description: m.mediaInlineHint },
+                  { value: 'url', label: m.mediaURL, description: codeText(m.mediaURLHint) },
+                ]}
+              />
+            )}
+          />
+        </FormRow>
+        {text('MEDIA_BASE_URL', m.mediaBase, m.mediaBaseHint, {
+          placeholder: 'https://ai.example.com',
+          disabledReason: values.MEDIA_OUTPUT !== 'url' && m.mediaBaseDisabled,
+        })}
       </>
     ),
     network: (
       <>
-        {text('PROXY', m.proxy, m.proxyHint, { placeholder: 'socks5://127.0.0.1:1080' })}
-        {text('TRUSTED_PROXIES', m.trustedProxies, m.trustedProxiesHint, {
-          placeholder: '10.0.0.0/8,192.168.1.10',
-        })}
+        <FormRow id="PROXY" label={m.proxy} hint={m.proxyHint} error={errors.PROXY?.message}>
+          <Textarea
+            {...describe('PROXY')}
+            {...form.register('PROXY')}
+            rows={3}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="socks5://127.0.0.1:1080"
+            className="font-mono"
+          />
+        </FormRow>
+        <ProxyPool />
       </>
     ),
     prompt: (
@@ -518,6 +562,8 @@ function SettingsEditor({
         {number('ACCOUNT_CONCURRENCY', m.concurrency, m.concurrencyHint, 1, 64)}
         {text('REQUEST_TIMEOUT', m.timeout, m.timeoutHint, { placeholder: '5m' })}
         {text('QUOTA_REFRESH_INTERVAL', m.quotaRefresh, m.quotaRefreshHint, { placeholder: '15m' })}
+        {number('QUOTA_RESERVE_PERCENT', m.quotaReserve, m.quotaReserveHint, 0, 99)}
+        {toggle('WEEKLY_QUOTA_WARMUP', m.warmup, m.warmupHint)}
         <LinkRow
           label={m.mapping}
           hint={m.mappingHint}
@@ -656,6 +702,7 @@ function SettingsEditor({
 export function SettingsPage() {
   const m = useMessages(settingsMessages)
   const app = useMessages(appMessages)
+  const { locale } = useI18n()
   const params = useParams()
   const section = sections.find((item) => item === params.section) ?? 'service'
   const settings = useSettings()
@@ -665,7 +712,11 @@ export function SettingsPage() {
       <PageHeader title={m.title} description={m.description} />
       {settings.data && settings.data.restart_required.length > 0 && (
         <Callout tone="warning" role="status">
-          {fill(m.restartNotice, { keys: settings.data.restart_required.join('、') })}
+          {fill(m.restartNotice, {
+            keys: new Intl.ListFormat(locale).format(
+              restartLabels(m, settings.data.restart_required),
+            ),
+          })}
         </Callout>
       )}
       <Card className="md:flex-row">

@@ -69,7 +69,6 @@ jobs:
     env:
       CGO_ENABLED: '0'
       VERSION: ${{ needs.web.outputs.version }}
-      NUMERIC: ${{ needs.web.outputs.numeric }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -93,34 +92,18 @@ jobs:
           cache: false
       - name: Build Packages
         run: |
-          go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
-          mkdir -p bin dist
-          for file in info.json wails.exe.manifest; do
-            sed "s/\"0\.0\.0\"/\"$NUMERIC\"/g" "build/windows/$file" > "bin/$file"
-          done
-          wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest bin/wails.exe.manifest -info bin/info.json -out cmd/antigravity2api/wails_windows_amd64.syso
-          for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             export GOOS="${target%/*}" GOARCH="${target#*/}"
             name="antigravity2api-${VERSION}-${GOOS}-${GOARCH}"
-            directory="dist/$name"
-            mkdir -p "$directory"
-            binary=antigravity2api
-            if [[ "$GOOS" == windows ]]; then binary+=.exe; fi
-            go build -mod=readonly -trimpath -ldflags='-s -w' -o "$directory/$binary" ./cmd/antigravity2api
-            cp README*.md LICENSE .env.example "$directory/"
-            cp -r docs "$directory/"
-            if [[ "$GOOS" == windows ]]; then
-              (cd dist && zip -qr "$name.zip" "$name")
-            else
-              tar -czf "dist/$name.tar.gz" -C dist "$name"
-            fi
+            mkdir -p "dist/$name"
+            go build -mod=readonly -trimpath -ldflags='-s -w' -o "dist/$name/antigravity2api" ./cmd/antigravity2api
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
           done
       - uses: actions/upload-artifact@v7
         with:
           name: packages-headless
-          path: |
-            dist/*.zip
-            dist/*.tar.gz
+          path: dist/*.tar.gz
           retention-days: 7
 
   desktop-windows:
@@ -142,17 +125,16 @@ jobs:
           cache-dependency-path: go.sum
       - name: Install Packaging Tools
         run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
-      - name: Build Portable Desktop Package
+      - name: Build Desktop Package
         run: |
           mkdir -p bin dist
           for file in info.json wails.exe.manifest; do
             sed "s/\"0\.0\.0\"/\"$NUMERIC\"/g" "build/windows/$file" > "bin/$file"
           done
           wails3 generate syso -arch amd64 -icon build/windows/icon.ico -manifest bin/wails.exe.manifest -info bin/info.json -out cmd/antigravity2api/wails_windows_amd64.syso
-          name="antigravity2api-desktop-${VERSION}-windows-amd64"
+          name="antigravity2api-${VERSION}-windows-amd64"
           mkdir -p "dist/$name"
           go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w -H windowsgui' -o "dist/$name/antigravity2api.exe" ./cmd/antigravity2api
-          cp README*.md LICENSE "dist/$name/"
           (cd dist && 7z a -tzip -bso0 "$name.zip" "$name")
       - uses: actions/upload-artifact@v7
         with:
@@ -180,9 +162,7 @@ jobs:
         with:
           go-version: stable
           cache-dependency-path: go.sum
-      - name: Install Packaging Tools
-        run: go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
-      - name: Build App Bundle And Disk Image
+      - name: Build App Bundle
         run: |
           for arch in arm64 amd64; do
             GOARCH="$arch" go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w' -o "bin/antigravity2api-$arch" ./cmd/antigravity2api
@@ -196,13 +176,12 @@ jobs:
           plutil -replace CFBundleShortVersionString -string "$NUMERIC" "$app/Contents/Info.plist"
           plutil -replace CFBundleVersion -string "$NUMERIC" "$app/Contents/Info.plist"
           codesign --force --deep --sign - "$app"
-          wails3 tool package -format dmg -name Antigravity2API -out bin
           mkdir -p dist
-          mv bin/Antigravity2API.dmg "dist/antigravity2api-desktop-${VERSION}-darwin-universal.dmg"
+          tar -czf "dist/antigravity2api-desktop-${VERSION}-darwin-universal.tar.gz" -C bin Antigravity2API.app
       - uses: actions/upload-artifact@v7
         with:
           name: packages-desktop-macos
-          path: dist/*.dmg
+          path: dist/*.tar.gz
           retention-days: 7
 
   desktop-linux:
@@ -218,7 +197,6 @@ jobs:
     env:
       CGO_ENABLED: '1'
       VERSION: ${{ needs.web.outputs.version }}
-      NUMERIC: ${{ needs.web.outputs.numeric }}
       ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
@@ -230,27 +208,20 @@ jobs:
         with:
           go-version: stable
           cache-dependency-path: go.sum
-      - name: Install Packaging Tools
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev
-          go install "github.com/wailsapp/wails/v3/cmd/wails3@$WAILS_VERSION"
-      - name: Build Desktop Packages
+      - name: Build Desktop Package
         run: |
-          go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w' -o bin/antigravity2api ./cmd/antigravity2api
-          cp build/appicon.png bin/antigravity2api.png
-          wails3 generate appimage -binary bin/antigravity2api -icon bin/antigravity2api.png -desktopfile build/linux/antigravity2api.desktop -outputdir bin -builddir "$RUNNER_TEMP/appimage"
-          VERSION="$NUMERIC" GOARCH="$ARCH" wails3 tool package -name antigravity2api -format deb -config build/linux/nfpm/nfpm.yaml -out bin
           name="antigravity2api-desktop-${VERSION}-linux-${ARCH}"
-          mkdir -p dist
-          mv bin/antigravity2api-*.AppImage "dist/$name.AppImage"
-          mv bin/*.deb "dist/$name.deb"
+          mkdir -p "dist/$name"
+          go build -mod=readonly -tags desktop,production -trimpath -ldflags='-s -w' -o "dist/$name/antigravity2api" ./cmd/antigravity2api
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
       - uses: actions/upload-artifact@v7
         with:
           name: packages-desktop-linux-${{ matrix.arch }}
-          path: |
-            dist/*.AppImage
-            dist/*.deb
+          path: dist/*.tar.gz
           retention-days: 7
 
   release:

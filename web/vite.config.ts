@@ -23,7 +23,6 @@ export default defineConfig({
       '/api': serviceTarget,
       '/v1': serviceTarget,
       '/v1beta': serviceTarget,
-      '/readyz': serviceTarget,
     },
   },
 })

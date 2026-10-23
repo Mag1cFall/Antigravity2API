@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -19,6 +20,8 @@ const (
 	jsonInstruction = "Respond with a single JSON value only, without Markdown code fences or any other text."
 	// schemaInstruction 为要求按 JSON Schema 输出时追加的系统指令前缀
 	schemaInstruction = "Respond with a single JSON value that conforms to this JSON Schema, without Markdown code fences or any other text:\n"
+	// enumInstruction 为要求输出枚举值时追加的系统指令前缀
+	enumInstruction = "Respond with exactly one of the following values, without quotes, Markdown code fences or any other text:\n"
 )
 
 // billingPrefix 为 Claude Code 计费行的开头
@@ -27,7 +30,10 @@ const billingPrefix = "x-anthropic-billing-header:"
 // claudeFunctionName 为 Claude 族接受的函数名
 var claudeFunctionName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
-// prepare 把客户端请求改写为上游接受的形状并返回输出处理：目录条目不支持图片的模型收到图片时返回 400，去掉其他模型族生成的签名并补回会话保存的函数调用签名，末尾 assistant 轮与只有系统提示的请求按模型族改写，工具选择、单调用与结构化输出写入系统指令并在输出中核对，Claude 族不接受的函数名可逆改名
+// functionName 为其他模型族接受的函数名：字母或下划线开头，只含字母、数字、下划线、点、冒号与连字符
+var functionName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.:-]{0,127}$`)
+
+// prepare 把客户端请求改写为上游接受的形状并返回输出处理：目录条目不支持图片的模型收到图片时返回 400，去掉其他模型族生成的签名并补回会话保存的函数调用签名，末尾 assistant 轮与只有系统提示的请求按模型族改写，工具选择、单调用与结构化输出写入系统指令并在输出中核对，模型族不接受的函数名可逆改名
 func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel, signed signatureRecord) (antigravity.GenerateRequest, *output, error) {
 	if !model.SupportsImages && hasImage(request.Contents) {
 		return request, nil, &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("model %s does not support image input", model.ID)}
@@ -41,12 +47,12 @@ func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel
 	if request, out.tools, err = prepareTools(request); err != nil {
 		return request, nil, err
 	}
+	out.noFunctions = len(request.Tools.Functions) == 0
 	if request, out.json, err = prepareJSON(request); err != nil {
 		return request, nil, err
 	}
-	if model.ModelProvider == antigravity.ProviderAnthropic {
-		request, out.names = renameFunctions(request)
-	}
+	request, out.search = prepareSearch(request)
+	request, out.names = renameFunctions(request, model.ModelProvider == antigravity.ProviderAnthropic)
 	return request, out, nil
 }
 
@@ -222,9 +228,43 @@ func prepareTools(request antigravity.GenerateRequest) (antigravity.GenerateRequ
 	return request, contract, nil
 }
 
-// prepareJSON 把 JSON 输出要求写入系统指令，返回输出时的 JSON 与 Schema 校验
+// prepareSearch 在只启用 Google 搜索的请求中把搜索上下文大小、用户位置与来源站点写入系统指令，返回需要筛选搜索来源的站点选项
+func prepareSearch(request antigravity.GenerateRequest) (antigravity.GenerateRequest, *antigravity.SearchOptions) {
+	search := request.Tools.Search
+	if search == nil || len(request.Tools.GoogleSearch) == 0 || len(request.Tools.Functions) > 0 {
+		return request, nil
+	}
+	if search.ContextSize != "" {
+		request.System = joinInstruction(request.System, "Use "+search.ContextSize+" search context depth.")
+	}
+	if search.Location != "" {
+		request.System = joinInstruction(request.System, "The user's approximate location is "+search.Location+". Use it for location-dependent questions and searches.")
+	}
+	if len(search.AllowedDomains) > 0 {
+		request.System = joinInstruction(request.System, "Restrict web searches to these domains using site: queries: "+strings.Join(search.AllowedDomains, ", "))
+	}
+	if len(search.BlockedDomains) > 0 {
+		request.System = joinInstruction(request.System, "Exclude these domains from web searches using -site: queries: "+strings.Join(search.BlockedDomains, ", "))
+	}
+	if len(search.AllowedDomains) == 0 && len(search.BlockedDomains) == 0 {
+		return request, nil
+	}
+	return request, search
+}
+
+// prepareJSON 把 JSON 或枚举输出要求写入系统指令，返回输出时的 JSON、Schema 或枚举校验
 func prepareJSON(request antigravity.GenerateRequest) (antigravity.GenerateRequest, *jsonOutput, error) {
 	config := request.Config
+	if strings.EqualFold(config.ResponseMIMEType, "text/x.enum") {
+		var schema struct {
+			Enum []string `json:"enum"`
+		}
+		if json.Unmarshal(config.ResponseSchema, &schema) != nil || len(schema.Enum) == 0 {
+			return request, nil, &Error{Status: http.StatusBadRequest, Message: "responseMimeType text/x.enum requires a responseSchema with a string enum"}
+		}
+		request.System = joinInstruction(request.System, enumInstruction+strings.Join(schema.Enum, "\n"))
+		return request, &jsonOutput{enum: schema.Enum}, nil
+	}
 	if len(config.ResponseSchema) == 0 && !strings.EqualFold(config.ResponseMIMEType, "application/json") {
 		return request, nil, nil
 	}
@@ -240,8 +280,8 @@ func prepareJSON(request antigravity.GenerateRequest) (antigravity.GenerateReque
 	return request, &jsonOutput{schema: validator}, nil
 }
 
-// renameFunctions 把 Claude 族不接受的函数名换成只含字母、数字、下划线与连字符的名称，超长或重名时截断并加原名摘要；返回上游名到原名的映射
-func renameFunctions(request antigravity.GenerateRequest) (antigravity.GenerateRequest, map[string]string) {
+// renameFunctions 把模型族不接受的函数名换成该族接受的名称：不允许的字符换成下划线，Claude 族只留字母、数字、下划线与连字符，其他族另留点与冒号并在非字母开头时加下划线，超长或重名时截断并加原名摘要；返回上游名到原名的映射
+func renameFunctions(request antigravity.GenerateRequest, claude bool) (antigravity.GenerateRequest, map[string]string) {
 	used := map[string]bool{}
 	var names []string
 	add := func(name string) {
@@ -264,16 +304,23 @@ func renameFunctions(request antigravity.GenerateRequest) (antigravity.GenerateR
 		}
 	}
 	renamed, original := map[string]string{}, map[string]string{}
+	valid, symbols := functionName, "_-.:"
+	if claude {
+		valid, symbols = claudeFunctionName, "_-"
+	}
 	for _, name := range names {
-		if claudeFunctionName.MatchString(name) {
+		if valid.MatchString(name) {
 			continue
 		}
 		safe := strings.Map(func(char rune) rune {
-			if char == '_' || char == '-' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' {
+			if strings.ContainsRune(symbols, char) || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' {
 				return char
 			}
 			return '_'
 		}, name)
+		if !claude && strings.ContainsAny(safe[:1], "0123456789-.:") {
+			safe = "_" + safe
+		}
 		if len(safe) > 128 || used[safe] || original[safe] != "" {
 			sum := sha256.Sum256([]byte(name))
 			safe = safe[:min(len(safe), 119)] + "_" + hex.EncodeToString(sum[:4])

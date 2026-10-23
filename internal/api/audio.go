@@ -27,7 +27,7 @@ func (s *server) handleOpenAITranscription(w http.ResponseWriter, r *http.Reques
 	model, _, dedicated, err := s.audioModels(r.Context(), r.FormValue("model"))
 	if err == nil {
 		var text string
-		text, err = s.transcribeAudio(r.Context(), model, audio, r.FormValue("prompt"), dedicated)
+		text, err = s.transcribeAudio(r.Context(), headerSession(r), model, audio, r.FormValue("prompt"), dedicated)
 		if err == nil {
 			writeTranscription(w, format, text)
 			return
@@ -47,8 +47,8 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 	transcriber, translator, dedicated, err := s.audioModels(r.Context(), r.FormValue("model"))
 	if err == nil {
 		var text string
-		if text, err = s.transcribeAudio(r.Context(), transcriber, audio, "", dedicated); err == nil && strings.TrimSpace(text) != "" {
-			text, err = s.translateTranscript(r.Context(), translator, text, r.FormValue("prompt"))
+		if text, err = s.transcribeAudio(r.Context(), headerSession(r), transcriber, audio, "", dedicated); err == nil && strings.TrimSpace(text) != "" {
+			text, err = s.translateTranscript(r.Context(), headerSession(r), translator, text, r.FormValue("prompt"))
 		}
 		if err == nil {
 			writeTranscription(w, format, text)
@@ -108,7 +108,7 @@ func (s *server) audioModels(ctx context.Context, model string) (string, string,
 }
 
 // transcribeAudio 以单条 user 消息发送音频并返回正文，文本模型在音频前带转写指令，prompt 不为空时接在指令之后
-func (s *server) transcribeAudio(ctx context.Context, model string, audio antigravity.Blob, prompt string, dedicated bool) (string, error) {
+func (s *server) transcribeAudio(ctx context.Context, session, model string, audio antigravity.Blob, prompt string, dedicated bool) (string, error) {
 	var texts []string
 	if !dedicated {
 		texts = append(texts, transcriptionInstruction)
@@ -122,19 +122,19 @@ func (s *server) transcribeAudio(ctx context.Context, model string, audio antigr
 	}
 	parts = append(parts, antigravity.Part{InlineData: &audio})
 	return s.generateText(ctx, antigravity.GenerateRequest{
-		ID: newID("transcription"), Model: model,
+		ID: newID("transcription"), Model: model, Session: session,
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: parts}},
 	})
 }
 
 // translateTranscript 用文本模型把转写文本译为英文，prompt 为客户端给出的风格说明
-func (s *server) translateTranscript(ctx context.Context, model, transcript, prompt string) (string, error) {
+func (s *server) translateTranscript(ctx context.Context, session, model, transcript, prompt string) (string, error) {
 	system := translationInstruction
 	if prompt = strings.TrimSpace(prompt); prompt != "" {
 		system += "\n\nContext and style guidance: " + prompt
 	}
 	return s.generateText(ctx, antigravity.GenerateRequest{
-		ID: newID("translation"), Model: model, System: system,
+		ID: newID("translation"), Model: model, Session: session, System: system,
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: []antigravity.Part{{Text: transcript}}}},
 	})
 }

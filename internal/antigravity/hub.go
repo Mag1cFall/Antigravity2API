@@ -7,7 +7,6 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,34 +16,37 @@ const (
 	// clearcutPeriod 为 language_server 上报 clearcut 队列的间隔，从上一次上报结束开始计时
 	clearcutPeriod = 5 * time.Second
 	// clearcutOffset 为 clearcut 上报循环相对虚拟进程启动的偏移
-	clearcutOffset = 250 * time.Millisecond
-	// sidebarRefresh 为界面再次统计侧栏会话数相对首次统计的间隔
+	clearcutOffset = 700 * time.Millisecond
+	// sidebarRefresh 为界面定时统计侧栏会话数的间隔
 	sidebarRefresh = time.Minute
+	// searchIndexPages 为会话搜索索引数据库的最少页数
+	searchIndexPages = 12
 )
 
-// HubState 是虚拟 Hub 保存在本地的状态，Conversations 为该账户经服务开始过的会话数
+// HubState 是虚拟 Hub 保存在本地的状态，Conversations 为该账户经服务开始过的会话数，Model 为模型选择器中最后选定的模型枚举，Marketplaces 为按目录名保存的插件市场目录
 type HubState struct {
-	Conversations int `json:"conversations"`
+	Conversations int                         `json:"conversations"`
+	Model         string                      `json:"model,omitempty"`
+	Marketplaces  map[string]MarketplaceCache `json:"marketplaces,omitempty"`
 }
 
-// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动与待上报的 clearcut 事件
+// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动、是否已加载过会话、各会话的进度、待上报的 clearcut 事件、本虚拟进程是否已读取插件市场目录与待记录的目录读取事件
 type hub struct {
 	state    HubState
 	save     func(HubState) error
 	launched time.Time
 	browser  string
 	cold     bool
+	loaded   bool
+	sessions map[string]*sessionTrack
 	queue    [][]byte
+	fetched  bool
+	market   []marketplaceEvent
 }
 
-// eventShape 表示 clearcut 事件的外层形态：bare 为真时套餐与地区留空，blank 为真时公共参数留空，flags 为真时附实验开关，ui 为真时带界面会话与事件时刻，env 为真时载荷带客户端环境
+// eventShape 表示 clearcut 事件的外层形态：bare 为真时套餐与地区留空，blank 为真时公共参数留空，flags 为真时附实验开关，empty 为真时附空的开关字段，ui 为真时带界面会话与事件时刻，env 为真时载荷带客户端环境
 type eventShape struct {
-	bare, blank, flags, ui, env bool
-}
-
-// startup 记录一次冷启动中 Hub 事件的进度：loaded 计第三次 loadCodeAssist 与 fetchAvailableModels 的完成，stored 计本地存储事件与随后 fetchUserInfo 的完成，configs 计 fetchConfig 的开始
-type startup struct {
-	loaded, stored, configs atomic.Int32
+	bare, blank, flags, empty, ui, env bool
 }
 
 // SetHub 设置虚拟 Hub 的本地状态与保存函数
@@ -54,11 +56,11 @@ func (c *Client) SetHub(state HubState, save func(HubState) error) {
 	c.hub.state, c.hub.save = state, save
 }
 
-// launch 记下虚拟进程启动：language_server 在首个 unleash 请求前 416–530 ms 启动，界面会话标识随机生成
+// launch 记下虚拟进程启动：language_server 在首个 unleash 请求前 416–530 ms 启动，界面会话标识随机生成，插件市场目录等首次生成时再读取
 func (c *Client) launch(started time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.hub.launched, c.hub.browser = started.Add(-time.Duration(between(416, 530))*time.Millisecond), uuid.NewString()
+	c.hub.launched, c.hub.browser, c.hub.fetched = started.Add(-time.Duration(between(416, 530))*time.Millisecond), uuid.NewString(), false
 }
 
 // conversations 返回虚拟 Hub 的会话数
@@ -89,7 +91,7 @@ func (c *Client) log(event []byte) {
 	c.mu.Unlock()
 }
 
-// flushClearcut 把队列中的全部事件合成一个 LogRequest，以账户 Bearer 经 HTTP/2 上报，队列为空时不发
+// flushClearcut 把队列中的全部事件合成一个 LogRequest，以账户 Bearer 经 HTTP/2 上报，队列为空时不发；连接失败或返回 5xx 时这些事件放回队列前部，随下一次上报重发
 func (c *Client) flushClearcut(ctx context.Context) {
 	c.mu.Lock()
 	events := c.hub.queue
@@ -103,10 +105,14 @@ func (c *Client) flushClearcut(ctx context.Context) {
 		return
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
-	c.discard(c.auth, request)
+	if status, err := c.discard(c.auth, request); err != nil || status >= http.StatusInternalServerError {
+		c.mu.Lock()
+		c.hub.queue = append(events, c.hub.queue...)
+		c.mu.Unlock()
+	}
 }
 
-// Clearcut 在虚拟进程启动 0.25 s 后开始上报循环，每次上报结束 5 s 后上报队列中的事件，ctx 结束时返回
+// Clearcut 在虚拟进程启动 5.7 s 后首次上报队列中的事件，此后每次上报结束 5 s 后再上报，ctx 结束时返回
 func (m *Companion) Clearcut(ctx context.Context) {
 	wait := time.Until(m.started.Add(clearcutOffset + clearcutPeriod))
 	for {
@@ -147,9 +153,13 @@ func hubEnvironment(device Device) []byte {
 	return appendBytes(env, 7, []byte("unknown"))
 }
 
-// hubEvent 把一个 Hub 事件放入上报队列并返回其时刻，界面事件的 client_event_time_ms 比 language_server 收到时早 2–3 ms
+// hubEvent 把一个此刻的 Hub 事件放入上报队列并返回其时刻
 func (c *Client) hubEvent(name string, shape eventShape, params map[string]any) time.Time {
-	at := time.Now()
+	return c.hubEventAt(time.Now(), name, shape, params)
+}
+
+// hubEventAt 把一个时刻为 at 的 Hub 事件放入上报队列并返回其时刻，界面事件的 client_event_time_ms 比 language_server 收到时早 2–3 ms
+func (c *Client) hubEventAt(at time.Time, name string, shape eventShape, params map[string]any) time.Time {
 	c.mu.Lock()
 	state, browser := c.state, c.hub.browser
 	c.mu.Unlock()
@@ -176,11 +186,8 @@ func (c *Client) sinceLaunch() int {
 	return int(time.Since(c.hub.launched).Milliseconds())
 }
 
-// hubLoaded 在第三次 loadCodeAssist 与 fetchAvailableModels 都完成时记录会话摘要核对与安装状态加载，两者在套餐写入前生成
-func (c *Client) hubLoaded(progress *startup) {
-	if progress.loaded.Add(1) != 2 {
-		return
-	}
+// hubLoaded 记录冷启动的会话摘要核对与安装状态加载，两者在套餐写入前生成
+func (c *Client) hubLoaded() {
 	conversations := c.conversations()
 	reconcile := map[string]any{"duration_ms": between(3, 6), "outcome": "success", "rows": conversations, "trigger": "startup", "pruned": 0}
 	if conversations == 0 {
@@ -188,19 +195,15 @@ func (c *Client) hubLoaded(progress *startup) {
 	}
 	c.hubEvent("summary_store_reconcile", eventShape{bare: true}, reconcile)
 	c.hubEvent("hub_store_load_succeeded", eventShape{bare: true, blank: true}, c.installation(map[string]any{"file_type": "app_state"}))
-	c.hubStored(progress)
 }
 
-// hubStored 在安装状态加载与第三次 loadCodeAssist 之后的 fetchUserInfo 都完成时记录用户配置与 Hub 存储加载
-func (c *Client) hubStored(progress *startup) {
-	if progress.stored.Add(1) != 2 {
-		return
-	}
+// hubStored 记录冷启动的用户配置与 Hub 存储加载
+func (c *Client) hubStored() {
 	c.hubEvent("hub_store_load_succeeded", eventShape{blank: true}, c.installation(map[string]any{"file_type": "user_config", "auto_execution_policy": "CASCADE_COMMANDS_AUTO_EXECUTION_OFF"}))
 	c.hubEvent("hub_store_load_succeeded", eventShape{blank: true}, c.installation(map[string]any{}))
 }
 
-// hubMigrations 记录第二次 fetchConfig 开始时的迁移、摘要订阅、启动耗时与摘要核对事件
+// hubMigrations 记录冷启动第二次 fetchConfig 开始且第二轮结束时的迁移、摘要订阅、启动耗时与摘要核对事件
 func (c *Client) hubMigrations() {
 	conversations := c.conversations()
 	c.hubEvent("retroactive_migration_attempted", eventShape{blank: true}, nil)
@@ -211,9 +214,7 @@ func (c *Client) hubMigrations() {
 		"checked": conversations, "cached": conversations, "restored": 0, "dropped": 0, "skipped": 0, "cancelled": "false",
 		"trajectories_in_cascade_map": 0, "trajectories_in_cascade_map_start": 0, "duration_ms": between(0, 1),
 	}))
-	if conversations > 0 {
-		c.hubEvent("conversation_search_index_warm", eventShape{}, map[string]any{"convo_count": conversations, "duration_ms": 0, "extracted_count": 0, "db_size_bytes": 4096 * between(conversations+4, 2*conversations+8)})
-	}
+	c.hubEvent("conversation_search_index_warm", eventShape{}, c.searchIndex(conversations))
 	c.hubEvent("LS_BINARY_STARTUP", eventShape{}, map[string]any{"durationMs": c.sinceLaunch()})
 	c.hubEvent("summary_store_json_vs_sqlite", eventShape{}, map[string]any{
 		"json_count": conversations, "store_count": conversations, "raw_summary_count": conversations, "raw_summary_bytes": conversations * between(285, 314),
@@ -222,12 +223,22 @@ func (c *Client) hubMigrations() {
 	})
 }
 
-// startupConfig 包装冷启动中的 fetchConfig：第二次开始前记录迁移事件
-func (c *Client) startupConfig(ctx context.Context, progress *startup) error {
-	if progress.configs.Add(1) == 2 {
-		c.hubMigrations()
-	}
-	return c.fetchConfig(ctx)
+// searchIndex 返回会话搜索索引预热事件的参数，数据库页数随会话数增长，不少于 searchIndexPages
+func (c *Client) searchIndex(conversations int) map[string]any {
+	return map[string]any{"convo_count": conversations, "duration_ms": 0, "extracted_count": 0, "db_size_bytes": 4096 * max(searchIndexPages, between(conversations+4, 2*conversations+8))}
+}
+
+// hubLogin 记录登录序列中对照事件之前的迁移、摘要订阅、搜索索引预热与权限迁移事件，前五个的开关字段留空
+func (c *Client) hubLogin() {
+	c.hubEvent("retroactive_migration_attempted", eventShape{blank: true, empty: true}, nil)
+	c.hubEvent("retroactive_migration_skipped_already_completed", eventShape{blank: true, empty: true}, map[string]any{"status": "RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY"})
+	c.hubEvent("projects_migration_skipped_already_completed", eventShape{blank: true, empty: true}, map[string]any{"status": "MIGRATION_STATUS_COMPLETED"})
+	c.hubEvent("summaries_store_subscribe_called", eventShape{empty: true}, nil)
+	c.hubEvent("conversation_search_index_warm", eventShape{empty: true}, c.searchIndex(c.conversations()))
+	c.hubEvent("app_migration_permission_grants_v2_completed", eventShape{blank: true, flags: true}, map[string]any{
+		"projects_total": 1, "projects_migrated": 0, "projects_failed": 0, "global_failed": "false", "deduped": 0, "dropped_allow": 0, "invalid": 0,
+		"rewritten_allow": 0, "rewritten_deny": 0, "rewritten_ask": 0,
+	})
 }
 
 // coldStarted 返回虚拟进程是否以冷启动序列初始化
@@ -237,7 +248,7 @@ func (c *Client) coldStarted() bool {
 	return c.hub.cold
 }
 
-// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件，加载项目列表时读取 cascadeNuxes 并此后每 120 s 读取一次，两次统计侧栏会话数各在 60 s 后再统计一次；ctx 结束时返回
+// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件，加载项目列表后读取 cascadeNuxes 并此后每 120 s 读取一次，每次读取后记录一次会话面板展示事件，两种侧栏会话数统计此后各约每 60 s 统计一次当时的会话数；ctx 结束时返回
 func (c *Client) hubInterface(ctx context.Context) {
 	conversations := c.conversations()
 	shift := between(63, 83)
@@ -257,58 +268,63 @@ func (c *Client) hubInterface(ctx context.Context) {
 		return interfaceEvent("sidebar_conversations", false, map[string]any{"conversationCount": count})
 	}
 	grouped := func(count int) time.Time {
-		return interfaceEvent("sidebar_conversations", true, map[string]any{"conversationCount": count, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "mode": "agentManager"})
+		return interfaceEvent("sidebar_conversations", true, map[string]any{"conversationCount": count, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "mode": "agentManager", "project_4k_mode": "default"})
 	}
 	group := func() {
-		interfaceEvent("sidebar_group_by_state", true, map[string]any{"groupBy": "project", "mode": "agentManager"})
+		interfaceEvent("sidebar_group_by_state", true, map[string]any{"groupBy": "project", "mode": "agentManager", "project_4k_mode": "default"})
 	}
-	if !wait(297, 370) {
+	if !wait(430, 500) {
 		return
 	}
 	c.hubEvent("summaries_store_subscribe_called", eventShape{}, nil)
-	if !wait(24, 27) {
+	if !wait(24, 40) {
+		return
+	}
+	c.hubEvent("projects_listed", eventShape{blank: true}, map[string]any{"num_projects": 1})
+	if !wait(2, 7) {
 		return
 	}
 	counted := sidebar(0)
-	if !wait(35, 40) {
+	if !wait(44, 64) {
 		return
 	}
 	c.hubEvent("projects_listed", eventShape{blank: true, flags: true}, map[string]any{"num_projects": 1, "project_ids": "outside-of-project"})
-	if !wait(24, 25) {
+	if !wait(8, 19) {
 		return
 	}
 	load := between(84, 93)
 	interfaceEvent("trajectory_summary_load", false, map[string]any{"durationMs": load})
-	if !wait(2, 3) {
+	if !wait(1, 3) {
 		return
 	}
-	interfaceEvent("sidebar_load", false, map[string]any{"durationMs": load - between(21, 24)})
+	interfaceEvent("sidebar_load", false, map[string]any{"durationMs": load - between(21, 30)})
 	if conversations > 0 {
-		if !wait(158, 160) {
+		if !wait(205, 240) {
 			return
 		}
 		interfaceEvent("sidebar_conversation_list_loaded", false, map[string]any{"conversationCount": conversations, "latencyMs": since()})
 	}
-	if !wait(1, 2) {
+	if !wait(3, 5) {
 		return
 	}
 	group()
-	regrouped := grouped(conversations)
-	if !wait(20, 21) {
+	if !wait(33, 39) {
 		return
 	}
-	interfaceEvent("input_area_rendered", false, map[string]any{"iframeLocalTtirMs": since()})
-	if !wait(153, 161) {
+	rendered := since()
+	interfaceEvent("input_area_rendered", false, map[string]any{"iframeLocalTtirMs": rendered, "endToEndTtirMs": rendered + between(640, 810)})
+	if !wait(120, 285) {
 		return
 	}
-	group()
-	if !wait(2, 2) {
-		return
-	}
-	interfaceEvent("project_list_load", false, map[string]any{"durationMs": between(398, 414)})
+	interfaceEvent("project_list_load", false, map[string]any{"durationMs": between(440, 780)})
 	go func() {
+		if !wait(165, 265) {
+			return
+		}
 		for {
-			c.nuxes(ctx)
+			if c.nuxes(ctx) == nil && wait(56, 104) {
+				interfaceEvent("CASCADE_IMPRESSION_EVENT", true, map[string]any{"type": "", "mode": "agentManager", "project_4k_mode": "default"})
+			}
 			select {
 			case <-time.After(nuxPeriod):
 			case <-ctx.Done():
@@ -316,15 +332,28 @@ func (c *Client) hubInterface(ctx context.Context) {
 			}
 		}
 	}()
-	for _, next := range []struct {
+	if !wait(35, 41) {
+		return
+	}
+	regrouped := grouped(conversations)
+	if !wait(126, 223) {
+		return
+	}
+	group()
+	recounts := []struct {
 		at    time.Time
 		count func(int) time.Time
-	}{{counted, sidebar}, {regrouped, grouped}} {
+	}{{counted.Add(sidebarRefresh + time.Duration(between(460, 660))*time.Millisecond), sidebar}, {regrouped.Add(sidebarRefresh + time.Duration(between(890, 990))*time.Millisecond), grouped}}
+	for {
+		next := &recounts[0]
+		if recounts[1].at.Before(next.at) {
+			next = &recounts[1]
+		}
 		select {
-		case <-time.After(time.Until(next.at.Add(sidebarRefresh + time.Duration(between(0, 2))*time.Millisecond))):
+		case <-time.After(time.Until(next.at)):
 		case <-ctx.Done():
 			return
 		}
-		next.count(c.conversations())
+		next.at = next.count(c.conversations()).Add(sidebarRefresh + time.Duration(between(1, 3))*time.Millisecond)
 	}
 }

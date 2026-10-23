@@ -48,7 +48,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 	var result generationResult
 	if err == nil {
 		s.storeResponse(id, request, prepared, generationResult{}, responseShell(id, created, "in_progress", request))
-		result, err = consumeEvents(ctx, s.hostedImages(ctx, request.Tools, prepared.generate.Contents, events), nil)
+		result, err = consumeEvents(ctx, s.hostedImages(ctx, request.Tools, prepared.generate.Session, prepared.generate.Contents, events), nil)
 	}
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
@@ -56,7 +56,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 		s.storeResponse(id, request, prepared, generationResult{}, responseShell(id, created, "cancelled", request))
 	case err != nil:
 		failed := responseShell(id, created, "failed", request)
-		failed["error"] = map[string]any{"code": responsesErrorCode(err), "message": err.Error()}
+		failed["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}
 		s.storeResponse(id, request, prepared, generationResult{}, failed)
 	default:
 		s.storeResponse(id, request, prepared, result, buildResponsesObject(id, created, request, result, compaction, searchOnly(prepared.generate.Tools)))
@@ -99,7 +99,7 @@ func (s *server) streamBackground(w http.ResponseWriter, r *http.Request, reques
 	}
 	reported := func(error) bool { return !errors.Is(ctx.Err(), context.Canceled) }
 	if err == nil {
-		events = s.hostedImages(ctx, request.Tools, prepared.generate.Contents, events)
+		events = s.hostedImages(ctx, request.Tools, prepared.generate.Session, prepared.generate.Contents, events)
 		inProgress := responseShell(id, created, "in_progress", request)
 		s.storeResponse(id, request, prepared, generationResult{}, inProgress)
 		_ = writer.emit("response.in_progress", map[string]any{"response": inProgress})
@@ -113,7 +113,7 @@ func (s *server) streamBackground(w http.ResponseWriter, r *http.Request, reques
 		s.storeResponse(id, request, prepared, generationResult{}, responseShell(id, created, "cancelled", request))
 	case err != nil:
 		failed := responseShell(id, created, "failed", request)
-		failed["error"] = map[string]any{"code": responsesErrorCode(err), "message": err.Error()}
+		failed["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}
 		s.storeResponse(id, request, prepared, generationResult{}, failed)
 	}
 }

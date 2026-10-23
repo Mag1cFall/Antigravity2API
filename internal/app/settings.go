@@ -11,7 +11,7 @@ import (
 
 // settings 是 /api/settings 的响应
 type settings struct {
-	// Values 是除 ADMIN_PASSWORD 外各配置项在 .env 中的文本值
+	// Values 是 .env 叠加进程环境变量后除 ADMIN_PASSWORD 外各配置项的文本值
 	Values           map[string]string `json:"values"`
 	AdminPasswordSet bool              `json:"admin_password_set"`
 	// RestartRequired 是保存值与运行值不同、重启服务后才生效的配置项
@@ -28,7 +28,7 @@ func (s *server) getSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.settings(saved))
 }
 
-// updateSettings 按 .env 的解析与校验规则合并提交的配置项，原子写回 .env；除监听地址与目录外的项替换运行配置，下一次请求生效
+// updateSettings 按 .env 的解析与校验规则合并提交的配置项，原子写回 .env；除监听地址与目录外的项替换运行配置，命令行覆盖的代理保持，下一次请求生效
 func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Values map[string]string `json:"values"`
@@ -58,6 +58,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	running := cfg
+	s.deps.Overrides.Apply(&running)
 	running.Listen, running.AuthDir, running.RuntimeDir = s.boot.Listen, s.boot.AuthDir, s.boot.RuntimeDir
 	s.live.Store(&running)
 	s.deps.Logger.SetLevel(running.LogLevel)
@@ -68,6 +69,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ledger.SetBodyCapture(running.RequestLogBodies)
 	s.auth.update(running)
+	s.deps.Service.SetProxies(running.Proxies())
 	slog.InfoContext(r.Context(), "服务配置已保存 | 变更="+strings.Join(saved.Changed(cfg), ","), "source", "service")
 	writeJSON(w, http.StatusOK, s.settings(cfg))
 }

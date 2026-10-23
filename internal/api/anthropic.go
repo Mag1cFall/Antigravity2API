@@ -30,15 +30,20 @@ type anthropicRequest struct {
 		Display      string `json:"display"`
 	} `json:"thinking"`
 	OutputConfig *struct {
-		Effort string `json:"effort"`
-		Format *struct {
-			Type   string          `json:"type"`
-			Schema json.RawMessage `json:"schema"`
-		} `json:"format"`
+		Effort string           `json:"effort"`
+		Format *anthropicFormat `json:"format"`
 	} `json:"output_config"`
-	Metadata *struct {
+	// OutputFormat 为 structured-outputs beta 的顶层结构化输出
+	OutputFormat *anthropicFormat `json:"output_format"`
+	Metadata     *struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
+}
+
+// anthropicFormat 为结构化输出的格式
+type anthropicFormat struct {
+	Type   string          `json:"type"`
+	Schema json.RawMessage `json:"schema"`
 }
 
 // legacySession 匹配 Claude Code 旧式 user_id 末尾的 session 段
@@ -105,6 +110,7 @@ type anthropicContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	Citations []any           `json:"citations,omitempty"`
+	Data      string          `json:"data,omitempty"`
 }
 
 func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +129,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	generateRequest.Unary = !request.Stream
 	events, err := s.service.Generate(r.Context(), generateRequest)
 	var first antigravity.Event
 	if err == nil && request.Stream {
@@ -143,10 +150,11 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 			tokens, _ := s.service.CountTokens(r.Context(), generateRequest)
 			usage = &antigravity.Usage{InputTokens: tokens}
 		}
+		thinking, omitted := request.thinkingBlocks()
 		writer := &anthropicStreamWriter{
 			w: w, id: messageID, model: request.Model, usage: usage,
-			omitted: request.Thinking != nil && request.Thinking.Display == "omitted",
-			search:  searchOnly(generateRequest.Tools),
+			thinking: thinking, omitted: omitted,
+			search: searchOnly(generateRequest.Tools), media: s.mediaOutputFor(r),
 		}
 		if err := writer.start(); err != nil {
 			return
@@ -161,7 +169,21 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, buildAnthropicResponse(messageID, request.Model, result, request.Thinking != nil && request.Thinking.Display == "omitted"))
+	thinking, omitted := request.thinkingBlocks()
+	media := s.mediaOutputFor(r)
+	if err := media.saveResults(result); err != nil {
+		writeAnthropicRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildAnthropicResponse(messageID, request.Model, result, thinking, omitted, media))
+}
+
+// thinkingBlocks 返回请求是否要求思考类块，以及思考块是否省略思考正文
+func (request anthropicRequest) thinkingBlocks() (bool, bool) {
+	if request.Thinking == nil || request.Thinking.Type == "disabled" {
+		return false, false
+	}
+	return true, request.Thinking.Display == "omitted"
 }
 
 func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -216,9 +238,15 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 	}
 	contents := make([]antigravity.Content, 0, len(request.Messages))
 	var reminders []antigravity.Part
+	declared := slices.Clone(request.Tools)
+	known := map[string]anthropicTool{}
+	for _, tool := range request.Tools {
+		known[tool.Name] = tool
+	}
 	for _, message := range request.Messages {
 		if message.Role == "system" {
-			text, err := anthropicSystemText(message.Content)
+			var text string
+			text, declared, err = anthropicSystemMessage(message.Content, declared, known)
 			if err != nil {
 				return antigravity.GenerateRequest{}, fmt.Errorf("system message: %w", err)
 			}
@@ -243,7 +271,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 	if len(reminders) > 0 {
 		contents = append(contents, antigravity.Content{Role: antigravity.RoleUser, Parts: reminders})
 	}
-	tools, err := mapAnthropicTools(request.Tools, request.ToolChoice)
+	tools, err := mapAnthropicTools(declared, request.ToolChoice)
 	if err != nil {
 		return antigravity.GenerateRequest{}, err
 	}
@@ -263,16 +291,18 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 	if request.Thinking != nil && request.Thinking.Type == "disabled" {
 		config.ReasoningEffort = "none"
 	}
+	format := request.OutputFormat
 	if request.OutputConfig != nil {
 		config.ReasoningEffort = request.OutputConfig.Effort
-		if format := request.OutputConfig.Format; format != nil {
-			switch format.Type {
-			case "json_schema":
-				config.ResponseMIMEType, config.ResponseSchema = "application/json", format.Schema
-			default:
-				return antigravity.GenerateRequest{}, fmt.Errorf("unsupported output_config.format type %q", format.Type)
-			}
+		if request.OutputConfig.Format != nil {
+			format = request.OutputConfig.Format
 		}
+	}
+	if format != nil {
+		if format.Type != "json_schema" {
+			return antigravity.GenerateRequest{}, fmt.Errorf("unsupported output format type %q", format.Type)
+		}
+		config.ResponseMIMEType, config.ResponseSchema = "application/json", format.Schema
 	}
 	return antigravity.GenerateRequest{
 		ID: id, Model: request.Model, System: system, Contents: contents, Config: config, Tools: tools,
@@ -304,6 +334,55 @@ func anthropicSystemText(raw json.RawMessage) (string, error) {
 		}
 	}
 	return strings.Join(texts, "\n"), nil
+}
+
+// anthropicSystemMessage 返回会话中途 system 消息的文本，并按其中的 tool_addition 与 tool_removal 依次增删声明的工具：按值定义的工具记入 known 并声明，按名引用的工具从 known 中恢复声明，撤下的工具不再声明
+func anthropicSystemMessage(raw json.RawMessage, declared []anthropicTool, known map[string]anthropicTool) (string, []anthropicTool, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text, declared, nil
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+		Tool struct {
+			Type       string        `json:"type"`
+			Name       string        `json:"name"`
+			Definition anthropicTool `json:"definition"`
+		} `json:"tool"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", nil, fmt.Errorf("content must be a string or block array")
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		name := block.Tool.Name
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				texts = append(texts, block.Text)
+			}
+		case "tool_addition":
+			switch block.Tool.Type {
+			case "tool_definition":
+				name = block.Tool.Definition.Name
+				known[name] = block.Tool.Definition
+			case "tool_reference":
+			default:
+				continue
+			}
+			if tool, ok := known[name]; ok && !slices.ContainsFunc(declared, func(item anthropicTool) bool { return item.Name == name }) {
+				declared = append(declared, tool)
+			}
+		case "tool_removal":
+			if block.Tool.Type == "tool_reference" {
+				declared = slices.DeleteFunc(declared, func(item anthropicTool) bool { return item.Name == name })
+			}
+		default:
+			return "", nil, fmt.Errorf("unsupported system block type %q", block.Type)
+		}
+	}
+	return strings.Join(texts, "\n"), declared, nil
 }
 
 func anthropicRole(role string) (antigravity.Role, error) {
@@ -354,6 +433,8 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 			Thinking  string          `json:"thinking"`
 			Source    json.RawMessage `json:"source"`
 			Title     string          `json:"title"`
+			ToolName  string          `json:"tool_name"`
+			FileID    string          `json:"file_id"`
 		}
 		if err := json.Unmarshal(rawBlock, &block); err != nil {
 			return nil, err
@@ -453,6 +534,15 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 			}
 			parts = append(parts, antigravity.Part{Text: "Search result: " + block.Title + "\n" + source})
 			parts = append(parts, nested...)
+		case "container_upload":
+			flushPendingSignature()
+			if block.FileID == "" {
+				return nil, fmt.Errorf("container_upload file_id is required")
+			}
+			parts = append(parts, antigravity.Part{File: &antigravity.FileRef{ID: block.FileID}})
+		case "tool_reference":
+			flushPendingSignature()
+			parts = append(parts, antigravity.Part{Text: "Tool reference: " + block.ToolName})
 		case "server_tool_use":
 			flushPendingSignature()
 			parts = append(parts, antigravity.Part{Text: "Server tool call " + block.Name + ": " + string(block.Input)})
@@ -499,7 +589,19 @@ func mapAnthropicTools(tools []anthropicTool, choice json.RawMessage) (antigravi
 			}
 			mapped.Functions = append(mapped.Functions, declaration)
 		case strings.HasPrefix(typeName, "web_search_"):
-			mapped.GoogleSearch = json.RawMessage(`{}`)
+			var allowed, blocked []string
+			for name, target := range map[string]*[]string{"allowed_domains": &allowed, "blocked_domains": &blocked} {
+				if raw := tool.Options[name]; rawJSONConfigured(raw) {
+					if err := json.Unmarshal(raw, target); err != nil {
+						return antigravity.Tools{}, fmt.Errorf("web_search %s must be an array of strings", name)
+					}
+				}
+			}
+			search, err := searchOptions("", tool.Options["user_location"], allowed, blocked)
+			if err != nil {
+				return antigravity.Tools{}, err
+			}
+			mapped.GoogleSearch, mapped.Search = json.RawMessage(`{}`), search
 		case strings.HasPrefix(typeName, "web_fetch_"), strings.HasPrefix(typeName, "code_execution_"),
 			strings.HasPrefix(typeName, "tool_search_tool_"), strings.Contains(typeName, "toolset"):
 		case typeName == "", typeName == "custom":
@@ -593,8 +695,8 @@ func anthropicToolChoice(raw json.RawMessage) (antigravity.ToolConfig, error) {
 	return config, nil
 }
 
-// buildAnthropicResponse 构造非流式 Message，omitted 为 thinking.display 为 omitted
-func buildAnthropicResponse(id string, model string, result generationResult, omitted bool) map[string]any {
+// buildAnthropicResponse 构造非流式 Message，thinking 为请求要求思考类块，omitted 为 thinking.display 为 omitted，media 为生成媒体的引用方式
+func buildAnthropicResponse(id string, model string, result generationResult, thinking, omitted bool, media mediaOutput) map[string]any {
 	var stopSequence any
 	if result.stopSequence != "" {
 		stopSequence = result.stopSequence
@@ -604,7 +706,7 @@ func buildAnthropicResponse(id string, model string, result generationResult, om
 		"type":          "message",
 		"role":          "assistant",
 		"model":         model,
-		"content":       anthropicBlocks(id, result, omitted),
+		"content":       anthropicBlocks(id, result, thinking, omitted, media),
 		"stop_reason":   anthropicStop(result.finishReason, len(result.toolCalls) > 0),
 		"stop_sequence": stopSequence,
 	}
@@ -621,18 +723,23 @@ func buildAnthropicResponse(id string, model string, result generationResult, om
 	return response
 }
 
-// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
-func anthropicBlocks(id string, result generationResult, omitted bool) []anthropicContentBlock {
+// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，没有时在请求要求思考类块时为 redacted_thinking 块，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
+func anthropicBlocks(id string, result generationResult, thinking, omitted bool, media mediaOutput) []anthropicContentBlock {
 	blocks := make([]anthropicContentBlock, 0)
-	thinking := func() *anthropicContentBlock {
+	open := func() *anthropicContentBlock {
 		if len(blocks) > 0 && blocks[len(blocks)-1].Type == "thinking" {
 			return &blocks[len(blocks)-1]
 		}
 		return nil
 	}
 	sign := func(signature string) {
-		if block := thinking(); block != nil && signature != "" && *block.Signature == "" {
+		block := open()
+		switch {
+		case signature == "":
+		case block != nil && *block.Signature == "":
 			*block.Signature = signature
+		case block == nil && thinking:
+			blocks = append(blocks, anthropicContentBlock{Type: "redacted_thinking", Data: signature})
 		}
 	}
 	for _, event := range result.events {
@@ -644,18 +751,18 @@ func anthropicBlocks(id string, result generationResult, omitted bool) []anthrop
 				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: event.Text})
 			}
 		case antigravity.EventReasoning:
-			if thinking() == nil {
+			if open() == nil {
 				text, signature := "", ""
 				blocks = append(blocks, anthropicContentBlock{Type: "thinking", Thinking: &text, Signature: &signature})
 			}
 			if !omitted {
-				*thinking().Thinking += event.Text
+				*open().Thinking += event.Text
 			}
 			sign(event.ThoughtSignature)
 		case antigravity.EventThoughtSignature:
 			sign(event.ThoughtSignature)
 		case antigravity.EventMedia:
-			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: mediaMarkdown(*event.Media)})
+			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: media.markdown(*event.Media)})
 		case antigravity.EventToolCall:
 			if event.ToolCall != nil {
 				sign(event.ToolCall.ThoughtSignature)
@@ -759,12 +866,13 @@ func anthropicTokenLimit(limit int64) any {
 	return limit
 }
 
-// anthropicStreamWriter 把规范事件写成 Messages 流，usage 为 message_start 的输入用量，omitted 时 thinking 块不带思考正文
+// anthropicStreamWriter 把规范事件写成 Messages 流，usage 为 message_start 的输入用量，thinking 为请求要求思考类块，omitted 时 thinking 块不带思考正文
 type anthropicStreamWriter struct {
 	w                 http.ResponseWriter
 	id                string
 	model             string
 	usage             *antigravity.Usage
+	thinking          bool
 	omitted           bool
 	blockIndex        int
 	currentBlock      string
@@ -773,16 +881,17 @@ type anthropicStreamWriter struct {
 	search    bool
 	grounding *antigravity.Grounding
 	text      strings.Builder
+	media     mediaOutput
 }
 
 func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter, events <-chan antigravity.Event) {
-	emit := writer.live
+	emit, release := writer.live, func() error { return nil }
 	if writer.search {
-		emit = holdUntilGrounding(writer.live)
+		emit, release = holdUntilGrounding(writer.live)
 	}
 	result, err := consumeStreamEvents(r.Context(), events, emit, func() error { return writeAnthropicPing(writer.w) })
 	if err != nil {
-		if shouldWriteRequestError(r, err) {
+		if shouldWriteRequestError(r, err) && release() == nil {
 			_ = writer.error(err)
 		}
 		return
@@ -850,7 +959,9 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 		if err := writer.ensureBlock("thinking"); err != nil {
 			return err
 		}
-		writer.sign(event.ThoughtSignature)
+		if err := writer.sign(event.ThoughtSignature); err != nil {
+			return err
+		}
 		if writer.omitted {
 			return nil
 		}
@@ -859,8 +970,11 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 			"delta": map[string]any{"type": "thinking_delta", "thinking": event.Text},
 		})
 	case antigravity.EventThoughtSignature:
-		writer.sign(event.ThoughtSignature)
+		return writer.sign(event.ThoughtSignature)
 	case antigravity.EventMedia:
+		if err := writer.media.save(*event.Media); err != nil {
+			return err
+		}
 		if err := writer.closeBlock(); err != nil {
 			return err
 		}
@@ -869,7 +983,7 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 		}
 		if err := writer.emit("content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": writer.blockIndex,
-			"delta": map[string]any{"type": "text_delta", "text": mediaMarkdown(*event.Media)},
+			"delta": map[string]any{"type": "text_delta", "text": writer.media.markdown(*event.Media)},
 		}); err != nil {
 			return err
 		}
@@ -879,7 +993,9 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 			return nil
 		}
 		call := event.ToolCall
-		writer.sign(call.ThoughtSignature)
+		if err := writer.sign(call.ThoughtSignature); err != nil {
+			return err
+		}
 		if err := writer.closeBlock(); err != nil {
 			return err
 		}
@@ -901,11 +1017,26 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 	return nil
 }
 
-// sign 记下正在进行的 thinking 块的签名
-func (writer *anthropicStreamWriter) sign(signature string) {
-	if writer.currentBlock == "thinking" && writer.thinkingSignature == "" {
-		writer.thinkingSignature = signature
+// sign 记下正在进行的 thinking 块的签名，没有进行中的 thinking 块且请求要求思考类块时写出 redacted_thinking 块
+func (writer *anthropicStreamWriter) sign(signature string) error {
+	switch {
+	case signature == "":
+	case writer.currentBlock == "thinking":
+		if writer.thinkingSignature == "" {
+			writer.thinkingSignature = signature
+		}
+	case writer.thinking:
+		if err := writer.closeBlock(); err != nil {
+			return err
+		}
+		block := map[string]any{"type": "redacted_thinking", "data": signature}
+		if err := writer.emit("content_block_start", map[string]any{"type": "content_block_start", "index": writer.blockIndex, "content_block": block}); err != nil {
+			return err
+		}
+		writer.currentBlock = "redacted_thinking"
+		return writer.closeBlock()
 	}
+	return nil
 }
 
 func (writer *anthropicStreamWriter) ensureBlock(blockType string) error {
@@ -995,7 +1126,7 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 func (writer *anthropicStreamWriter) error(err error) error {
 	return writer.emit("error", map[string]any{
 		"type":  "error",
-		"error": map[string]string{"type": anthropicErrorType(err), "message": anthropicErrorMessage(err)},
+		"error": map[string]string{"type": anthropicErrorType(err), "message": publicErrorMessage(statusFromError(err), anthropicErrorMessage(err))},
 	})
 }
 

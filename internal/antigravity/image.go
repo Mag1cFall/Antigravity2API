@@ -63,7 +63,7 @@ func BuildImageEnvelope(project string, model CatalogModel, conversation Convers
 	}
 	return ImageEnvelope{
 		Project:     project,
-		RequestID:   fmt.Sprintf("%s/%d/%s/%d", requestTypeImage, now.UnixMilli(), conversation.TrajectoryID, 2*conversation.Turn+2),
+		RequestID:   fmt.Sprintf("%s/%d/%s/%d", requestTypeImage, now.UnixMilli(), conversation.TrajectoryID, conversation.Step+1),
 		Request:     ImageRequest{Contents: wired, GenerationConfig: ImageGenerationConfig{CandidateCount: 1, ImageConfig: image}},
 		Model:       model.ID,
 		UserAgent:   envelopeUserAgent,
@@ -97,7 +97,7 @@ func (c *Client) WriteTrajectoryACL(ctx context.Context, trajectory string) {
 
 // GenerateContent 以 Content-Length 正文发送非流式 generateContent，把响应解码为与流式相同的规范事件，同时返回本次请求与响应的正文
 func (c *Client) GenerateContent(ctx context.Context, envelope any) (<-chan Event, *Exchange, error) {
-	payload, err := hubJSON(envelope)
+	payload, err := c.device.hubJSON(envelope)
 	if err != nil {
 		return nil, nil, err
 	}

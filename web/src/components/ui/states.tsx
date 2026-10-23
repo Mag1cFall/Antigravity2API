@@ -41,7 +41,7 @@ export function Loading({ label, rows = 4 }: { label: string; rows?: number }) {
       {Array.from({ length: rows }, (_, index) => (
         <div
           key={index}
-          className="flex h-12 items-center gap-6 border-t border-border px-6 first:border-t-0"
+          className="flex h-12 items-center gap-6 border-t border-border px-6 first:border-t-0 max-sm:px-4"
         >
           {visible && (
             <>

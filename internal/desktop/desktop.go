@@ -8,11 +8,14 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -51,7 +54,7 @@ const windowPrefix = "desktop:window:"
 // maximisedEvent 是通知页面窗口最大化状态的事件名
 const maximisedEvent = "desktop:maximised"
 
-// closeToTray 表示关闭窗口时隐藏到托盘；Linux 的托盘依赖桌面环境扩展，关闭窗口即退出
+// closeToTray 表示关闭窗口后应用留在托盘，窗口与 WebView 一并销毁，再次显示时重建；Linux 的托盘依赖桌面环境扩展，关闭窗口即退出
 var closeToTray = runtime.GOOS != "linux"
 
 // windowActions 为页面顶栏窗口按钮对应的窗口操作
@@ -78,7 +81,7 @@ var loadedEvents = []events.WindowEventType{
 	events.Linux.WindowLoadFinished,
 }
 
-// Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘，阻塞到退出；已有实例时唤起它的窗口并退出本进程
+// Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘（隐藏启动只创建托盘，显示时创建窗口），阻塞到退出；已有实例时唤起它的窗口并退出本进程；Windows 缺少 WebView2 运行时时只创建托盘，管理端在默认浏览器中打开
 func Run(options Options) error {
 	page, err := windowURL(options.URL)
 	if err != nil {
@@ -90,11 +93,26 @@ func Run(options Options) error {
 	}
 
 	var app *application.App
-	var window *application.WebviewWindow
+	// window 为当前主窗口，关闭到托盘后窗口与 WebView 一并销毁，值为 nil
+	var window atomic.Pointer[application.WebviewWindow]
+	// opening 串行化主窗口的创建
+	var opening sync.Mutex
+	webview := true
+	var open func() *application.WebviewWindow
 	show := func() {
-		window.Show()
-		window.UnMinimise()
-		window.Focus()
+		if !webview {
+			openBrowser(app, options.URL)
+			return
+		}
+		opening.Lock()
+		current := window.Load()
+		if current == nil {
+			current = open()
+		}
+		opening.Unlock()
+		current.Show()
+		current.UnMinimise()
+		current.Focus()
 	}
 	app = application.New(application.Options{
 		Name: options.Title,
@@ -103,72 +121,69 @@ func Run(options Options) error {
 			UniqueID:               uniqueID,
 			OnSecondInstanceLaunch: func(application.SecondInstanceData) { show() },
 		},
-		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir, AdditionalBrowserArgs: []string{"--disable-lcd-text"}},
+		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir, AdditionalBrowserArgs: []string{"--disable-lcd-text"}, DisableQuitOnLastWindowClosed: closeToTray},
 		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
 			if target, ok := strings.CutPrefix(message, openPrefix); ok {
 				openBrowser(app, target)
 			} else if action, ok := strings.CutPrefix(message, windowPrefix); ok && windowActions[action] != nil {
-				windowActions[action](window)
+				if current := window.Load(); current != nil {
+					windowActions[action](current)
+				}
 			}
 		},
 	})
 
-	window = app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Title:            options.Title,
-		URL:              page.String(),
-		Frameless:        true,
-		Hidden:           options.Hidden,
-		Width:            1280,
-		Height:           800,
-		MinWidth:         960,
-		MinHeight:        600,
-		BackgroundColour: application.NewRGB(0xe6, 0xe7, 0xed),
-	})
-	if closeToTray {
-		window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
-			window.Hide()
-			event.Cancel()
+	if runtime.GOOS == "windows" && app.Env.Info().PlatformInfo["WebView2"] == "" {
+		webview = false
+		addTray(app, options, page, false, show)
+		return serve(app, options, page, func(ready bool) {
+			slog.Warn("没有找到 WebView2 运行时，管理端在默认浏览器中打开")
+			if ready && !options.Hidden {
+				app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { show() })
+			}
 		})
 	}
-	notifyMaximised := func(*application.WindowEvent) {
-		window.ExecJS(fmt.Sprintf("window.dispatchEvent(new CustomEvent(%q,{detail:%t}))", maximisedEvent, window.IsMaximised()))
-	}
-	window.OnWindowEvent(events.Common.WindowDidResize, notifyMaximised)
-	for _, loaded := range loadedEvents {
-		window.OnWindowEvent(loaded, func(event *application.WindowEvent) {
-			markReady(window)
-			window.ExecJS(pageScript)
-			notifyMaximised(event)
+	open = func() *application.WebviewWindow {
+		created := app.Window.NewWithOptions(application.WebviewWindowOptions{
+			Title:            options.Title,
+			URL:              page.String(),
+			Frameless:        true,
+			Width:            1280,
+			Height:           800,
+			MinWidth:         960,
+			MinHeight:        600,
+			BackgroundColour: application.NewRGB(0xe6, 0xe7, 0xed),
 		})
+		window.Store(created)
+		created.OnWindowEvent(events.Common.WindowClosing, func(*application.WindowEvent) { window.CompareAndSwap(created, nil) })
+		notifyMaximised := func(*application.WindowEvent) {
+			created.ExecJS(fmt.Sprintf("window.dispatchEvent(new CustomEvent(%q,{detail:%t}))", maximisedEvent, created.IsMaximised()))
+		}
+		created.OnWindowEvent(events.Common.WindowDidResize, notifyMaximised)
+		for _, loaded := range loadedEvents {
+			created.OnWindowEvent(loaded, func(event *application.WindowEvent) {
+				markReady(created)
+				created.ExecJS(pageScript)
+				notifyMaximised(event)
+			})
+		}
+		return created
+	}
+	if !options.Hidden {
+		open()
 	}
 	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(*application.ApplicationEvent) { show() })
 
-	menu := app.NewMenu()
-	menu.Add("显示窗口").OnClick(func(*application.Context) { show() })
-	menu.Add("在浏览器中打开").OnClick(func(*application.Context) { openBrowser(app, options.URL) })
-	menu.Add("复制 API 地址").OnClick(func(*application.Context) {
-		app.Clipboard.SetText(page.Scheme + "://" + page.Host)
-	})
-	menu.AddSeparator()
-	enabled, _ := app.Autostart.IsEnabled()
-	menu.AddCheckbox("开机启动", enabled).OnClick(func(click *application.Context) {
-		toggle := app.Autostart.Disable
-		if click.IsChecked() {
-			toggle = func() error { return enableAutostart(app) }
-		}
-		if err := toggle(); err != nil {
-			click.ClickedMenuItem().SetChecked(!click.IsChecked())
-			showError(app, err)
+	addTray(app, options, page, true, show)
+	return serve(app, options, page, func(ready bool) {
+		if current := window.Load(); !ready && current != nil {
+			current.Hide()
 		}
 	})
-	menu.AddSeparator()
-	menu.Add("退出").OnClick(func(*application.Context) { app.Quit() })
-	tray := app.SystemTray.New()
-	tray.SetIcon(icon)
-	tray.SetTooltip(options.Title)
-	tray.SetMenu(menu)
-	tray.OnClick(show)
+}
 
+// serve 在后台运行服务，开始监听或先行结束后以是否在监听调用 ready，再运行应用直到退出；服务先于退出结束时显示其错误并退出应用
+func serve(app *application.App, options Options, page *url.URL, ready func(bool)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var served error
@@ -177,9 +192,7 @@ func Run(options Options) error {
 		defer close(finished)
 		served = options.Serve(ctx)
 	}()
-	if !waitServing(page.Host, finished) {
-		window.Hide()
-	}
+	ready(waitServing(page.Host, finished))
 	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		go func() {
 			<-finished
@@ -192,7 +205,7 @@ func Run(options Options) error {
 			app.Quit()
 		}()
 	})
-	err = app.Run()
+	err := app.Run()
 	cancel()
 	<-finished
 	return errors.Join(err, served)

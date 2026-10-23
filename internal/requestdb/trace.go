@@ -30,14 +30,14 @@ const (
 // StatusClientClosed 是请求被取消时记录的状态码
 const StatusClientClosed = 499
 
-// ErrRequestTimeout 是请求超过 REQUEST_TIMEOUT 时的取消原因，公开协议以 504 返回
+// ErrRequestTimeout 是等待上游超过 REQUEST_TIMEOUT 时的取消原因，公开协议以 504 返回
 var ErrRequestTimeout error = requestTimeout{}
 
 // requestTimeout 是 ErrRequestTimeout 的类型
 type requestTimeout struct{}
 
 func (requestTimeout) Error() string {
-	return "请求超过 REQUEST_TIMEOUT"
+	return "等待上游超过 REQUEST_TIMEOUT"
 }
 
 // HTTPStatus 返回公开协议使用的状态码
@@ -66,6 +66,8 @@ type Trace struct {
 	pending *antigravity.Usage
 	// cancelled 是请求 context 之外取消生成的原因
 	cancelled error
+	// watch 在执行账户变化时接收进行中的记录
+	watch func(Row)
 }
 
 // NewTrace 以请求进入服务的时间与请求方字段开始一条记录
@@ -114,7 +116,12 @@ func (t *Trace) SetRequest(stream bool, model string) {
 	}
 }
 
-// SetAccount 记录执行账户并写进度日志，首次调用时记下从请求进入到取得账户的排队耗时
+// Watch 设置执行账户变化时接收进行中记录的函数，在请求开始生成前调用
+func (t *Trace) Watch(watch func(Row)) {
+	t.watch = watch
+}
+
+// SetAccount 记录执行账户并写进度日志，首次调用时记下从请求进入到取得账户的排队耗时，账户变化时把进行中的记录交给 Watch 设置的函数
 func (t *Trace) SetAccount(account string) {
 	if t == nil {
 		return
@@ -132,6 +139,9 @@ func (t *Trace) SetAccount(account string) {
 		progress(slog.LevelDebug, id, account, fmt.Sprintf("分配账户 | 账户=%s | 排队=%dms", account, queue))
 	case previous != account:
 		progress(slog.LevelWarn, id, account, fmt.Sprintf("切换账户 | 账户=%s | 上一账户=%s", account, previous))
+	}
+	if previous != account && t.watch != nil {
+		t.watch(t.Snapshot())
 	}
 }
 

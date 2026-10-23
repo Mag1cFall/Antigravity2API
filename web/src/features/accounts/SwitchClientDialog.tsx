@@ -5,13 +5,12 @@ import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
-import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useSwitchAccount } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
 import { fill, useMessages } from '@/lib/i18n'
 
-// SwitchClientDialog 确认后把本机官方客户端切换到账户 email 并重新打开，显示进度与结果；variant 为 icon 时触发按钮是带提示的图标按钮
+// SwitchClientDialog 确认后把本机官方客户端切换到账户 email 并重新打开，进度与结果只在对话框中显示；variant 为 icon 时触发按钮是带提示的图标按钮
 export function SwitchClientDialog({
   email,
   variant,
@@ -26,11 +25,7 @@ export function SwitchClientDialog({
   const [open, setOpen] = useState(false)
   const switching = useSwitchAccount()
   const start = () => {
-    switching.mutate(email, {
-      onSuccess: (result) => {
-        toast({ tone: 'success', title: fill(m.switchDone, { email: result.account }) })
-      },
-    })
+    switching.mutate(email)
   }
   const close = (next: boolean) => {
     if (switching.isPending) return

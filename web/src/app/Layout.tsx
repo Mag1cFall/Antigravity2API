@@ -1,26 +1,20 @@
-import { useQuery } from '@tanstack/react-query'
 import { Navigate, Outlet, useLocation } from 'react-router'
 
-import { connectionKey, useAdminEvents } from '@/app/events'
+import { useAdminEvents, useConnection } from '@/app/events'
 import { Header } from '@/app/Header'
 import { appMessages } from '@/app/messages'
 import { Loading } from '@/components/ui/states'
 import { useSession } from '@/features/service/queries'
 import { useMessages } from '@/lib/i18n'
 
-// Layout 是登录后的外壳：顶栏与居中的页面内容，内容区单独滚动
+// Layout 是登录后的外壳：顶栏与居中的页面内容，内容区单独滚动并至少占满可视高度
 export function Layout() {
   const m = useMessages(appMessages)
   const location = useLocation()
   const session = useSession()
   const authenticated = session.data?.authenticated === true
   useAdminEvents(authenticated)
-  const connected = useQuery({
-    queryKey: connectionKey,
-    queryFn: () => true,
-    enabled: false,
-    initialData: true,
-  }).data
+  const connection = useConnection()
   if (session.isPending) return <Loading label={m.loading} />
   if (session.data && !authenticated) {
     return (
@@ -34,7 +28,7 @@ export function Layout() {
     <div className="flex h-dvh flex-col overflow-hidden safe-x">
       <a
         href="#main"
-        className="sr-only z-toast rounded-md bg-surface px-4 py-2 focus:not-sr-only focus:fixed focus:top-2 focus:left-2"
+        className="sr-only z-toast rounded-md bg-surface text-sm font-medium shadow-popover focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:px-4 focus:py-2"
       >
         {m.skipToContent}
       </a>
@@ -42,9 +36,9 @@ export function Layout() {
       <main
         id="main"
         tabIndex={-1}
-        className="relative min-h-0 flex-1 [scrollbar-gutter:stable_both-edges] overflow-y-auto focus:outline-none"
+        className="relative flex min-h-0 flex-1 [scrollbar-gutter:stable_both-edges] flex-col overflow-y-auto focus:outline-none"
       >
-        {!connected && (
+        {connection === 'closed' && (
           <p
             role="status"
             className="sticky top-0 z-sticky bg-warning-soft px-6 py-2 text-center text-sm text-warning-text"
@@ -52,7 +46,7 @@ export function Layout() {
             {m.eventsDisconnected}
           </p>
         )}
-        <div className="mx-auto flex w-full max-w-page flex-col gap-6 px-6 pt-4 pb-12 max-sm:px-4 max-sm:pt-2">
+        <div className="mx-auto flex w-full max-w-page flex-1 flex-col gap-6 px-6 pt-4 pb-12 max-sm:px-4 max-sm:pt-2">
           <Outlet />
         </div>
       </main>

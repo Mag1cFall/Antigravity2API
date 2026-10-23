@@ -10,7 +10,7 @@ export const settingsMessages = defineMessages(
     service: '服务',
     serviceDescription: '服务在哪个地址监听，账户与运行数据存在哪里，客户端用什么 key 调用。',
     network: '网络',
-    networkDescription: '访问 Google 时经过的代理，以及服务前面的反向代理。',
+    networkDescription: '访问 Google 时经过的代理。',
     prompt: '系统提示',
     promptDescription:
       '发往上游的系统提示由官方段落与客户端系统提示组合而成，档位决定保留多少官方内容。',
@@ -37,6 +37,18 @@ export const settingsMessages = defineMessages(
     apiKeysCount: '已设置 {count} 个',
     apiKeysNone: '未设置',
     apiKeysManage: '在接入页管理',
+    mediaOutput: '生成媒体输出',
+    mediaOutputHint:
+      'Chat Completions、Messages 正文与 Images 的 url 格式中，图像模型生成的图片如何给出。',
+    mediaInline: '内联',
+    mediaInlineHint: '以 data URL 直接写在响应中。',
+    mediaURL: '本服务链接',
+    mediaURLHint:
+      '按内容保存到运行数据目录的 `media/`，以 `/media/<文件名>` 链接给出，该路径不校验 API key。',
+    mediaBase: '媒体链接地址',
+    mediaBaseHint:
+      '链接使用的服务地址，例如 https://ai.example.com；留空时使用每个请求访问的地址。',
+    mediaBaseDisabled: '选择“本服务链接”后可修改',
     mapping: '模型映射',
     mappingHint: '客户端请求的模型名到目录模型的映射，例如把客户端写死的模型名换成目录中的模型。',
     mappingCount: '{count} 条映射',
@@ -44,10 +56,14 @@ export const settingsMessages = defineMessages(
     mappingManage: '在模型页编辑',
     proxy: '上游代理',
     proxyHint:
-      '登录、token 刷新、初始化与生成请求都经过它。HTTP、HTTPS 或 SOCKS5，例如 socks5://127.0.0.1:1080；留空时跟随系统代理。单个账户可在账户页另设代理。',
-    trustedProxies: '可信反向代理',
-    trustedProxiesHint:
-      '服务部署在 Nginx 等反向代理后面时填写其 IP 或 CIDR，来自这些地址的请求以 X-Forwarded-For 作为客户端 IP。留空时使用连接地址。',
+      '每行一个，HTTP、HTTPS 或 SOCKS5，例如 socks5://127.0.0.1:1080。登录、token 刷新、初始化与生成请求都经过代理；多个代理组成代理池，每个账户固定用其中账户最少的一个，代理不可用时改用其他可用代理。留空时跟随系统代理，单个账户可在账户页另设代理。',
+    pool: '代理池',
+    poolCheck: '立即检测',
+    poolHealthy: '可用 · {latency} ms',
+    poolUnhealthy: '不可用',
+    poolUnchecked: '尚未检测',
+    poolAccounts: '{count} 个账户',
+    poolCheckFailed: '检测代理失败：{message}',
     tier: '档位',
     promptFull: '全保留',
     promptFullHint: '官方系统指令的 10 个段落（约 17,000 字符），user 轮使用官方完整包装。',
@@ -115,10 +131,16 @@ export const settingsMessages = defineMessages(
     fillFirstHint:
       '先用优先级最高的账户，按添加顺序一直用第一个，它忙、冷却或额度用完后再用下一个。',
     timeout: '请求超时',
-    timeoutHint: '单个公开请求从开始到结束的最长时间，例如 5m、30s。',
+    timeoutHint: '等待首个上游事件与相邻两个上游事件之间的最长时间，例如 5m、30s。',
     quotaRefresh: '额度自动刷新间隔',
     quotaRefreshHint:
       '后台每隔这段时间读取全部账户（含停用账户）的额度，例如 15m、1h；最短 1m，填 0 不自动刷新。',
+    quotaReserve: '额度保留比例（%）',
+    quotaReserveHint:
+      '账户某个额度组的 5 小时或每周剩余比例不高于此百分比时，调度跳过该组，直到该窗口重置。填 0 时只跳过已用尽的组，开启 AI 积分超额使用的账户在额度用尽后继续使用积分。',
+    warmup: '周额度唤醒',
+    warmupHint:
+      '每次自动刷新额度后，为每周额度窗口尚未开始计时的就绪账户发送一条 Hi，开始本周计时；同一账户的每个额度组 6 天内最多一次。',
     logLevel: '日志级别',
     logLevelHint: '低于此级别的服务日志不记录；排查问题时临时改为 DEBUG。',
     logFormat: '日志格式',
@@ -130,7 +152,7 @@ export const settingsMessages = defineMessages(
     logTotalHint: '日志目录超过上限时删除最旧的文件，不小于 20。',
     bodies: '保存请求正文',
     bodiesHint:
-      '保存公开 API 的请求与响应正文，各截断到 64 KiB，只保留最近 1000 条，可在请求详情中查看。',
+      '保存公开 API 的请求与响应正文，各截断到 64\u00a0KiB，只保留最近 1000 条，可在请求详情中查看。',
     adminAuth: '远程访问需要登录',
     adminAuthHint: '开启后其他电脑可以用用户名与密码登录管理端；关闭时管理端只接受本机访问。',
     adminUser: '用户名',
@@ -149,13 +171,14 @@ export const settingsMessages = defineMessages(
     loadFailed: '无法读取设置',
     errListen: '填写 host:port，端口为 1 到 65535，例如 127.0.0.1:8017。',
     errRequired: '不能为空。',
-    errProxy: '填写 http://、https:// 或 socks5:// 开头且不带路径的地址，或留空。',
+    errProxy: '每行填写一个 http://、https:// 或 socks5:// 开头且不带路径的地址，或留空。',
     errPositive: '填写正整数。',
     errDuration: '填写 Go 时长，例如 30s、2m、1h30m。',
-    errProxies: '填写逗号分隔的 IP 或 CIDR，例如 10.0.0.0/8,192.168.1.10。',
     errLogTotal: '填写不小于 20 的整数。',
+    errReserve: '填写 0 到 99 的整数。',
     errAdminUser: '开启远程登录需要用户名。',
     errAdminPassword: '开启远程登录需要设置密码。',
+    errMediaBase: '填写 http:// 或 https:// 开头的地址，或留空。',
     adminDisabled: '开启“远程访问需要登录”后可修改',
     logTotalDisabled: '开启“写入日志文件”后可修改',
     minReason: '最小值为 {min}',
@@ -170,8 +193,7 @@ export const settingsMessages = defineMessages(
     serviceDescription:
       'Where the service listens, where accounts and runtime data live, and the keys clients use.',
     network: 'Network',
-    networkDescription:
-      'The proxy used to reach Google and the reverse proxies in front of the service.',
+    networkDescription: 'The proxy used to reach Google.',
     prompt: 'System prompt',
     promptDescription:
       'The upstream system prompt combines official sections with the client system prompt; the tier sets how much official text is kept.',
@@ -201,6 +223,18 @@ export const settingsMessages = defineMessages(
     apiKeysCount: '{count} set',
     apiKeysNone: 'None',
     apiKeysManage: 'Manage on Connect',
+    mediaOutput: 'Generated media output',
+    mediaOutputHint:
+      'How images from image models appear in Chat Completions and Messages text and in the Images url format.',
+    mediaInline: 'Inline',
+    mediaInlineHint: 'Written into the response as a data URL.',
+    mediaURL: 'Service link',
+    mediaURLHint:
+      'Saved by content under `media/` in the runtime directory and given as a `/media/<file>` link; this path does not check API keys.',
+    mediaBase: 'Media link address',
+    mediaBaseHint:
+      'Service address used in links, for example https://ai.example.com. When empty, the address each request used is taken.',
+    mediaBaseDisabled: 'Choose "Service link" to change this',
     mapping: 'Model mapping',
     mappingHint:
       'Maps model names that clients request to catalog models, for example replacing a name a client hard-codes.',
@@ -209,10 +243,14 @@ export const settingsMessages = defineMessages(
     mappingManage: 'Edit on Models',
     proxy: 'Upstream proxy',
     proxyHint:
-      'Sign-in, token refresh, initialization and generation all go through it. HTTP, HTTPS or SOCKS5, for example socks5://127.0.0.1:1080; leave empty to follow the system proxy. Each account can set its own proxy on the Accounts page.',
-    trustedProxies: 'Trusted reverse proxies',
-    trustedProxiesHint:
-      'When the service runs behind a reverse proxy such as Nginx, enter its IP or CIDR; requests from these addresses use X-Forwarded-For as the client IP. When empty, the connection address is used.',
+      'One per line, HTTP, HTTPS or SOCKS5, for example socks5://127.0.0.1:1080. Sign-in, token refresh, initialization and generation go through the proxy; several proxies form a pool where each account sticks to the one with the fewest accounts and moves to another available proxy when its proxy is down. Leave empty to follow the system proxy; each account can set its own proxy on the Accounts page.',
+    pool: 'Proxy pool',
+    poolCheck: 'Check now',
+    poolHealthy: 'Available · {latency} ms',
+    poolUnhealthy: 'Unavailable',
+    poolUnchecked: 'Not checked yet',
+    poolAccounts: '{count} accounts',
+    poolCheckFailed: 'Could not check the proxies: {message}',
     tier: 'Tier',
     promptFull: 'Full',
     promptFullHint:
@@ -288,10 +326,16 @@ export const settingsMessages = defineMessages(
       'Use the highest-priority accounts; keep using the first one in the order they were added until it is busy, cooling down or out of quota.',
     timeout: 'Request timeout',
     timeoutHint:
-      'Longest time one public request may take from start to finish, such as 5m or 30s.',
+      'Longest wait for the first upstream event and between two upstream events, such as 5m or 30s.',
     quotaRefresh: 'Quota refresh interval',
     quotaRefreshHint:
       'Read the quota of every account, disabled ones included, in the background at this interval, such as 15m or 1h. The minimum is 1m; 0 turns automatic refresh off.',
+    quotaReserve: 'Quota reserve (%)',
+    quotaReserveHint:
+      'When the 5-hour or weekly remaining share of an account quota group is at or below this percentage, scheduling skips that group until the window resets. With 0, only used-up groups are skipped, and accounts with AI credit overages keep running on credits after their quota is used up.',
+    warmup: 'Weekly quota warmup',
+    warmupHint:
+      'After each automatic quota refresh, send "Hi" from every ready account whose weekly window has not started, so the weekly timer starts. At most once per account and quota group every 6 days.',
     logLevel: 'Log level',
     logLevelHint:
       'Service logs below this level are not recorded; switch to DEBUG while troubleshooting.',
@@ -304,7 +348,7 @@ export const settingsMessages = defineMessages(
     logTotalHint: 'Delete the oldest files when the log directory exceeds this size. At least 20.',
     bodies: 'Save request bodies',
     bodiesHint:
-      'Save public API request and response bodies, each truncated to 64 KiB, keeping the latest 1,000; view them in request details.',
+      'Save public API request and response bodies, each truncated to 64\u00a0KiB, keeping the latest 1,000; view them in request details.',
     adminAuth: 'Require sign-in for remote access',
     adminAuthHint:
       'When on, other computers can sign in to the console with the username and password; when off, the console only accepts this computer.',
@@ -325,13 +369,14 @@ export const settingsMessages = defineMessages(
     errListen: 'Enter host:port with a port from 1 to 65535, for example 127.0.0.1:8017.',
     errRequired: 'Required.',
     errProxy:
-      'Enter an address starting with http://, https:// or socks5:// without a path, or leave it empty.',
+      'Enter one address per line starting with http://, https:// or socks5:// without a path, or leave it empty.',
     errPositive: 'Enter a positive whole number.',
     errDuration: 'Enter a Go duration such as 30s, 2m or 1h30m.',
-    errProxies: 'Enter comma-separated IPs or CIDRs such as 10.0.0.0/8,192.168.1.10.',
     errLogTotal: 'Enter a whole number of at least 20.',
+    errReserve: 'Enter a whole number from 0 to 99.',
     errAdminUser: 'Remote sign-in needs a username.',
     errAdminPassword: 'Remote sign-in needs a password.',
+    errMediaBase: 'Enter an address starting with http:// or https://, or leave it empty.',
     adminDisabled: 'Turn on "Require sign-in for remote access" to change this',
     logTotalDisabled: 'Turn on "Write log files" to change this',
     minReason: 'The minimum is {min}',
@@ -345,7 +390,7 @@ export const settingsMessages = defineMessages(
     service: '服務',
     serviceDescription: '服務的監聽位址、帳號與執行資料的存放位置，以及用戶端呼叫時使用的 key。',
     network: '網路',
-    networkDescription: '連線至 Google 時使用的 Proxy，以及服務前方的反向代理。',
+    networkDescription: '連線至 Google 時使用的代理伺服器。',
     prompt: '系統提示',
     promptDescription:
       '傳送到上游的系統提示由官方段落與用戶端系統提示組成，等級決定保留多少官方內容。',
@@ -372,18 +417,34 @@ export const settingsMessages = defineMessages(
     apiKeysCount: '已設定 {count} 個',
     apiKeysNone: '未設定',
     apiKeysManage: '在串接頁面管理',
+    mediaOutput: '生成媒體輸出',
+    mediaOutputHint:
+      'Chat Completions、Messages 正文與 Images 的 url 格式中，圖像模型產生的圖片如何提供。',
+    mediaInline: '內嵌',
+    mediaInlineHint: '以 data URL 直接寫在回應中。',
+    mediaURL: '本服務連結',
+    mediaURLHint:
+      '依內容儲存到執行資料目錄的 `media/`，以 `/media/<檔名>` 連結提供，此路徑不驗證 API key。',
+    mediaBase: '媒體連結位址',
+    mediaBaseHint:
+      '連結使用的服務位址，例如 https://ai.example.com；留空時使用每個請求存取的位址。',
+    mediaBaseDisabled: '選擇「本服務連結」後即可修改',
     mapping: '模型對應',
     mappingHint:
       '將用戶端請求的模型名稱對應到目錄中的模型，例如把用戶端寫死的模型名稱換成目錄中的模型。',
     mappingCount: '{count} 筆對應',
     mappingNone: '未設定',
     mappingManage: '在模型頁面編輯',
-    proxy: '上游 Proxy',
+    proxy: '上游代理伺服器',
     proxyHint:
-      '登入、token 更新、初始化與產生請求都經過此 Proxy。HTTP、HTTPS 或 SOCKS5，例如 socks5://127.0.0.1:1080；留空時沿用系統 Proxy。個別帳號可在帳號頁面另外設定 Proxy。',
-    trustedProxies: '受信任的反向代理',
-    trustedProxiesHint:
-      '服務部署在 Nginx 等反向代理後方時，填入其 IP 或 CIDR；來自這些位址的請求會以 X-Forwarded-For 作為用戶端 IP。留空時使用連線位址。',
+      '每行一個，HTTP、HTTPS 或 SOCKS5，例如 socks5://127.0.0.1:1080。登入、token 更新、初始化與產生請求都經過代理伺服器；多個代理伺服器組成代理伺服器集區，每個帳號固定使用其中帳號最少的一個，代理伺服器無法使用時改用其他可用的代理伺服器。留空時沿用系統代理伺服器，個別帳號可在帳號頁面另外設定代理伺服器。',
+    pool: '代理伺服器集區',
+    poolCheck: '立即檢查',
+    poolHealthy: '可用 · {latency} ms',
+    poolUnhealthy: '無法使用',
+    poolUnchecked: '尚未檢查',
+    poolAccounts: '{count} 個帳號',
+    poolCheckFailed: '檢查代理伺服器失敗：{message}',
     tier: '等級',
     promptFull: '完整保留',
     promptFullHint: '官方系統指令的 10 個段落（約 17,000 字元），user 回合使用官方完整包裝。',
@@ -418,7 +479,7 @@ export const settingsMessages = defineMessages(
     secGuidelines: '行為準則',
     secGuidelinesHint: '保留與變更無關的註解和文件字串。',
     secStyle: '溝通風格',
-    secStyleHint: '回答簡潔，使用 GitHub Markdown 與 KaTeX，檔案與符號寫成可點擊的連結。',
+    secStyleHint: '回答簡潔，使用 GitHub Markdown 與 KaTeX，檔案與符號寫成可點選的連結。',
     secSlash: '斜線命令',
     secSlashHint: '向使用者推薦 /goal、/compact、/schedule 等用戶端命令。',
     secMessaging: '訊息系統',
@@ -451,10 +512,16 @@ export const settingsMessages = defineMessages(
     fillFirstHint:
       '先用優先順序最高的帳號，依新增順序一直用第一個，它忙碌、冷卻或額度用完後再用下一個。',
     timeout: '請求逾時',
-    timeoutHint: '單一公開請求從開始到結束的最長時間，例如 5m、30s。',
+    timeoutHint: '等待第一個上游事件與相鄰兩個上游事件之間的最長時間，例如 5m、30s。',
     quotaRefresh: '額度自動重新整理間隔',
     quotaRefreshHint:
       '背景每隔這段時間讀取全部帳號（含已停用帳號）的額度，例如 15m、1h；最短 1m，填 0 不自動重新整理。',
+    quotaReserve: '額度保留比例（%）',
+    quotaReserveHint:
+      '帳號某個額度群組的 5 小時或每週剩餘比例不高於此百分比時，排程會略過該群組，直到該時段重設。填 0 時只略過已用完的群組，開啟 AI 點數超額使用的帳號在額度用完後繼續使用點數。',
+    warmup: '每週額度喚醒',
+    warmupHint:
+      '每次自動重新整理額度後，替每週額度時段尚未開始計時的就緒帳號送出一則 Hi，開始本週計時；同一帳號的每個額度群組 6 天內最多一次。',
     logLevel: '日誌等級',
     logLevelHint: '低於此等級的服務日誌不會記錄；疑難排解時可暫時改為 DEBUG。',
     logFormat: '日誌格式',
@@ -466,7 +533,7 @@ export const settingsMessages = defineMessages(
     logTotalHint: '日誌目錄超過上限時刪除最舊的檔案，最小值為 20。',
     bodies: '儲存請求內文',
     bodiesHint:
-      '儲存公開 API 的請求與回應內文，各截斷至 64 KiB，只保留最近 1000 筆，可在請求詳細資料中檢視。',
+      '儲存公開 API 的請求與回應內文，各截斷至 64\u00a0KiB，只保留最近 1000 筆，可在請求詳細資料中檢視。',
     adminAuth: '遠端存取需要登入',
     adminAuthHint:
       '開啟後，其他電腦可用使用者名稱與密碼登入管理介面；關閉時管理介面只接受本機存取。',
@@ -486,13 +553,14 @@ export const settingsMessages = defineMessages(
     loadFailed: '無法讀取設定',
     errListen: '填寫 host:port，連接埠為 1 到 65535，例如 127.0.0.1:8017。',
     errRequired: '不可空白。',
-    errProxy: '填寫以 http://、https:// 或 socks5:// 開頭且不含路徑的位址，或留空。',
+    errProxy: '每行填寫一個以 http://、https:// 或 socks5:// 開頭且不含路徑的位址，或留空。',
     errPositive: '填寫正整數。',
     errDuration: '填寫 Go 時間長度，例如 30s、2m、1h30m。',
-    errProxies: '填寫以逗號分隔的 IP 或 CIDR，例如 10.0.0.0/8,192.168.1.10。',
     errLogTotal: '填寫不小於 20 的整數。',
+    errReserve: '填寫 0 到 99 的整數。',
     errAdminUser: '啟用遠端登入需要使用者名稱。',
     errAdminPassword: '啟用遠端登入需要設定密碼。',
+    errMediaBase: '填寫以 http:// 或 https:// 開頭的位址，或留空。',
     adminDisabled: '開啟「遠端存取需要登入」後即可修改',
     logTotalDisabled: '開啟「寫入日誌檔」後即可修改',
     minReason: '最小值為 {min}',

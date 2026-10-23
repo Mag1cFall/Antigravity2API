@@ -21,7 +21,7 @@ var imageToolDeclaration = antigravity.FunctionDeclaration{
 }
 
 // hostedImages 在请求带 image_generation 工具时把模型对它的调用换成目录中图像生成模型输出的图片事件；首个调用起的事件暂存到文本生成结束、账户槽位归还后再请求图像模型并按原顺序输出
-func (s *server) hostedImages(ctx context.Context, tools []responsesTool, contents []antigravity.Content, events <-chan antigravity.Event) <-chan antigravity.Event {
+func (s *server) hostedImages(ctx context.Context, tools []responsesTool, session string, contents []antigravity.Content, events <-chan antigravity.Event) <-chan antigravity.Event {
 	index := slices.IndexFunc(tools, func(tool responsesTool) bool { return tool.Type == "image_generation" })
 	if index < 0 {
 		return events
@@ -50,7 +50,7 @@ func (s *server) hostedImages(ctx context.Context, tools []responsesTool, conten
 		for _, event := range pending {
 			replaced := []antigravity.Event{event}
 			if event.Kind == antigravity.EventToolCall && event.ToolCall.Name == imageToolName {
-				replaced = s.hostedImage(ctx, tools[index], contents, event.ToolCall.Arguments)
+				replaced = s.hostedImage(ctx, tools[index], session, contents, event.ToolCall.Arguments)
 			}
 			if !send(replaced) {
 				return
@@ -61,7 +61,7 @@ func (s *server) hostedImages(ctx context.Context, tools []responsesTool, conten
 }
 
 // hostedImage 以调用参数中的提示词与最近一条 user 消息中的图片请求图像生成模型，返回不带签名的图片事件
-func (s *server) hostedImage(ctx context.Context, tool responsesTool, contents []antigravity.Content, arguments json.RawMessage) []antigravity.Event {
+func (s *server) hostedImage(ctx context.Context, tool responsesTool, session string, contents []antigravity.Content, arguments json.RawMessage) []antigravity.Event {
 	var call struct {
 		Prompt string `json:"prompt"`
 	}
@@ -87,7 +87,7 @@ func (s *server) hostedImage(ctx context.Context, tool responsesTool, contents [
 		break
 	}
 	result, err := s.generateResult(ctx, antigravity.GenerateRequest{
-		ID: newID("ig"), Model: catalogModel(models, "image_generation"),
+		ID: newID("ig"), Model: catalogModel(models, "image_generation"), Session: session,
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: parts}},
 		Config:   antigravity.GenerationConfig{ResponseModalities: []string{"IMAGE"}, ImageConfig: config},
 	})
@@ -106,6 +106,7 @@ func (s *server) hostedImage(ctx context.Context, tool responsesTool, contents [
 
 // generateResult 完成一次生成并返回汇总结果
 func (s *server) generateResult(ctx context.Context, request antigravity.GenerateRequest) (generationResult, error) {
+	request.Unary = true
 	events, err := s.service.Generate(ctx, request)
 	if err != nil {
 		return generationResult{}, err

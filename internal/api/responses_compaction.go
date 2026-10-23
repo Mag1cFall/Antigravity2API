@@ -375,6 +375,7 @@ func (s *server) compactionSummary(ctx context.Context, request responsesRequest
 	}
 	generate.Contents = append(generate.Contents, antigravity.Content{Role: antigravity.RoleUser, Parts: []antigravity.Part{{Text: fmt.Sprintf(compactionInstructions, prompt)}}})
 	generate.Tools.ToolConfig.Mode = "none"
+	generate.Unary = true
 	events, err := s.service.Generate(ctx, generate)
 	if err != nil {
 		return "", nil, err

@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -99,16 +100,78 @@ type geminiGenerationConfig struct {
 		AspectRatio string `json:"aspectRatio"`
 		ImageSize   string `json:"imageSize"`
 	} `json:"imageConfig"`
-	SpeechConfig     json.RawMessage `json:"speechConfig"`
-	MediaResolution  string          `json:"mediaResolution"`
-	PresencePenalty  *float64        `json:"presencePenalty"`
-	FrequencyPenalty *float64        `json:"frequencyPenalty"`
-	Seed             *int64          `json:"seed"`
+	ResponseFormat   geminiResponseFormats `json:"responseFormat"`
+	SpeechConfig     json.RawMessage       `json:"speechConfig"`
+	MediaResolution  string                `json:"mediaResolution"`
+	PresencePenalty  *float64              `json:"presencePenalty"`
+	FrequencyPenalty *float64              `json:"frequencyPenalty"`
+	Seed             *int64                `json:"seed"`
 	ThinkingConfig   *struct {
 		ThinkingBudget  *int64 `json:"thinkingBudget"`
 		ThinkingLevel   string `json:"thinkingLevel"`
 		IncludeThoughts bool   `json:"includeThoughts"`
 	} `json:"thinkingConfig"`
+}
+
+// geminiResponseFormat 为 generationConfig.responseFormat 的一项：文本的 MIME 与 Schema、图片的宽高比与尺寸、音频输出
+type geminiResponseFormat struct {
+	Text *struct {
+		MIMEType string          `json:"mimeType"`
+		Schema   json.RawMessage `json:"schema"`
+	} `json:"text"`
+	Image *struct {
+		AspectRatio string `json:"aspectRatio"`
+		ImageSize   string `json:"imageSize"`
+	} `json:"image"`
+	Audio json.RawMessage `json:"audio"`
+}
+
+// geminiResponseFormats 为 responseFormat，REST 写法为单个对象，SDK 写法为数组
+type geminiResponseFormats []geminiResponseFormat
+
+// UnmarshalJSON 按单个对象或数组读取 responseFormat
+func (formats *geminiResponseFormats) UnmarshalJSON(data []byte) error {
+	if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && trimmed[0] == '{' {
+		var format geminiResponseFormat
+		if err := json.Unmarshal(trimmed, &format); err != nil {
+			return err
+		}
+		*formats = geminiResponseFormats{format}
+		return nil
+	}
+	return json.Unmarshal(data, (*[]geminiResponseFormat)(formats))
+}
+
+// geminiResponseFormatValues 为 responseFormat 枚举名对应的上游取值
+var geminiResponseFormatValues = map[string]string{
+	"APPLICATION_JSON":                "application/json",
+	"TEXT_PLAIN":                      "text/plain",
+	"ASPECT_RATIO_ONE_BY_ONE":         "1:1",
+	"ASPECT_RATIO_TWO_BY_THREE":       "2:3",
+	"ASPECT_RATIO_THREE_BY_TWO":       "3:2",
+	"ASPECT_RATIO_THREE_BY_FOUR":      "3:4",
+	"ASPECT_RATIO_FOUR_BY_THREE":      "4:3",
+	"ASPECT_RATIO_FOUR_BY_FIVE":       "4:5",
+	"ASPECT_RATIO_FIVE_BY_FOUR":       "5:4",
+	"ASPECT_RATIO_NINE_BY_SIXTEEN":    "9:16",
+	"ASPECT_RATIO_SIXTEEN_BY_NINE":    "16:9",
+	"ASPECT_RATIO_TWENTY_ONE_BY_NINE": "21:9",
+	"ASPECT_RATIO_ONE_BY_EIGHT":       "1:8",
+	"ASPECT_RATIO_EIGHT_BY_ONE":       "8:1",
+	"ASPECT_RATIO_ONE_BY_FOUR":        "1:4",
+	"ASPECT_RATIO_FOUR_BY_ONE":        "4:1",
+	"IMAGE_SIZE_FIVE_TWELVE":          "512",
+	"IMAGE_SIZE_ONE_K":                "1K",
+	"IMAGE_SIZE_TWO_K":                "2K",
+	"IMAGE_SIZE_FOUR_K":               "4K",
+}
+
+// geminiResponseFormatValue 把 responseFormat 枚举名换成上游取值，其他值原样返回
+func geminiResponseFormatValue(value string) string {
+	if mapped, ok := geminiResponseFormatValues[value]; ok {
+		return mapped
+	}
+	return value
 }
 
 type geminiToolGroup struct {
@@ -239,7 +302,7 @@ func (s *server) handleGeminiAction(w http.ResponseWriter, r *http.Request) {
 // geminiOpaqueFields 为取值是自由 JSON 的字段，其中的键名属于用户数据
 var geminiOpaqueFields = map[string]bool{
 	"args": true, "response": true, "parameters": true, "parametersJsonSchema": true,
-	"responseSchema": true, "responseJsonSchema": true, "partMetadata": true,
+	"responseSchema": true, "responseJsonSchema": true, "partMetadata": true, "schema": true,
 }
 
 // geminiCamelKeys 按 proto3 JSON 规则把各层消息字段名转为 lowerCamelCase，同层两种写法并存时保留驼峰字段，自由 JSON 字段的取值原样保留
@@ -389,6 +452,17 @@ func (request geminiRequest) toGenerateRequest(id string, model string) (antigra
 	if len(request.GenerationConfig.ResponseJSONSchema) > 0 {
 		config.ResponseSchema = request.GenerationConfig.ResponseJSONSchema
 	}
+	for _, format := range request.GenerationConfig.ResponseFormat {
+		if text := format.Text; text != nil {
+			config.ResponseMIMEType = geminiResponseFormatValue(text.MIMEType)
+			if rawJSONConfigured(text.Schema) {
+				config.ResponseSchema = text.Schema
+			}
+		}
+		if image := format.Image; image != nil {
+			config.ImageConfig = &antigravity.ImageConfig{AspectRatio: geminiResponseFormatValue(image.AspectRatio), ImageSize: geminiResponseFormatValue(image.ImageSize)}
+		}
+	}
 	config.HideThinking = true
 	if request.GenerationConfig.ThinkingConfig != nil {
 		config.ThinkingBudget = request.GenerationConfig.ThinkingConfig.ThinkingBudget
@@ -408,7 +482,8 @@ func (config geminiGenerationConfig) validate() error {
 	if config.CandidateCount != nil && (*config.CandidateCount < 0 || *config.CandidateCount > geminiMaxCandidates) {
 		return fmt.Errorf("generationConfig.candidateCount must be between 1 and %d", geminiMaxCandidates)
 	}
-	if rawJSONConfigured(config.SpeechConfig) || slices.ContainsFunc(config.ResponseModalities, func(modality string) bool { return strings.EqualFold(modality, "AUDIO") }) {
+	audioFormat := slices.ContainsFunc(config.ResponseFormat, func(format geminiResponseFormat) bool { return rawJSONConfigured(format.Audio) })
+	if audioFormat || rawJSONConfigured(config.SpeechConfig) || slices.ContainsFunc(config.ResponseModalities, func(modality string) bool { return strings.EqualFold(modality, "AUDIO") }) {
 		return fmt.Errorf("audio output is not supported: no model in the catalog generates audio")
 	}
 	return nil
@@ -631,9 +706,7 @@ func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, re
 	candidates := s.startChatChoices(r.Context(), request, count, stream)
 	defer candidates.cancel()
 	if err := candidates.err; err != nil {
-		if shouldWriteRequestError(r, err) {
-			writeGeminiRequestError(w, err)
-		}
+		writeGeminiFailure(w, r, request, err, stream)
 		return
 	}
 	if stream {
@@ -644,12 +717,39 @@ func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, re
 		return consumeEvents(candidates.ctx, events, nil)
 	})
 	if err != nil {
-		if shouldWriteRequestError(r, err) {
-			writeGeminiRequestError(w, err)
-		}
+		writeGeminiFailure(w, r, request, err, false)
 		return
 	}
 	writeJSON(w, http.StatusOK, buildGeminiResponse(request, results))
+}
+
+// writeGeminiFailure 写出响应头之前的生成失败，上游输入过滤按 Gemini API 返回 200 与不含候选的 promptFeedback，流式时作为唯一一块
+func writeGeminiFailure(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, err error, stream bool) {
+	if !shouldWriteRequestError(r, err) {
+		return
+	}
+	response, ok := geminiPromptFeedback(request, err)
+	switch {
+	case !ok:
+		writeGeminiRequestError(w, err)
+	case !stream:
+		writeJSON(w, http.StatusOK, response)
+	case r.URL.Query().Get("alt") == "sse":
+		if streamHeaders(w) == nil {
+			_ = writeSSE(w, "", response)
+		}
+	default:
+		writeJSON(w, http.StatusOK, []any{response})
+	}
+}
+
+// geminiPromptFeedback 把上游输入过滤投影为 blockReason 为 OTHER、不含候选的 Gemini 响应
+func geminiPromptFeedback(request antigravity.GenerateRequest, err error) (map[string]any, bool) {
+	var blocked *antigravity.PromptBlockedError
+	if !errors.As(err, &blocked) {
+		return nil, false
+	}
+	return map[string]any{"promptFeedback": map[string]any{"blockReason": "OTHER", "blockReasonMessage": blocked.Message}, "modelVersion": request.Model, "responseId": request.ID}, true
 }
 
 // buildGeminiResponse 按候选序号输出各候选内容与终止原因，用量为全部候选之和
@@ -815,9 +915,12 @@ func geminiFinishReason(reason string) string {
 	}
 }
 
-// setGeminiCandidateEnd 写入候选的终止原因与搜索来源
+// setGeminiCandidateEnd 写入候选的终止原因、终止说明与搜索来源
 func setGeminiCandidateEnd(candidate map[string]any, result generationResult) {
 	candidate["finishReason"] = geminiFinishReason(result.finishReason)
+	if result.finishMessage != "" {
+		candidate["finishMessage"] = result.finishMessage
+	}
 	if result.grounding != nil {
 		candidate["groundingMetadata"] = result.grounding
 	}
@@ -885,7 +988,7 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 		}
 		writing.Lock()
 		defer writing.Unlock()
-		return writeSSEHeartbeat(w)
+		return writeGeminiHeartbeat(w)
 	}
 	results, err := candidates.run(func(index int, events <-chan antigravity.Event) (generationResult, error) {
 		return consumeStreamEvents(candidates.ctx, events, func(event antigravity.Event) error {
@@ -898,6 +1001,10 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 	})
 	if err != nil {
 		if !shouldWriteRequestError(r, err) {
+			return
+		}
+		if response, ok := geminiPromptFeedback(request, err); ok {
+			_ = write(response)
 			return
 		}
 		_ = write(map[string]any{"error": map[string]any{

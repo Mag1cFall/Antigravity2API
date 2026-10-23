@@ -16,12 +16,12 @@ export function TabsContent({ className, ...props }: ComponentProps<typeof Primi
   )
 }
 
-// TabsList 是标签页的按钮行，外观与分段控件一致，选中背景滑到选中项
+// TabsList 是标签页的按钮行，外观与分段控件一致，选中背景滑到选中项，放不下时换行
 export function TabsList({ className, children, ...props }: ComponentProps<typeof Primitive.List>) {
   return (
     <Primitive.List
       className={twMerge(
-        'relative inline-flex w-fit max-w-full no-scrollbar gap-1 overflow-x-auto rounded-lg bg-muted p-1',
+        'relative inline-flex w-fit max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1',
         className,
       )}
       {...props}

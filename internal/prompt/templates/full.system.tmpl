@@ -1,12 +1,3 @@
-{{.Sections.identity}}
-{{.Sections.artifacts}}
-{{.Sections.conversation_transcript}}
-{{.Sections.guidelines}}
-{{.Sections.communication_style}}
-{{.Sections.slash_commands}}
-{{.Sections.messaging}}
-{{.Sections.subagents}}
-{{.Sections.skills}}
-{{.Sections.user_information}}{{if .Client}}
+{{sections .Sections "identity" "artifacts" "conversation_transcript" "guidelines" "communication_style" "slash_commands" "messaging" "subagents" "skills" "featured_plugins" "user_information"}}{{if .Client}}
 
 {{.Client}}{{end}}

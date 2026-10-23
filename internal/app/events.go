@@ -113,7 +113,7 @@ func (h *hub) track(id string, active *activeRequest) {
 	h.active[id] = active
 }
 
-// begin 分发生成开始的请求
+// begin 分发进行中请求的记录：生成开始时与执行账户变化时
 func (h *hub) begin(row requestdb.Row) {
 	h.publish(event{Type: "request", Data: row})
 }
@@ -224,6 +224,15 @@ func (h *hub) handler(level slog.Leveler, ledger *requestdb.Store) slog.Handler 
 	return &logHandler{hub: h, ledger: ledger, level: level}
 }
 
+// withoutBodies 返回去掉上游请求与响应正文的尝试记录，内存中的日志不持有正文
+func withoutBodies(attempts []requestdb.Attempt) []requestdb.Attempt {
+	attempts = slices.Clone(attempts)
+	for index := range attempts {
+		attempts[index].Request, attempts[index].Response = nil, nil
+	}
+	return attempts
+}
+
 // logHandler 把 slog 记录转换为 requestdb.Log；source、event、request_id、model 与 request 属性进入同名字段，其余属性放入 attrs
 type logHandler struct {
 	hub    *hub
@@ -255,6 +264,7 @@ func (handler *logHandler) Handle(ctx context.Context, record slog.Record) error
 			entry.Model = value.String()
 		case "request":
 			if row, ok := value.Any().(requestdb.Row); ok {
+				row.Attempts = withoutBodies(row.Attempts)
 				entry.Request = &row
 				entry.RequestID = row.ID
 				entry.Model = row.Model

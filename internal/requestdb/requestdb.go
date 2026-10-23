@@ -89,7 +89,7 @@ type Attempt struct {
 	Status int `json:"status"`
 	// Code 是上游错误的 ErrorInfo.reason，没有时为 error.status
 	Code string `json:"code,omitempty"`
-	// RetryDelay 是上游 RetryInfo.retryDelay
+	// RetryDelay 是上游 RetryInfo.retryDelay 的原文，没有时为 ErrorInfo.metadata.quotaResetDelay
 	RetryDelay string `json:"retry_delay,omitempty"`
 	// TraceID 是上游响应的 traceId
 	TraceID string `json:"trace_id,omitempty"`

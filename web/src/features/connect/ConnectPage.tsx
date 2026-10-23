@@ -6,7 +6,7 @@ import { AddKeyButton, ApiKeyList, useApiKeys } from '@/features/connect/ApiKeys
 import { ClientConfigs } from '@/features/connect/ClientConfigs'
 import { EndpointList } from '@/features/connect/EndpointList'
 import { connectMessages } from '@/features/connect/messages'
-import { useMessages } from '@/lib/i18n'
+import { codeText, useMessages } from '@/lib/i18n'
 
 // KeysCard 是 API key 的生成与管理
 function KeysCard() {
@@ -17,7 +17,7 @@ function KeysCard() {
       <CardHeader
         icon={<KeyRound size={16} aria-hidden />}
         title={m.keys}
-        description={m.keysHint}
+        description={codeText(m.keysHint)}
         actions={keys.length > 0 && <AddKeyButton />}
       />
       <CardBody>

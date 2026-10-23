@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -66,7 +67,7 @@ func CleanFunctionDeclaration(declaration FunctionDeclaration) (FunctionDeclarat
 	}
 	fillSchemaTypes(parameters)
 	declaration.Schema = raw
-	if declaration.Parameters, err = json.Marshal(parameters); err != nil {
+	if declaration.Parameters, err = marshalSchema(parameters); err != nil {
 		return FunctionDeclaration{}, err
 	}
 	return declaration, nil
@@ -77,7 +78,7 @@ type schemaProjector struct {
 	lossy bool
 }
 
-// project 校验并投影一个 Schema 节点，无类型节点不写 type
+// project 校验并投影一个 Schema 节点，无类型节点不写 type，enum 去掉上游拒绝的空串
 func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 	raw, err := cleanSchemaInput(raw, false)
 	if err != nil {
@@ -181,6 +182,13 @@ func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 			}
 			if err != nil {
 				return nil, err
+			}
+			if name == "enum" && slices.Contains(values, "") {
+				values = slices.DeleteFunc(values, func(value string) bool { return value == "" })
+				p.lossy = true
+				if len(values) == 0 {
+					continue
+				}
 			}
 			output[name] = values
 		}
@@ -308,7 +316,10 @@ func (p *schemaProjector) projectPrefixItems(schema map[string]json.RawMessage) 
 	return nil
 }
 
-// resolveSchemaRefs 按根节点的 $defs 与 definitions 展开本地 $ref，递归引用只保留类型，无法解析的引用展开为不限制的 Schema，两者出现时返回 true
+// maxSchemaRefExpansions 为一个声明中展开本地 $ref 的总次数上限
+const maxSchemaRefExpansions = 500
+
+// resolveSchemaRefs 按根节点的 $defs 与 definitions 展开本地 $ref，递归引用与超过 maxSchemaRefExpansions 之后的引用只保留类型，无法解析的引用展开为不限制的 Schema，三者出现时返回 true
 func resolveSchemaRefs(raw json.RawMessage) (json.RawMessage, bool, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -333,10 +344,11 @@ func resolveSchemaRefs(raw json.RawMessage) (json.RawMessage, bool, error) {
 	return resolved, resolver.unresolved, err
 }
 
-// schemaRefResolver 展开本地 $ref
+// schemaRefResolver 展开本地 $ref，expanded 为已展开的次数
 type schemaRefResolver struct {
 	definitions map[string]any
 	unresolved  bool
+	expanded    int
 }
 
 // resolve 展开节点中的 $ref 并去掉 $defs 与 definitions，stack 为正在展开的引用
@@ -355,13 +367,14 @@ func (r *schemaRefResolver) resolve(value any, stack []string) any {
 				r.unresolved = true
 				return true
 			}
-			if slices.Contains(stack, reference) {
+			if slices.Contains(stack, reference) || r.expanded >= maxSchemaRefExpansions {
 				r.unresolved = true
 				if object, ok := definition.(map[string]any); ok && object["type"] != nil {
 					return map[string]any{"type": object["type"]}
 				}
 				return true
 			}
+			r.expanded++
 			merged := map[string]any{}
 			if object, ok := definition.(map[string]any); ok {
 				for key, item := range object {
@@ -594,13 +607,80 @@ func flattenUnions(schema map[string]any) bool {
 	return true
 }
 
-// normalizeFunctionParameters 将零参数定义归一化为对象
+// normalizeFunctionParameters 将零参数定义归一化为对象，并为 required 中未定义的属性补充不限类型的定义
 func normalizeFunctionParameters(raw json.RawMessage) (json.RawMessage, error) {
 	cleaned, err := cleanSchemaInput(raw, true)
-	if err == nil && (bytes.Equal(cleaned, []byte("{}")) || bytes.Equal(cleaned, []byte("true"))) {
-		cleaned = json.RawMessage(`{"type":"object"}`)
+	if err != nil {
+		return nil, err
 	}
-	return cleaned, err
+	if bytes.Equal(cleaned, []byte("{}")) || bytes.Equal(cleaned, []byte("true")) {
+		return json.RawMessage(`{"type":"object"}`), nil
+	}
+	schema, err := decodeSchemaValue(cleaned)
+	if err != nil {
+		return nil, err
+	}
+	if !defineRequiredProperties(schema) {
+		return cleaned, nil
+	}
+	return json.Marshal(schema)
+}
+
+// decodeSchemaValue 解码 Schema 并保留数值原文
+func decodeSchemaValue(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+// defineRequiredProperties 为 required 列出而 properties 未定义的属性补充不限类型的定义，返回是否修改
+func defineRequiredProperties(value any) bool {
+	schema, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	if required, ok := schema["required"].([]any); ok {
+		properties, _ := schema["properties"].(map[string]any)
+		for _, item := range required {
+			name, ok := item.(string)
+			if !ok {
+				continue
+			}
+			if _, defined := properties[name]; defined {
+				continue
+			}
+			if properties == nil {
+				properties = map[string]any{}
+				schema["properties"] = properties
+			}
+			properties[name] = map[string]any{}
+			changed = true
+		}
+	}
+	for key, child := range schema {
+		switch key {
+		case "properties", "$defs", "definitions":
+			if children, ok := child.(map[string]any); ok {
+				for _, nested := range children {
+					changed = defineRequiredProperties(nested) || changed
+				}
+			}
+		case "items", "additionalProperties", "not":
+			changed = defineRequiredProperties(child) || changed
+		case "anyOf", "oneOf", "allOf", "prefixItems":
+			if children, ok := child.([]any); ok {
+				for _, nested := range children {
+					changed = defineRequiredProperties(nested) || changed
+				}
+			}
+		}
+	}
+	return changed
 }
 
 // cleanSchemaInput 清理可选空值并按工具与输出契约保留组合节点
@@ -917,10 +997,10 @@ func normalizeImplicitType(schema map[string]json.RawMessage) error {
 			schema["type"] = json.RawMessage(`"object"`)
 		case schema["items"] != nil || schema["prefixItems"] != nil:
 			schema["type"] = json.RawMessage(`"array"`)
-		default:
-			if schema["enum"] != nil || schema["pattern"] != nil || schema["format"] != nil || schema["minLength"] != nil || schema["maxLength"] != nil {
-				schema["type"] = json.RawMessage(`"string"`)
-			}
+		case schema["enum"] != nil:
+			schema["type"] = enumType(schema["enum"])
+		case schema["pattern"] != nil || schema["format"] != nil || schema["minLength"] != nil || schema["maxLength"] != nil:
+			schema["type"] = json.RawMessage(`"string"`)
 		}
 		if typed != nil && !conflictingType {
 			schema["type"] = typed["type"]
@@ -951,6 +1031,34 @@ func normalizeImplicitType(schema map[string]json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// enumType 返回 enum 取值的 JSON Schema 类型：全为整数为 integer，全为数字为 number，全为布尔值为 boolean，其余为 string
+func enumType(raw json.RawMessage) json.RawMessage {
+	var values []any
+	json.Unmarshal(raw, &values)
+	kind := ""
+	for _, value := range values {
+		next := "string"
+		switch value := value.(type) {
+		case float64:
+			next = "number"
+			if math.Trunc(value) == value {
+				next = "integer"
+			}
+		case bool:
+			next = "boolean"
+		}
+		switch {
+		case kind == "" || kind == next:
+			kind = next
+		case kind == "integer" && next == "number" || kind == "number" && next == "integer":
+			kind = "number"
+		default:
+			kind = "string"
+		}
+	}
+	return json.RawMessage(`"` + cmp.Or(kind, "string") + `"`)
 }
 
 // toolSchemaShape 提取无法直接投影的工具参数的层级与类型

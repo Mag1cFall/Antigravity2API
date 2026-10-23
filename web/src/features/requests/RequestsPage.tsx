@@ -10,6 +10,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
+import { Tooltip } from '@/components/ui/tooltip'
 import { useAccounts } from '@/features/accounts/queries'
 import { useModels } from '@/features/models/queries'
 import {
@@ -30,7 +31,7 @@ import { formatCompact, formatCost, formatDateTime, formatDuration } from '@/lib
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
-// RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL
+// RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL；宽度小于 640px 时每个请求一张卡片
 export function RequestsPage() {
   const m = useMessages(requestMessages)
   const app = useMessages(appMessages)
@@ -82,86 +83,104 @@ export function RequestsPage() {
     <>
       <RunningRequests />
       <Card>
-        <CardToolbar>
-          <Segmented
-            label={m.range}
-            value={filter.range}
-            onValueChange={(value) => {
-              update({ range: value === '24h' ? '' : value })
-            }}
-            options={(Object.keys(ranges) as RangeKey[]).map((value) => ({
-              value,
-              label: rangeLabels[value],
-            }))}
-          />
-          <Select
-            label={m.state}
-            size="sm"
-            value={filter.state || 'all'}
-            onValueChange={(value) => {
-              update({ state: value === 'all' ? '' : value })
-            }}
-            options={[
-              { value: 'all', label: m.allStates },
-              ...states.map((state) => ({ value: state, label: m[state] })),
-            ]}
-          />
-          <Select
-            label={m.protocol}
-            size="sm"
-            value={filter.protocol || 'all'}
-            onValueChange={(value) => {
-              update({ protocol: value === 'all' ? '' : value })
-            }}
-            options={[
-              { value: 'all', label: m.allProtocols },
-              ...protocols.map((protocol) => ({ value: protocol, label: protocol })),
-            ]}
-          />
-          <Select
-            label={m.model}
-            size="sm"
-            className="max-w-field"
-            value={filter.model || 'all'}
-            onValueChange={(value) => {
-              update({ model: value === 'all' ? '' : value })
-            }}
-            options={[
-              { value: 'all', label: m.allModels },
-              ...(models.data?.models ?? []).map((model) => ({ value: model.id, label: model.id })),
-            ]}
-          />
-          <Select
-            label={m.account}
-            size="sm"
-            className="max-w-field"
-            value={filter.account || 'all'}
-            onValueChange={(value) => {
-              update({ account: value === 'all' ? '' : value })
-            }}
-            options={[
-              { value: 'all', label: m.allAccounts },
-              ...(accounts.data?.accounts ?? []).map((account) => ({
-                value: account.id,
-                label: account.id,
-              })),
-            ]}
-          />
-          <SearchInput
-            aria-label={m.search}
-            placeholder={m.search}
-            value={filter.q}
-            onChange={(event) => {
-              update({ q: event.target.value })
-            }}
-            className="max-w-field min-w-[200px] flex-[1_1_240px] max-sm:max-w-none"
-          />
-          <Button size="sm" asChild className="sm:ml-auto">
-            <a href={csv} download>
-              <Download size={16} aria-hidden />
-              {m.export}
-            </a>
-          </Button>
+        <CardToolbar className="items-start">
+          <div className="flex min-w-0 flex-[1_1_480px] flex-wrap items-center gap-3">
+            <Segmented
+              label={m.range}
+              value={filter.range}
+              onValueChange={(value) => {
+                update({ range: value === '24h' ? '' : value })
+              }}
+              options={(Object.keys(ranges) as RangeKey[]).map((value) => ({
+                value,
+                label: rangeLabels[value],
+              }))}
+            />
+            <Select
+              label={m.state}
+              size="sm"
+              value={filter.state || 'all'}
+              onValueChange={(value) => {
+                update({ state: value === 'all' ? '' : value })
+              }}
+              options={[
+                { value: 'all', label: m.allStates },
+                ...states.map((state) => ({ value: state, label: m[state] })),
+              ]}
+            />
+            <Select
+              label={m.protocol}
+              size="sm"
+              value={filter.protocol || 'all'}
+              onValueChange={(value) => {
+                update({ protocol: value === 'all' ? '' : value })
+              }}
+              options={[
+                { value: 'all', label: m.allProtocols },
+                ...protocols.map((protocol) => ({ value: protocol, label: protocol })),
+              ]}
+            />
+            <Select
+              label={m.model}
+              size="sm"
+              className="max-w-field"
+              value={filter.model || 'all'}
+              onValueChange={(value) => {
+                update({ model: value === 'all' ? '' : value })
+              }}
+              options={[
+                { value: 'all', label: m.allModels },
+                ...(models.data?.models ?? []).map((model) => ({
+                  value: model.id,
+                  label: model.id,
+                })),
+              ]}
+            />
+            <Select
+              label={m.account}
+              size="sm"
+              className="max-w-field"
+              value={filter.account || 'all'}
+              onValueChange={(value) => {
+                update({ account: value === 'all' ? '' : value })
+              }}
+              options={[
+                { value: 'all', label: m.allAccounts },
+                ...(accounts.data?.accounts ?? []).map((account) => ({
+                  value: account.id,
+                  label: account.id,
+                })),
+              ]}
+            />
+            <SearchInput
+              aria-label={m.search}
+              placeholder={m.search}
+              value={filter.q}
+              onChange={(event) => {
+                update({ q: event.target.value })
+              }}
+              className="min-w-[200px] flex-[1_1_240px]"
+            />
+          </div>
+          {items.length > 0 ? (
+            <Button size="sm" asChild>
+              <a href={csv} download>
+                <Download size={16} aria-hidden />
+                {m.export}
+              </a>
+            </Button>
+          ) : (
+            <Tooltip
+              disabledReason={
+                page.isPending ? app.loading : page.isError ? m.exportFailed : m.exportEmpty
+              }
+            >
+              <Button size="sm" disabled>
+                <Download size={16} aria-hidden />
+                {m.export}
+              </Button>
+            </Tooltip>
+          )}
         </CardToolbar>
         {page.isPending ? (
           <Loading label={app.loading} />
@@ -197,10 +216,10 @@ export function RequestsPage() {
           )
         ) : (
           <>
-            <Table label={m.title} fixed minWidth={820}>
+            <Table label={m.title} fixed stack minWidth={820}>
               <colgroup>
                 <col className="w-[128px]" />
-                <col className="w-[112px]" />
+                <col className="w-[144px]" />
                 <col className="w-[72px]" />
                 <col />
                 <col className="w-[200px] max-xl:hidden" />
@@ -246,13 +265,13 @@ export function RequestsPage() {
                     </Td>
                     <Td
                       className={
-                        'text-right ' +
+                        'text-right max-sm:ml-auto ' +
                         (record.status >= 400 ? 'text-error-text' : 'text-foreground')
                       }
                     >
                       {record.status || m.none}
                     </Td>
-                    <Td>
+                    <Td className="max-sm:basis-full">
                       <div className="truncate font-mono text-xs" title={record.model}>
                         {record.model}
                       </div>
@@ -273,10 +292,13 @@ export function RequestsPage() {
                         ? formatDuration(record.first_event_ms, locale)
                         : m.none}
                     </Td>
-                    <Td className="text-right whitespace-nowrap">
+                    <Td
+                      label={m.duration}
+                      className="text-right whitespace-nowrap max-sm:text-left"
+                    >
                       {formatDuration(record.duration_ms, locale)}
                     </Td>
-                    <Td className="text-right whitespace-nowrap">
+                    <Td label={m.tokens} className="text-right whitespace-nowrap max-sm:text-left">
                       {formatCompact(record.input_tokens, locale)}
                       <span className="text-foreground-subtle"> · </span>
                       <span className="text-success-text">
@@ -285,7 +307,7 @@ export function RequestsPage() {
                       <span className="text-foreground-subtle"> · </span>
                       {formatCompact(record.reasoning_tokens + record.reply_tokens, locale)}
                     </Td>
-                    <Td className="text-right whitespace-nowrap">
+                    <Td label={m.cost} className="text-right whitespace-nowrap max-sm:text-left">
                       {record.cost_usd === null ? (
                         <span title={m.unpriced} className="text-foreground-muted">
                           {m.none}

@@ -55,6 +55,7 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		Model:    request.Model,
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: []antigravity.Part{{Text: prompt}}}},
 		Suffix:   request.Suffix,
+		Unary:    !request.Stream,
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
@@ -95,7 +96,7 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		if shouldWriteRequestError(r, err) {
 			status := statusFromError(err)
 			code := openAIErrorCode(err)
-			_ = writeSSE(w, "", map[string]any{"error": map[string]any{"message": err.Error(), "type": openAIErrorType(status, code), "code": code}})
+			_ = writeSSE(w, "", map[string]any{"error": map[string]any{"message": publicErrorMessage(status, err.Error()), "type": openAIErrorType(status, code), "param": nil, "code": code}})
 		}
 		return
 	}

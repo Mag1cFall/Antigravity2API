@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -21,28 +22,42 @@ import (
 // finishStopSequence 为本地停止序列命中时的结束原因
 const finishStopSequence = "STOP_SEQUENCE"
 
-// output 表示一次生成在转发给客户端前对上游事件的处理：输出上限与本地计数所用的上游请求、函数名还原、思考可见性、停止序列、工具约定与 JSON 输出，并按模型族记下思考签名
+// finishUnexpectedToolCall 为请求没有声明函数而上游返回函数调用时的结束原因
+const finishUnexpectedToolCall = "UNEXPECTED_TOOL_CALL"
+
+// output 表示一次生成在转发给客户端前对上游事件的处理：输出上限与本地计数所用的上游请求、函数名还原、思考可见性、停止序列、请求是否没有声明函数、工具约定、JSON 输出与搜索来源的域名过滤，并按模型族记下思考签名、收到首个上游事件与最后一个思考事件的时刻
 type output struct {
-	limit    *int64
-	prompt   antigravity.WireRequest
-	names    map[string]string
-	hide     bool
-	stop     *stopMatcher
-	tools    *toolContract
-	json     *jsonOutput
-	provider string
-	signed   signatureRecord
-	usage    *antigravity.Usage
-	calls    int
-	stopped  *antigravity.Event
-	done     bool
-	answer   []antigravity.Part
+	first       time.Time
+	thought     time.Time
+	limit       *int64
+	prompt      antigravity.WireRequest
+	names       map[string]string
+	hide        bool
+	stop        *stopMatcher
+	noFunctions bool
+	tools       *toolContract
+	json        *jsonOutput
+	search      *antigravity.SearchOptions
+	provider    string
+	signed      signatureRecord
+	usage       *antigravity.Usage
+	calls       int
+	unexpected  bool
+	stopped     *antigravity.Event
+	done        bool
+	answer      []antigravity.Part
 }
 
 // process 返回一个上游事件处理后应转发的事件，并把转发的正文与函数调用记入回答
 func (o *output) process(event antigravity.Event) []antigravity.Event {
 	if o == nil {
 		return []antigravity.Event{event}
+	}
+	if o.first.IsZero() {
+		o.first = time.Now()
+	}
+	if event.Kind == antigravity.EventReasoning {
+		o.thought = time.Now()
 	}
 	out := o.handle(event)
 	for _, forwarded := range out {
@@ -64,7 +79,7 @@ func (o *output) reply() string {
 	return answerKey(o.answer)
 }
 
-// handle 返回一个上游事件处理后应转发的事件；停止序列命中或约定不满足时 done 置位，其后的上游事件丢弃；停止序列命中时上游尚未给出用量则丢弃其后的事件直到上游给出用量或结束，再随用量发出结束事件
+// handle 返回一个上游事件处理后应转发的事件；请求没有声明函数时丢弃函数调用；停止序列命中或约定不满足时 done 置位，其后的上游事件丢弃；停止序列命中时上游尚未给出用量则丢弃其后的事件直到上游给出用量或结束，再随用量发出结束事件
 func (o *output) handle(event antigravity.Event) []antigravity.Event {
 	if o.done {
 		return nil
@@ -110,6 +125,10 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 		}
 		return append(out, antigravity.Event{Kind: antigravity.EventThoughtSignature, Usage: event.Usage, ProviderModel: event.ProviderModel, ThoughtSignature: event.ThoughtSignature})
 	case antigravity.EventToolCall:
+		if o.noFunctions {
+			o.unexpected = true
+			return out
+		}
 		call := *event.ToolCall
 		if o.provider == antigravity.ProviderAnthropic {
 			call.Arguments = o.claudeArguments(call)
@@ -135,8 +154,57 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 		return append(out, event)
 	case antigravity.EventFinish:
 		return append(out, o.finish(event)...)
+	case antigravity.EventGrounding:
+		if o.search != nil {
+			event.Grounding = filterSources(event.Grounding, o.search)
+		}
 	}
 	return append(out, event)
+}
+
+// filterSources 只保留站点在 AllowedDomains 中且不在 BlockedDomains 中的搜索来源，并按保留的来源重排正文片段的来源序号
+func filterSources(grounding *antigravity.Grounding, search *antigravity.SearchOptions) *antigravity.Grounding {
+	filtered := *grounding
+	filtered.GroundingChunks = nil
+	index := map[int]int{}
+	for i, chunk := range grounding.GroundingChunks {
+		if chunk.Web != nil && (len(search.AllowedDomains) > 0 && !sourceIn(*chunk.Web, search.AllowedDomains) || sourceIn(*chunk.Web, search.BlockedDomains)) {
+			continue
+		}
+		index[i] = len(filtered.GroundingChunks)
+		filtered.GroundingChunks = append(filtered.GroundingChunks, chunk)
+	}
+	filtered.GroundingSupports = nil
+	for _, support := range grounding.GroundingSupports {
+		var indices []int
+		for _, i := range support.GroundingChunkIndices {
+			if kept, ok := index[i]; ok {
+				indices = append(indices, kept)
+			}
+		}
+		if len(indices) > 0 {
+			support.GroundingChunkIndices = indices
+			filtered.GroundingSupports = append(filtered.GroundingSupports, support)
+		}
+	}
+	return &filtered
+}
+
+// sourceIn 判断网页来源的标题站点或地址主机属于 domains 中的站点或其子域名
+func sourceIn(web antigravity.GroundingWeb, domains []string) bool {
+	hosts := []string{strings.ToLower(web.Title)}
+	if parsed, err := url.Parse(web.URI); err == nil {
+		hosts = append(hosts, strings.ToLower(parsed.Hostname()))
+	}
+	for _, domain := range domains {
+		domain = strings.ToLower(strings.TrimPrefix(domain, "www."))
+		for _, host := range hosts {
+			if host == domain || strings.HasSuffix(host, "."+domain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // signatures 返回本次输出中的思考签名
@@ -191,9 +259,12 @@ func (o *output) text(event antigravity.Event) []antigravity.Event {
 	return nil
 }
 
-// finish 在结束事件前核对必需的函数调用并校验 JSON 输出，暂存的正文与用量随结束事件发出；输出达到上限时不校验
+// finish 在结束事件前核对必需的函数调用并校验 JSON 输出，暂存的正文与用量随结束事件发出；输出达到上限时不校验；丢弃过未声明的函数调用时正常结束改为 UNEXPECTED_TOOL_CALL
 func (o *output) finish(event antigravity.Event) []antigravity.Event {
 	o.done = true
+	if o.unexpected && event.FinishReason == "STOP" {
+		event.FinishReason = finishUnexpectedToolCall
+	}
 	var out []antigravity.Event
 	complete := event.FinishReason != "MAX_TOKENS"
 	if complete && o.tools != nil && o.tools.required && o.calls == 0 {
@@ -313,17 +384,28 @@ func (contract *toolContract) check(call antigravity.FunctionCall, count int) er
 	return nil
 }
 
-// jsonOutput 表示暂存的 JSON 正文、其签名与模型，以及输出的 Schema
+// jsonOutput 表示暂存的结构化正文、其签名与模型，以及输出的 Schema 或枚举值
 type jsonOutput struct {
 	schema    *schemaValidator
+	enum      []string
 	text      strings.Builder
 	signature string
 	model     string
 }
 
-// validate 去掉首尾空白与 Markdown 代码块围栏后校验 JSON 与 Schema，返回去掉围栏的正文
+// validate 去掉首尾空白与 Markdown 代码块围栏后校验 JSON 与 Schema，返回去掉围栏的正文；要求枚举时正文去掉引号后须为其中一个值
 func (j *jsonOutput) validate(text string) (string, error) {
 	trimmed := strings.TrimSpace(text)
+	if j.enum != nil {
+		var quoted string
+		if json.Unmarshal([]byte(trimmed), &quoted) == nil {
+			trimmed = quoted
+		}
+		if !slices.Contains(j.enum, trimmed) {
+			return "", fmt.Errorf("output is not one of the enum values")
+		}
+		return trimmed, nil
+	}
 	if fenced, ok := strings.CutPrefix(trimmed, "```"); ok {
 		if newline := strings.IndexByte(fenced, '\n'); newline >= 0 {
 			fenced = fenced[newline+1:]

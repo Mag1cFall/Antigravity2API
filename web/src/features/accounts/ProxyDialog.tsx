@@ -30,7 +30,7 @@ export function ProxyDialog({
   const client = useQueryClient()
   const [value, setValue] = useState(account.proxy ?? '')
   const proxy = value.trim()
-  const valid = validProxy(proxy)
+  const valid = proxy === 'direct' || validProxy(proxy)
   const changed = proxy !== (account.proxy ?? '')
   const save = useMutation({
     mutationFn: () =>

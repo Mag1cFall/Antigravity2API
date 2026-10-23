@@ -2,7 +2,7 @@ import { ToggleGroup } from 'radix-ui'
 
 import { Indicator } from '@/components/ui/indicator'
 
-// Segmented 是分段选择，用于筛选与范围切换，选中背景滑到选中项
+// Segmented 是分段选择，用于筛选与范围切换，选中背景滑到选中项，放不下时换行
 export function Segmented<T extends string>({
   value,
   onValueChange,
@@ -22,7 +22,7 @@ export function Segmented<T extends string>({
         if (next) onValueChange(next as T)
       }}
       aria-label={label}
-      className="relative inline-flex w-fit max-w-full shrink-0 no-scrollbar gap-1 overflow-x-auto rounded-lg bg-muted p-1"
+      className="relative inline-flex w-fit max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1"
     >
       <Indicator active="[data-state=on]" className="rounded-md bg-surface shadow-raised" />
       {options.map((option) => (

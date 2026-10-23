@@ -28,9 +28,9 @@ import { isDesktop } from '@/lib/desktop'
 import { fill, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
-// countdown 把剩余毫秒输出为 m:ss
+// countdown 把剩余毫秒向下取整输出为 m:ss
 function countdown(ms: number) {
-  const seconds = Math.max(0, Math.ceil(ms / 1000))
+  const seconds = Math.max(0, Math.floor(ms / 1000))
   return String(Math.floor(seconds / 60)) + ':' + String(seconds % 60).padStart(2, '0')
 }
 

@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, use, useEffect, useMemo, useState } from 'react'
+import { createContext, Fragment, type ReactNode, use, useEffect, useMemo, useState } from 'react'
 
 import type { Locale } from '@/lib/format'
 
@@ -32,6 +32,32 @@ export function defineMessages<T extends Record<string, string>>(
 export function fill(template: string, vars: Record<string, string | number>) {
   return template.replace(/\{(\w+)\}/g, (match, name: string) =>
     name in vars ? String(vars[name]) : match,
+  )
+}
+
+// fillNodes 用 vars 替换文案中的 {名称} 占位，占位可以是元素
+export function fillNodes(template: string, vars: Record<string, ReactNode>) {
+  return template
+    .split(/\{(\w+)\}/g)
+    .map((part, index) =>
+      index % 2 ? (
+        <Fragment key={index}>{part in vars ? vars[part] : '{' + part + '}'}</Fragment>
+      ) : (
+        part
+      ),
+    )
+}
+
+// codeText 把文案中反引号括起的片段显示为不换行的等宽代码
+export function codeText(text: string) {
+  return text.split('`').map((part, index) =>
+    index % 2 ? (
+      <code key={index} className="font-mono whitespace-nowrap">
+        {part}
+      </code>
+    ) : (
+      part
+    ),
   )
 }
 

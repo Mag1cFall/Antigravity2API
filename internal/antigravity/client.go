@@ -12,6 +12,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,15 +23,15 @@ import (
 
 const (
 	// ClientVersion 为所模拟的官方客户端版本
-	ClientVersion = "2.23.1"
-	// ClientChangelist 为官方客户端 User-Agent 中的构建号
-	ClientChangelist = "998881661"
+	ClientVersion = "2.26.0"
 	// EndpointProd 为登录后首次 loadCodeAssist 使用的 cloudcode 端点
 	EndpointProd = "https://cloudcode-pa.googleapis.com"
 	// EndpointDaily 为个人账户初始化后全部 cloudcode 请求使用的端点
 	EndpointDaily    = "https://daily-cloudcode-pa.googleapis.com"
 	endpointUserinfo = "https://www.googleapis.com/oauth2/v2/userinfo"
 	endpointAICode   = "https://aicode.googleapis.com"
+	// endpointConfig 为 aicode 实验配置接口
+	endpointConfig = endpointAICode + "/v1alpha:fetchConfig"
 	// ideType 为 loadCodeAssist 元数据中的客户端类型
 	ideType = "ANTIGRAVITY"
 	// updateChannel 为 listExperiments 元数据中的更新通道
@@ -173,7 +174,7 @@ func (e *UpstreamError) RetryAt(now time.Time) time.Time {
 	return time.Time{}
 }
 
-// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，web 为头像等 HTTP/2 请求的客户端，auth 为带 Bearer 的 HTTP/2 客户端，state 为伴随请求所需的账户状态
+// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，web 为头像等 HTTP/2 请求的客户端，auth 为带 Bearer 的 HTTP/2 客户端，market 让同一虚拟进程的插件市场目录只读取一次，state 为伴随请求所需的账户状态
 type Client struct {
 	account string
 	http    *http.Client
@@ -185,6 +186,7 @@ type Client struct {
 	project string
 	device  Device
 	mu      sync.Mutex
+	market  sync.Mutex
 	state   companionState
 	hub     hub
 }
@@ -301,73 +303,73 @@ type Initialization struct {
 	Quota    QuotaSummary
 }
 
-// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后两轮 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像；第一轮 loadCodeAssist 之后是 fetchUserInfo，第二轮之后 fetchUserInfo、fetchAvailableModels 与 fetchAdminControls 并发，fetchUserInfo 之后 retrieveUserQuotaSummary 与 listExperiments 并发，listExperiments 之后 fetchConfig、cascadeNuxes 与第二次 listExperiments 并发，第二次之后再取一次 fetchConfig
+// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 之后 fetchUserInfo、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，fetchUserInfo 之后依次 listExperiments、fetchConfig 与 cascadeNuxes
 func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 	var result Initialization
 	if _, err := c.LoadCodeAssist(ctx, EndpointProd); err != nil {
 		return Initialization{}, err
 	}
-	experiments := func() error {
-		return c.listExperiments(ctx)
-	}
-	config := func() error {
-		return c.fetchConfig(ctx)
-	}
 	settings := func() (err error) {
 		result.Settings, err = c.FetchUserInfo(ctx)
 		return err
 	}
-	settled := func() error {
-		if err := settings(); err != nil {
+	assist := func() (err error) {
+		result.Assist, err = c.LoadCodeAssist(ctx, EndpointDaily)
+		return err
+	}
+	err := parallel(func() (err error) {
+		if result.User, err = c.Userinfo(ctx); err == nil {
+			c.avatar(ctx, result.User.Picture)
+		}
+		return err
+	}, func() error {
+		if err := assist(); err != nil {
 			return err
 		}
-		return parallel(func() (err error) {
+		return settings()
+	})
+	if err != nil {
+		return Initialization{}, err
+	}
+	err = parallel(func() (err error) {
+		if result.User, err = c.Userinfo(ctx); err == nil {
+			c.avatar(ctx, result.User.Picture)
+		}
+		return err
+	}, func() error {
+		if err := assist(); err != nil {
+			return err
+		}
+		return parallel(func() error {
+			if err := settings(); err != nil {
+				return err
+			}
+			if err := c.listExperiments(ctx); err != nil {
+				return err
+			}
+			if err := c.fetchConfig(ctx); err != nil {
+				return err
+			}
+			return c.nuxes(ctx)
+		}, func() (err error) {
 			result.Quota, err = c.RetrieveUserQuotaSummary(ctx)
 			return err
-		}, func() error {
-			if err := experiments(); err != nil {
-				return err
-			}
-			return parallel(config, func() error {
-				return c.get(ctx, c.base+"/v1internal/cascadeNuxes?page_size=1000", nil)
-			}, func() error {
-				if err := experiments(); err != nil {
-					return err
-				}
-				return config()
-			})
-		})
-	}
-	for round := range 2 {
-		err := parallel(func() (err error) {
-			if result.User, err = c.Userinfo(ctx); err == nil {
-				c.avatar(ctx, result.User.Picture)
+		}, func() (err error) {
+			if result.Catalog, err = c.FetchAvailableModels(ctx); err == nil {
+				c.recordCatalog(result.Catalog)
 			}
 			return err
-		}, func() (err error) {
-			if result.Assist, err = c.LoadCodeAssist(ctx, EndpointDaily); err != nil {
-				return err
-			}
-			if round == 0 {
-				return settings()
-			}
-			return parallel(settled, func() (err error) {
-				if result.Catalog, err = c.FetchAvailableModels(ctx); err == nil {
-					c.recordCatalog(result.Catalog)
-				}
-				return err
-			}, func() error {
-				return c.post(ctx, c.base+"/v1internal:fetchAdminControls", projectRequest{Project: c.Project()}, nil)
-			})
+		}, func() error {
+			return c.post(ctx, c.base+"/v1internal:fetchAdminControls", projectRequest{Project: c.Project()}, nil)
 		})
-		if err != nil {
-			return Initialization{}, err
-		}
+	})
+	if err != nil {
+		return Initialization{}, err
 	}
 	return result, nil
 }
 
-// parallel 并发执行各请求，全部结束后返回其中的错误
+// parallel 并发执行各请求，全部结束后返回其中的错误，文字相同的错误只保留一个
 func parallel(steps ...func() error) error {
 	errs := make([]error, len(steps))
 	var group sync.WaitGroup
@@ -375,7 +377,13 @@ func parallel(steps ...func() error) error {
 		group.Go(func() { errs[index] = step() })
 	}
 	group.Wait()
-	return errors.Join(errs...)
+	var distinct []error
+	for _, err := range errs {
+		if err != nil && !slices.ContainsFunc(distinct, func(seen error) bool { return seen.Error() == err.Error() }) {
+			distinct = append(distinct, err)
+		}
+	}
+	return errors.Join(distinct...)
 }
 
 // avatar 以 HTTP/2 读取账户头像，请求不带 Authorization 与自定义请求头，结果不影响初始化
@@ -409,6 +417,11 @@ func (c *Client) LoadCodeAssist(ctx context.Context, base string) (LoadCodeAssis
 	c.project, c.state.tier = response.CloudAICompanionProject, tier
 	c.mu.Unlock()
 	return response, nil
+}
+
+// Assist 从账户当前的 cloudcode 端点读取套餐与项目：个人账户为 daily，企业 WIF 账户初始化后为 businessaicode
+func (c *Client) Assist(ctx context.Context) (LoadCodeAssistResponse, error) {
+	return c.LoadCodeAssist(ctx, c.base)
 }
 
 // Userinfo 读取 Google 账户资料，请求不设 User-Agent，由 net/http 写出默认值
@@ -462,7 +475,7 @@ type experimentsRequest struct {
 
 // post 以 Content-Length 发送 JSON 正文并解码 JSON 响应
 func (c *Client) post(ctx context.Context, target string, body any, out any) error {
-	payload, err := hubJSON(body)
+	payload, err := c.device.hubJSON(body)
 	if err != nil {
 		return err
 	}
@@ -472,6 +485,7 @@ func (c *Client) post(ctx context.Context, target string, body any, out any) err
 	}
 	request.Header.Set("User-Agent", c.device.UserAgent())
 	request.Header.Set("Content-Type", "application/json")
+	c.userProject(request)
 	return c.do(request, out)
 }
 
@@ -482,6 +496,7 @@ func (c *Client) get(ctx context.Context, target string, out any) error {
 		return err
 	}
 	request.Header.Set("User-Agent", c.device.UserAgent())
+	c.userProject(request)
 	return c.do(request, out)
 }
 

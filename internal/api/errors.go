@@ -79,6 +79,14 @@ func writeSSEHeartbeat(w http.ResponseWriter) error {
 	return http.NewResponseController(w).Flush()
 }
 
+// writeGeminiHeartbeat 发送不构成事件的空行并传播连接错误
+func writeGeminiHeartbeat(w http.ResponseWriter) error {
+	if _, err := io.WriteString(w, "\n"); err != nil {
+		return err
+	}
+	return http.NewResponseController(w).Flush()
+}
+
 // writeAnthropicPing 发送 Anthropic 流的 ping 事件
 func writeAnthropicPing(w http.ResponseWriter) error {
 	return writeSSE(w, "ping", map[string]string{"type": "ping"})
@@ -125,9 +133,22 @@ func writeAuthError(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// writeRouteNotFound 以请求所属协议的错误体返回 404，消息含请求的方法与路径
+func writeRouteNotFound(w http.ResponseWriter, r *http.Request) {
+	message := fmt.Sprintf("Invalid URL (%s %s)", r.Method, r.URL.Path)
+	switch protocolForRequest(r) {
+	case "anthropic":
+		writeAnthropicError(w, http.StatusNotFound, "not_found_error", message)
+	case "gemini":
+		writeGeminiError(w, http.StatusNotFound, "NOT_FOUND", message)
+	default:
+		writeOpenAIError(w, http.StatusNotFound, "not_found", message)
+	}
+}
+
 func protocolForRequest(r *http.Request) string {
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/v1beta/"):
+	case strings.HasPrefix(r.URL.Path, "/v1beta/"), strings.HasPrefix(r.URL.Path, "/upload/"), strings.HasPrefix(r.URL.Path, "/v1/interactions"):
 		return "gemini"
 	case strings.HasPrefix(r.URL.Path, "/v1/messages"), r.Header.Get("Anthropic-Version") != "":
 		return "anthropic"
@@ -136,7 +157,31 @@ func protocolForRequest(r *http.Request) string {
 	}
 }
 
+// serverErrorPrefix 返回 5xx 状态对应的官方英文错误开头，其余状态返回空
+func serverErrorPrefix(status int) string {
+	switch {
+	case status == http.StatusServiceUnavailable:
+		return "Service unavailable"
+	case status == http.StatusGatewayTimeout:
+		return "Request timed out"
+	case status == 529:
+		return "Overloaded"
+	case status >= 500:
+		return "Internal server error"
+	}
+	return ""
+}
+
+// publicErrorMessage 在 5xx 错误原因前加官方英文开头
+func publicErrorMessage(status int, message string) string {
+	if prefix := serverErrorPrefix(status); prefix != "" && !strings.HasPrefix(message, prefix) {
+		return prefix + ": " + message
+	}
+	return message
+}
+
 func writeOpenAIError(w http.ResponseWriter, status int, code string, message string) {
+	message = publicErrorMessage(status, message)
 	writeJSON(w, status, map[string]any{"error": map[string]any{
 		"message": message,
 		"type":    openAIErrorType(status, code),
@@ -194,6 +239,7 @@ func setRetryAfter(w http.ResponseWriter, err error) int64 {
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, errorType string, message string) {
+	message = publicErrorMessage(status, message)
 	writeJSON(w, status, map[string]any{
 		"type": "error",
 		"error": map[string]string{
@@ -217,6 +263,10 @@ func openAIErrorCode(err error) string {
 	}
 	if contextOverflow(err) {
 		return "context_length_exceeded"
+	}
+	var blocked *antigravity.PromptBlockedError
+	if errors.As(err, &blocked) {
+		return "invalid_prompt"
 	}
 	switch statusFromError(err) {
 	case http.StatusNotFound:

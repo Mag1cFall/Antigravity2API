@@ -25,6 +25,12 @@ type interactionRequest struct {
 	Store      *bool           `json:"store"`
 	PreviousID string          `json:"previous_interaction_id"`
 	Formats    json.RawMessage `json:"response_format"`
+	MIME       string          `json:"response_mime_type"`
+	Modalities []string        `json:"response_modalities"`
+	Safety     []struct {
+		Type      string `json:"type"`
+		Threshold string `json:"threshold"`
+	} `json:"safety_settings"`
 	Tools      []responsesTool `json:"tools"`
 	Generation struct {
 		Temperature       *float64        `json:"temperature"`
@@ -37,6 +43,10 @@ type interactionRequest struct {
 		ThinkingSummaries string          `json:"thinking_summaries"`
 		Speech            json.RawMessage `json:"speech_config"`
 		ToolChoice        json.RawMessage `json:"tool_choice"`
+		Image             *struct {
+			AspectRatio string `json:"aspect_ratio"`
+			ImageSize   string `json:"image_size"`
+		} `json:"image_config"`
 	} `json:"generation_config"`
 }
 
@@ -105,6 +115,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	r = r.WithContext(ctx)
+	generate.Unary = !request.Stream
 	events, err := s.service.Generate(ctx, generate)
 	if err == nil && request.Stream {
 		events, _, err = awaitStreamStart(ctx, events)
@@ -213,6 +224,25 @@ func (request interactionRequest) toGenerateRequest(id string) (antigravity.Gene
 			return generate, fmt.Errorf("unsupported response_format type %q", format.Type)
 		}
 	}
+	if request.MIME != "" {
+		generate.Config.ResponseMIMEType = request.MIME
+	}
+	if len(generate.Config.ResponseModalities) == 0 {
+		for _, modality := range request.Modalities {
+			if strings.EqualFold(modality, "audio") {
+				return generate, fmt.Errorf("audio output is not supported: no model in the catalog generates audio")
+			}
+			generate.Config.ResponseModalities = append(generate.Config.ResponseModalities, strings.ToUpper(modality))
+		}
+	}
+	if image := generation.Image; image != nil && generate.Config.ImageConfig == nil {
+		generate.Config.ImageConfig = &antigravity.ImageConfig{AspectRatio: image.AspectRatio, ImageSize: image.ImageSize}
+	}
+	var safety []antigravity.SafetySetting
+	for _, setting := range request.Safety {
+		safety = append(safety, antigravity.SafetySetting{Category: "HARM_CATEGORY_" + setting.Type, Threshold: setting.Threshold})
+	}
+	generate.Config.SafetySettings = geminiSafetySettings(safety)
 	tools := make([]responsesTool, 0, len(request.Tools))
 	for _, tool := range request.Tools {
 		switch tool.Type {
@@ -321,7 +351,7 @@ func interactionContents(raw json.RawMessage) ([]antigravity.Content, error) {
 			}
 		case "google_search_call", "google_search_result", "url_context_call", "url_context_result", "code_execution_call", "code_execution_result",
 			"google_maps_call", "google_maps_result", "file_search_call", "file_search_result",
-			"mcp_server_tool_call", "mcp_server_tool_result", "retrieval_call", "retrieval_result":
+			"mcp_server_tool_call", "mcp_server_tool_result", "retrieval_call", "retrieval_result", "processing_call", "processing_result":
 			continue
 		default:
 			if parts, err = item.parts(); err != nil {
@@ -481,7 +511,7 @@ func interactionStep(event antigravity.Event) (map[string]any, map[string]any) {
 	return map[string]any{"type": "model_output", "content": []map[string]any{content}}, content
 }
 
-// interactionEvents 返回要输出的事件：函数调用的签名先作为思考步骤，不要求思考摘要时思考只保留签名
+// interactionEvents 返回要输出的事件：正文、媒体与函数调用的签名先作为思考步骤，不要求思考摘要时思考只保留签名
 func interactionEvents(event antigravity.Event, summaries bool) []antigravity.Event {
 	if event.Kind == antigravity.EventReasoning && !summaries {
 		if event.ThoughtSignature == "" {
@@ -489,18 +519,21 @@ func interactionEvents(event antigravity.Event, summaries bool) []antigravity.Ev
 		}
 		event = antigravity.Event{Kind: antigravity.EventThoughtSignature, ThoughtSignature: event.ThoughtSignature}
 	}
-	if event.Kind == antigravity.EventToolCall {
-		if signature := cmp.Or(event.ToolCall.ThoughtSignature, event.ThoughtSignature); signature != "" {
-			return []antigravity.Event{{Kind: antigravity.EventThoughtSignature, ThoughtSignature: signature}, event}
-		}
+	signature := event.ThoughtSignature
+	switch event.Kind {
+	case antigravity.EventToolCall:
+		signature = cmp.Or(event.ToolCall.ThoughtSignature, signature)
+	case antigravity.EventText, antigravity.EventMedia:
+	default:
+		signature = ""
 	}
-	if event.Kind == antigravity.EventMedia && event.ThoughtSignature != "" {
-		return []antigravity.Event{event, {Kind: antigravity.EventThoughtSignature, ThoughtSignature: event.ThoughtSignature}}
+	if signature != "" {
+		return []antigravity.Event{{Kind: antigravity.EventThoughtSignature, ThoughtSignature: signature}, event}
 	}
 	return []antigravity.Event{event}
 }
 
-// interactionSteps 汇总完整步骤，相邻同类的模型输出与思考合并
+// interactionSteps 汇总完整步骤，相邻同类的模型输出与思考合并，搜索来源写入正文 text 内容的 annotations
 func interactionSteps(result generationResult, summaries bool) []map[string]any {
 	steps := make([]map[string]any, 0)
 	for _, original := range result.events {
@@ -535,10 +568,22 @@ func interactionSteps(result generationResult, summaries bool) []map[string]any 
 			}
 		}
 	}
+	if result.grounding != nil {
+		for _, step := range steps {
+			contents, _ := step["content"].([]map[string]any)
+			for _, content := range contents {
+				if text, ok := content["text"].(string); ok {
+					if annotations := interactionAnnotations(text, result.grounding); len(annotations) > 0 {
+						content["annotations"] = annotations
+					}
+				}
+			}
+		}
+	}
 	return steps
 }
 
-// streamInteraction 输出 interaction.created、各步骤的 step.start、step.delta、step.stop 与 interaction.completed
+// streamInteraction 输出 interaction.created、各步骤的 step.start、step.delta、step.stop 与 interaction.completed；正文之后的独立签名暂存到下一个事件，使搜索来源先以 text_annotation_delta 写在正文步骤内
 func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, request interactionRequest, generate antigravity.GenerateRequest, previous responseHistory, current []antigravity.Content, created string, events <-chan antigravity.Event) {
 	if err := streamHeaders(w); err != nil {
 		return
@@ -560,7 +605,9 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 		return send("step.stop", map[string]any{"index": index})
 	}
 	summaries := request.Generation.ThinkingSummaries != "none"
-	result, err := consumeStreamEvents(r.Context(), events, func(original antigravity.Event) error {
+	var text strings.Builder
+	var held []antigravity.Event
+	write := func(original antigravity.Event) error {
 		for _, event := range interactionEvents(original, summaries) {
 			step, delta := interactionStep(event)
 			if step == nil {
@@ -585,14 +632,39 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 				if err := send("step.start", map[string]any{"index": index, "step": start}); err != nil {
 					return err
 				}
+				text.Reset()
 			}
 			if delta != nil {
+				if delta["type"] == "text" {
+					text.WriteString(delta["text"].(string))
+				} else {
+					text.Reset()
+				}
 				if err := send("step.delta", map[string]any{"index": index, "delta": delta}); err != nil {
 					return err
 				}
 			}
 		}
 		return nil
+	}
+	result, err := consumeStreamEvents(r.Context(), events, func(event antigravity.Event) error {
+		switch {
+		case event.Kind == antigravity.EventGrounding && text.Len() > 0:
+			if annotations := interactionAnnotations(text.String(), event.Grounding); len(annotations) > 0 {
+				return send("step.delta", map[string]any{"index": index, "delta": map[string]any{"type": "text_annotation_delta", "annotations": annotations}})
+			}
+			return nil
+		case event.Kind == antigravity.EventThoughtSignature && text.Len() > 0:
+			held = append(held, event)
+			return nil
+		}
+		for _, signature := range held {
+			if err := write(signature); err != nil {
+				return err
+			}
+		}
+		held = nil
+		return write(event)
 	}, func() error { return writeSSEHeartbeat(w) })
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
@@ -729,7 +801,14 @@ func replayInteraction(w http.ResponseWriter, object json.RawMessage, lastEventI
 			json.Unmarshal(step["content"], &content)
 			events = append(events, replayEvent{"step.start", map[string]any{"index": index, "step": map[string]any{"type": kind, "content": []any{}}}})
 			for _, item := range content {
-				events = append(events, replayEvent{"step.delta", map[string]any{"index": index, "delta": item}})
+				var delta map[string]json.RawMessage
+				json.Unmarshal(item, &delta)
+				annotations, annotated := delta["annotations"]
+				delete(delta, "annotations")
+				events = append(events, replayEvent{"step.delta", map[string]any{"index": index, "delta": delta}})
+				if annotated {
+					events = append(events, replayEvent{"step.delta", map[string]any{"index": index, "delta": map[string]any{"type": "text_annotation_delta", "annotations": annotations}}})
+				}
 			}
 		case "thought":
 			var summary []json.RawMessage

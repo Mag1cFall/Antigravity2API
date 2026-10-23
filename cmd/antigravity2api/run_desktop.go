@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -46,7 +47,13 @@ func run(ctx context.Context, args []string) error {
 		DataDir: filepath.Join(cfg.RuntimeDir, "webview"),
 		Hidden:  *hidden,
 		Serve: func(ctx context.Context) error {
-			return serve(ctx, "desktop", cfg, o.overrides, false)
+			return serve(ctx, "desktop", cfg, o.overrides, false, func() {
+				go func() {
+					if err := desktop.Restart(); err != nil {
+						slog.Error("在线更新重启失败 | 错误="+err.Error(), "source", "service")
+					}
+				}()
+			})
 		},
 	})
 }

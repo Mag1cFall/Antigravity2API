@@ -8,6 +8,7 @@ import {
   Layers,
   TrendingUp,
 } from 'lucide-react'
+import { type RefObject, useLayoutEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { appMessages } from '@/app/messages'
@@ -16,10 +17,11 @@ import { Card, CardBody, CardHeader, CardToolbar } from '@/components/ui/card'
 import { Meter } from '@/components/ui/meter'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
-import { StatCards } from '@/components/ui/stats'
-import { Table, Td, Th } from '@/components/ui/table'
+import { dots, StatCards } from '@/components/ui/stats'
+import { stackThird, stackTwoThirds, Table, Td, Th } from '@/components/ui/table'
+import { Tooltip } from '@/components/ui/tooltip'
 import { rangeQuery, useUsage } from '@/features/usage/queries'
-import type { UsageBucket, UsageStats } from '@/features/usage/types'
+import type { UsageReport, UsageStats } from '@/features/usage/types'
 import {
   formatCompact,
   formatCost,
@@ -47,6 +49,8 @@ const usageMessages = defineMessages(
     account: '账户',
     day: '日期',
     export: '导出 CSV',
+    exportEmpty: '这段时间没有可导出的请求',
+    exportFailed: '用量读取失败，无法导出',
     requests: '请求',
     requestsDetail: '成功 {succeeded} · 失败 {failed} · 限流 {limited}',
     change: '较上一周期 {change}',
@@ -61,7 +65,7 @@ const usageMessages = defineMessages(
     unpriced: '另有 {count} 个请求的模型没有单价',
     unpricedShort: '未定价 {count}',
     trend: '趋势',
-    trendDescription: '每{bucket}的请求数',
+    trendDescription: '每 {bucket}的请求数',
     trendLabel: '请求趋势，峰值 {peak} 个请求',
     recent: '近 {minutes} 分钟 {requests} 个请求、{tokens} token',
     share: '请求占比',
@@ -94,6 +98,8 @@ const usageMessages = defineMessages(
     account: 'Account',
     day: 'Day',
     export: 'Export CSV',
+    exportEmpty: 'There are no requests to export in this period',
+    exportFailed: 'Usage could not be loaded, so there is nothing to export',
     requests: 'Requests',
     requestsDetail: '{succeeded} succeeded · {failed} failed · {limited} rate limited',
     change: '{change} vs previous period',
@@ -127,7 +133,7 @@ const usageMessages = defineMessages(
   },
   {
     title: '用量',
-    description: '依模型、API 金鑰、帳號或日期彙整的請求數、token、快取命中、耗時與估算費用',
+    description: '依模型、API key、帳號或日期彙整的請求數、token、快取命中、耗時與估算費用',
     range: '時間範圍',
     range24h: '24 小時',
     range7d: '7 天',
@@ -137,10 +143,12 @@ const usageMessages = defineMessages(
     breakdown: '明細',
     breakdownHint: '依所選維度彙整的請求、token、快取、耗時與估算費用',
     model: '模型',
-    api_key: 'API 金鑰',
+    api_key: 'API key',
     account: '帳號',
     day: '日期',
     export: '匯出 CSV',
+    exportEmpty: '這段期間沒有可匯出的請求',
+    exportFailed: '用量讀取失敗，無法匯出',
     requests: '請求',
     requestsDetail: '成功 {succeeded} · 失敗 {failed} · 速率限制 {limited}',
     change: '較上一期 {change}',
@@ -186,21 +194,80 @@ function cacheRate(stats: UsageStats) {
   return stats.input_tokens ? stats.cached_tokens / stats.input_tokens : 0
 }
 
-// Trend 是逐桶请求数的柱状图
-function Trend({ buckets, label }: { buckets: UsageBucket[]; label: string }) {
-  const peak = Math.max(1, ...buckets.map((bucket) => bucket.requests))
+// barWidth 是趋势图每根柱子连同间隔的最小宽度
+const barWidth = 6
+
+// useWidth 返回元素的内容宽度并随尺寸变化更新
+function useWidth(ref: RefObject<HTMLElement | null>) {
+  const [width, setWidth] = useState(0)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element) return undefined
+    setWidth(element.clientWidth)
+    const observer = new ResizeObserver(() => {
+      setWidth(element.clientWidth)
+    })
+    observer.observe(element)
+    return () => {
+      observer.disconnect()
+    }
+  }, [ref])
+  return width
+}
+
+// TrendCard 是逐桶请求数的柱状图，宽度放不下每桶一根柱子时把相邻的桶合并，副标题随合并后的间隔变化
+function TrendCard({ data }: { data: UsageReport }) {
+  const m = useMessages(usageMessages)
+  const { locale } = useI18n()
+  const chart = useRef<HTMLDivElement>(null)
+  const width = useWidth(chart)
+  const per = width ? Math.max(1, Math.ceil((data.buckets.length * barWidth) / width)) : 1
+  const bars: { at: string; requests: number }[] = []
+  for (let index = 0; index < data.buckets.length; index += per) {
+    const group = data.buckets.slice(index, index + per)
+    bars.push({
+      at: group[0]?.at ?? '',
+      requests: group.reduce((sum, bucket) => sum + bucket.requests, 0),
+    })
+  }
+  const peak = Math.max(1, ...bars.map((bar) => bar.requests))
   return (
-    <div role="img" aria-label={label} className="flex h-chart items-end gap-px">
-      {buckets.map((bucket) => (
+    <Card>
+      <CardHeader
+        icon={<TrendingUp size={16} aria-hidden />}
+        title={m.trend}
+        description={fill(m.trendDescription, {
+          bucket: formatDuration(data.bucket_seconds * 1000 * per, locale),
+        })}
+        actions={
+          <span className="text-sm text-foreground-muted">
+            {fill(m.recent, {
+              minutes: data.recent.minutes,
+              requests: formatNumber(data.recent.requests, locale),
+              tokens: formatCompact(data.recent.tokens, locale),
+            })}
+          </span>
+        }
+      />
+      <CardBody>
         <div
-          key={bucket.at}
-          className="min-w-px flex-1 rounded-t-sm bg-primary"
-          style={{
-            height: `${String(Math.max(bucket.requests ? 2 : 0, (bucket.requests / peak) * 100))}%`,
-          }}
-        />
-      ))}
-    </div>
+          ref={chart}
+          role="img"
+          aria-label={fill(m.trendLabel, { peak: formatNumber(peak, locale) })}
+          className="flex h-chart items-end gap-px"
+        >
+          {bars.map((bar) => (
+            <div
+              key={bar.at}
+              className="min-w-px flex-1 rounded-t-sm bg-primary"
+              style={{
+                height: `${String(Math.max(bar.requests ? 2 : 0, (bar.requests / peak) * 100))}%`,
+              }}
+            />
+          ))}
+        </div>
+      </CardBody>
+    </Card>
   )
 }
 
@@ -244,19 +311,34 @@ export function UsagePage() {
           label: rangeLabels[value],
         }))}
       />
-      <Button size="sm" asChild>
-        <a href={csv} download>
-          <Download size={16} aria-hidden />
-          {m.export}
-        </a>
-      </Button>
+      {usage.data && usage.data.totals.requests > 0 ? (
+        <Button size="sm" asChild>
+          <a href={csv} download>
+            <Download size={16} aria-hidden />
+            {m.export}
+          </a>
+        </Button>
+      ) : (
+        <Tooltip
+          disabledReason={
+            usage.isPending ? app.loading : usage.isError ? m.exportFailed : m.exportEmpty
+          }
+        >
+          <Button size="sm" disabled>
+            <Download size={16} aria-hidden />
+            {m.export}
+          </Button>
+        </Tooltip>
+      )}
     </div>
   )
   if (usage.isPending) {
     return (
       <>
         {header}
-        <Loading label={app.loading} />
+        <Card>
+          <Loading label={app.loading} />
+        </Card>
       </>
     )
   }
@@ -316,7 +398,7 @@ export function UsagePage() {
             tone: 'info',
             label: m.requests,
             value: formatNumber(totals.requests, locale),
-            detail: [
+            detail: dots(
               fill(m.requestsDetail, {
                 succeeded: formatNumber(totals.succeeded, locale),
                 failed: formatNumber(totals.failed, locale),
@@ -327,9 +409,7 @@ export function UsagePage() {
                 : fill(m.change, {
                     change: (change > 0 ? '+' : '') + formatPercent(change, locale),
                   }),
-            ]
-              .filter(Boolean)
-              .join(' · '),
+            ),
           },
           {
             key: 'cache',
@@ -337,10 +417,12 @@ export function UsagePage() {
             tone: 'success',
             label: m.cacheRate,
             value: formatPercent(cacheRate(totals), locale),
-            detail: fill(m.cacheDetail, {
-              cached: formatCompact(totals.cached_tokens, locale),
-              input: formatCompact(totals.input_tokens, locale),
-            }),
+            detail: [
+              fill(m.cacheDetail, {
+                cached: formatCompact(totals.cached_tokens, locale),
+                input: formatCompact(totals.input_tokens, locale),
+              }),
+            ],
           },
           {
             key: 'tokens',
@@ -348,10 +430,12 @@ export function UsagePage() {
             tone: 'violet',
             label: m.tokens,
             value: formatCompact(totals.total_tokens, locale),
-            detail: fill(m.tokensDetail, {
-              reasoning: formatCompact(totals.reasoning_tokens, locale),
-              reply: formatCompact(totals.reply_tokens, locale),
-            }),
+            detail: dots(
+              fill(m.tokensDetail, {
+                reasoning: formatCompact(totals.reasoning_tokens, locale),
+                reply: formatCompact(totals.reply_tokens, locale),
+              }),
+            ),
           },
           {
             key: 'latency',
@@ -359,10 +443,12 @@ export function UsagePage() {
             tone: 'warning',
             label: m.latency,
             value: formatDuration(totals.duration.p50_ms, locale),
-            detail: fill(m.latencyDetail, {
-              p95: formatDuration(totals.duration.p95_ms, locale),
-              first: formatDuration(totals.first_event.p50_ms, locale),
-            }),
+            detail: dots(
+              fill(m.latencyDetail, {
+                p95: formatDuration(totals.duration.p95_ms, locale),
+                first: formatDuration(totals.first_event.p50_ms, locale),
+              }),
+            ),
           },
           {
             key: 'cost',
@@ -370,43 +456,15 @@ export function UsagePage() {
             tone: 'info',
             label: m.cost,
             value: formatCost(totals.cost_usd, locale),
-            detail: totals.unpriced
-              ? fill(m.unpriced, { count: formatNumber(totals.unpriced, locale) })
-              : m.costDetail,
+            detail: [
+              totals.unpriced
+                ? fill(m.unpriced, { count: formatNumber(totals.unpriced, locale) })
+                : m.costDetail,
+            ],
           },
         ]}
       />
-      {grouping !== 'day' && (
-        <Card>
-          <CardHeader
-            icon={<TrendingUp size={16} aria-hidden />}
-            title={m.trend}
-            description={fill(m.trendDescription, {
-              bucket: formatDuration(data.bucket_seconds * 1000, locale),
-            })}
-            actions={
-              <span className="text-sm text-foreground-muted">
-                {fill(m.recent, {
-                  minutes: data.recent.minutes,
-                  requests: formatNumber(data.recent.requests, locale),
-                  tokens: formatCompact(data.recent.tokens, locale),
-                })}
-              </span>
-            }
-          />
-          <CardBody>
-            <Trend
-              buckets={data.buckets}
-              label={fill(m.trendLabel, {
-                peak: formatNumber(
-                  Math.max(0, ...data.buckets.map((item) => item.requests)),
-                  locale,
-                ),
-              })}
-            />
-          </CardBody>
-        </Card>
-      )}
+      {grouping !== 'day' && <TrendCard data={data} />}
       <Card>
         <CardHeader title={m.breakdown} description={m.breakdownHint} />
         <CardToolbar className="border-t">
@@ -419,7 +477,7 @@ export function UsagePage() {
             options={groupings.map((value) => ({ value, label: m[value] }))}
           />
         </CardToolbar>
-        <Table label={m.title} fixed minWidth={760}>
+        <Table label={m.title} fixed stack minWidth={760}>
           <colgroup>
             <col />
             <col className="w-[88px]" />
@@ -451,18 +509,27 @@ export function UsagePage() {
           <tbody>
             {rows.map((row) => (
               <tr key={row.key}>
-                <Td className="truncate font-mono text-xs" title={row.key}>
+                <Td className="truncate font-mono text-xs max-sm:basis-full" title={row.key}>
                   {row.key || m.none}
                 </Td>
-                <Td className="text-right">{formatNumber(row.requests, locale)}</Td>
-                <Td>
+                <Td label={m.requests} className={'text-right max-sm:text-left ' + stackThird}>
+                  {formatNumber(row.requests, locale)}
+                </Td>
+                <Td label={m.share} className={stackTwoThirds}>
                   <Meter
                     value={row.requests / totals.requests}
                     tone="info"
                     label={m.share + ' ' + formatPercent(row.requests / totals.requests, locale)}
                   />
                 </Td>
-                <Td className={'text-right ' + (row.failed ? 'text-error-text' : '')}>
+                <Td
+                  label={m.failed}
+                  className={
+                    'text-right max-sm:text-left ' +
+                    stackThird +
+                    (row.failed ? ' text-error-text' : '')
+                  }
+                >
                   {formatNumber(row.failed, locale)}
                 </Td>
                 <Td
@@ -481,14 +548,22 @@ export function UsagePage() {
                 <Td className="text-right max-xl:hidden">
                   {formatCompact(row.reasoning_tokens, locale)}
                 </Td>
-                <Td className="text-right">{formatCompact(row.reply_tokens, locale)}</Td>
+                <Td label={m.reply} className={'text-right max-sm:text-left ' + stackThird}>
+                  {formatCompact(row.reply_tokens, locale)}
+                </Td>
                 <Td className="text-right whitespace-nowrap max-xl:hidden">
                   {formatDuration(row.duration.p50_ms, locale)}
                 </Td>
-                <Td className="text-right whitespace-nowrap">
+                <Td
+                  label={m.p95}
+                  className={'text-right whitespace-nowrap max-sm:text-left ' + stackThird}
+                >
                   {formatDuration(row.duration.p95_ms, locale)}
                 </Td>
-                <Td className="text-right whitespace-nowrap">
+                <Td
+                  label={m.cost}
+                  className={'text-right whitespace-nowrap max-sm:text-left ' + stackThird}
+                >
                   {formatCost(row.cost_usd, locale)}
                   {row.unpriced > 0 && (
                     <div className="text-xs text-foreground-muted">

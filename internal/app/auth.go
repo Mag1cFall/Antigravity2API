@@ -137,7 +137,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	auth, peer, now := s.auth, s.clientIP(r), time.Now()
+	auth, peer, now := s.auth, clientIP(r), time.Now()
 	auth.mu.Lock()
 	if !auth.enabled {
 		auth.mu.Unlock()

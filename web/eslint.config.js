@@ -9,7 +9,7 @@ import tseslint from 'typescript-eslint'
 // eslintConfig 定义 React 与 TypeScript 的类型感知静态检查
 export default tseslint.config(
   {
-    ignores: ['node_modules', '../internal/webui/dist'],
+    ignores: ['node_modules', 'public', '../internal/webui/dist'],
   },
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

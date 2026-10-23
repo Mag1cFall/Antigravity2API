@@ -39,6 +39,18 @@ type chatRequest struct {
 	FunctionCall        json.RawMessage   `json:"function_call"`
 	PromptCacheKey      string            `json:"prompt_cache_key"`
 	User                string            `json:"user"`
+	ExtraBody           chatExtraBody     `json:"extra_body"`
+}
+
+// chatExtraBody 为 Gemini OpenAI 兼容层的 extra_body 扩展
+type chatExtraBody struct {
+	Google struct {
+		ThinkingConfig *struct {
+			IncludeThoughts *bool  `json:"include_thoughts"`
+			ThinkingLevel   string `json:"thinking_level"`
+			ThinkingBudget  *int64 `json:"thinking_budget"`
+		} `json:"thinking_config"`
+	} `json:"google"`
 }
 
 type chatStreamOptions struct {
@@ -231,7 +243,12 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, buildChatCompletion(requestID, created, request.Model, results, request.Tools))
+	media := s.mediaOutputFor(r)
+	if err := media.saveResults(results...); err != nil {
+		writeOpenAIRequestError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildChatCompletion(requestID, created, request.Model, results, request.Tools, media))
 }
 
 // mergeLegacyFunctions 把旧式 functions 与 function_call 并入 tools 与 tool_choice，旧式函数每轮最多一个调用
@@ -307,6 +324,16 @@ func (request chatRequest) toGenerateRequest(id string) (antigravity.GenerateReq
 		return antigravity.GenerateRequest{}, err
 	}
 	if rawJSONConfigured(request.WebSearchOptions) {
+		var options struct {
+			SearchContextSize string          `json:"search_context_size"`
+			UserLocation      json.RawMessage `json:"user_location"`
+		}
+		if err := json.Unmarshal(request.WebSearchOptions, &options); err != nil {
+			return antigravity.GenerateRequest{}, fmt.Errorf("web_search_options: %w", err)
+		}
+		if tools.Search, err = searchOptions(options.SearchContextSize, options.UserLocation, nil, nil); err != nil {
+			return antigravity.GenerateRequest{}, err
+		}
 		tools.GoogleSearch = json.RawMessage(`{}`)
 	}
 	tools.ToolConfig.ParallelCalls = request.ParallelToolCalls
@@ -696,6 +723,16 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 		}
 		config.HideThinking = strings.EqualFold(reasoning.Summary, "none")
 	}
+	if thinking := request.ExtraBody.Google.ThinkingConfig; thinking != nil {
+		if thinking.ThinkingLevel != "" {
+			config.ReasoningEffort = thinking.ThinkingLevel
+		} else if thinking.ThinkingBudget != nil {
+			config.ReasoningEffort, config.ThinkingBudget = "", thinking.ThinkingBudget
+		}
+		if thinking.IncludeThoughts != nil {
+			config.HideThinking = !*thinking.IncludeThoughts
+		}
+	}
 	config.HideThinking = config.HideThinking || strings.EqualFold(config.ReasoningEffort, "none")
 	if len(request.ResponseFormat) > 0 && string(request.ResponseFormat) != "null" {
 		var format struct {
@@ -747,7 +784,7 @@ func normalizeStopSequences(values []string) []string {
 	return normalized
 }
 
-func buildChatCompletion(id string, created int64, model string, results []generationResult, tools []openAITool) map[string]any {
+func buildChatCompletion(id string, created int64, model string, results []generationResult, tools []openAITool, media mediaOutput) map[string]any {
 	choices := make([]any, 0, len(results))
 	response := map[string]any{
 		"id":      id,
@@ -756,7 +793,7 @@ func buildChatCompletion(id string, created int64, model string, results []gener
 		"model":   model,
 	}
 	for index := range results {
-		choices = append(choices, chatCompletionChoice(index, results[index], tools))
+		choices = append(choices, chatCompletionChoice(index, results[index], tools, media))
 		if results[index].providerModel != "" && response["provider_model"] == nil {
 			response["provider_model"] = results[index].providerModel
 		}
@@ -769,10 +806,10 @@ func buildChatCompletion(id string, created int64, model string, results []gener
 }
 
 // chatCompletionChoice 构造非流式响应中第 index 个 choice
-func chatCompletionChoice(index int, result generationResult, tools []openAITool) map[string]any {
+func chatCompletionChoice(index int, result generationResult, tools []openAITool, media mediaOutput) map[string]any {
 	content := any(result.text.String())
 	if len(result.media) > 0 {
-		content = renderedText(result.events)
+		content = renderedText(result.events, media)
 	}
 	if result.text.Len() == 0 && len(result.media) == 0 && len(result.toolCalls) > 0 {
 		content = nil
@@ -817,8 +854,9 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 		defer writing.Unlock()
 		return writeSSEHeartbeat(w)
 	}
+	media := s.mediaOutputFor(r)
 	results, err := choices.run(func(index int, events <-chan antigravity.Event) (generationResult, error) {
-		choice := &chatStreamChoice{tools: request.Tools, index: index, write: write}
+		choice := &chatStreamChoice{tools: request.Tools, index: index, write: write, media: media}
 		result, err := consumeStreamEvents(choices.ctx, events, choice.emit, heartbeat)
 		if err != nil {
 			return result, err
@@ -831,8 +869,9 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 			status := statusFromError(err)
 			code := openAIErrorCode(err)
 			_ = writeSSE(w, "", map[string]any{"error": map[string]any{
-				"message": err.Error(),
+				"message": publicErrorMessage(status, err.Error()),
 				"type":    openAIErrorType(status, code),
+				"param":   nil,
 				"code":    code,
 			}})
 		}
@@ -863,6 +902,7 @@ type chatStreamChoice struct {
 	// openLine 表示已写出的正文末尾没有换行
 	openLine bool
 	text     strings.Builder
+	media    mediaOutput
 }
 
 // emit 写出一个上游事件对应的 delta
@@ -877,7 +917,10 @@ func (choice *chatStreamChoice) emit(event antigravity.Event) error {
 	case antigravity.EventReasoning:
 		return choice.write(choice.index, map[string]any{"reasoning_content": event.Text}, nil)
 	case antigravity.EventMedia:
-		content := mediaMarkdown(*event.Media) + "\n"
+		if err := choice.media.save(*event.Media); err != nil {
+			return err
+		}
+		content := choice.media.markdown(*event.Media) + "\n"
 		if choice.openLine {
 			content = "\n" + content
 		}

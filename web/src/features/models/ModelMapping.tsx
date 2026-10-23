@@ -67,7 +67,7 @@ function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[]
               row.model && !targets.includes(row.model) ? [row.model, ...targets] : targets
             return (
               <li key={index} className="flex flex-col gap-1">
-                <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_16px_minmax(0,1fr)_auto]">
+                <div className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[minmax(0,1fr)_16px_minmax(0,1fr)_auto]">
                   <Input
                     id={id}
                     aria-label={fill(m.aliasLabel, { index: index + 1 })}
@@ -80,12 +80,12 @@ function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[]
                     onChange={(event) => {
                       update(index, { alias: event.target.value })
                     }}
-                    className="font-mono max-sm:col-span-2"
+                    className="font-mono max-sm:col-span-3"
                   />
                   <ArrowRight
                     size={16}
                     aria-hidden
-                    className="text-foreground-muted max-sm:hidden"
+                    className="text-foreground-muted max-sm:rotate-90"
                   />
                   <Select
                     label={fill(m.targetLabel, { index: index + 1 })}
@@ -172,7 +172,7 @@ export function ModelMapping({ targets }: { targets: string[] }) {
           <Loading label={app.loading} />
         ) : settings.isError ? (
           <ErrorState
-            title={app.pageError}
+            title={m.mappingLoadFailed}
             error={settings.error}
             retryLabel={app.retry}
             onRetry={() => void settings.refetch()}

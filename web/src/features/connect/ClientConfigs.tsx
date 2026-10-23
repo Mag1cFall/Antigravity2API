@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 
+import { appMessages } from '@/app/messages'
 import { Callout } from '@/components/ui/callout'
 import { CodeBlock } from '@/components/ui/code-block'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
+import { ErrorState, Loading } from '@/components/ui/states'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { maskKey, useApiKeys } from '@/features/connect/ApiKeys'
 import { serviceOrigin } from '@/features/connect/endpoints'
@@ -25,7 +27,7 @@ import {
 } from '@/features/connect/snippets'
 import { useModels } from '@/features/models/queries'
 import { kindOf, type Model } from '@/features/models/types'
-import { useMessages } from '@/lib/i18n'
+import { fill, useMessages } from '@/lib/i18n'
 
 // clients 是提供配置的客户端
 const clients = ['claude-code', 'codex', 'opencode', 'cherry-studio', 'curl'] as const
@@ -76,13 +78,14 @@ function ModelSelect({
   )
 }
 
-// ClientConfigs 按客户端给出可直接复制的配置，模型取自实时目录，key 取自已保存的 API key；复制任一配置即完成引导的第三步
+// ClientConfigs 按客户端给出可直接复制的配置，模型取自实时目录，key 取自已保存的 API key；读到 API key 与模型目录之前不生成配置，复制任一配置即完成引导的第三步
 export function ClientConfigs() {
   const m = useMessages(connectMessages)
+  const app = useMessages(appMessages)
   const [params, setParams] = useSearchParams()
   const client = clients.find((item) => item === params.get('client')) ?? 'claude-code'
   const catalog = useModels()
-  const { keys } = useApiKeys()
+  const { settings, keys } = useApiKeys()
   const models = (catalog.data?.models ?? []).filter((model) => kindOf(model) === 'chat')
   const [choice, setChoice] = useState<{ model?: string; small?: string; key?: string }>({})
   const [shell, setShell] = useState<Shell>(
@@ -159,14 +162,31 @@ export function ClientConfigs() {
   )
   const notes = (
     <>
-      {models.length === 0 && (
-        <Callout tone="muted">
-          <p>{m.noModels}</p>
+      {catalog.isError ? (
+        <Callout tone="error" role="alert">
+          <p>{fill(m.modelsFailed, { message: catalog.error.message })}</p>
         </Callout>
+      ) : (
+        models.length === 0 && (
+          <Callout tone="muted">
+            <p>{m.noModels}</p>
+          </Callout>
+        )
       )}
       {keys.length === 0 && <p className="text-xs text-foreground-muted">{m.keyNone}</p>}
     </>
   )
+  if (settings.isPending || catalog.isPending) return <Loading label={app.loading} rows={3} />
+  if (settings.isError) {
+    return (
+      <ErrorState
+        title={m.configsFailed}
+        error={settings.error}
+        retryLabel={app.retry}
+        onRetry={() => void settings.refetch()}
+      />
+    )
+  }
   return (
     <Tabs
       value={client}

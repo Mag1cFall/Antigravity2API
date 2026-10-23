@@ -94,28 +94,3 @@ func TestRemoteAdminRequiresLogin(t *testing.T) {
 		t.Fatalf("配对令牌错误 %d %s", status, code)
 	}
 }
-
-// TestClientIP 验证只有可信代理转发的请求取 X-Forwarded-For 中从右起第一个不可信地址
-func TestClientIP(t *testing.T) {
-	cfg := config.Default()
-	if err := cfg.Set(map[string]string{"TRUSTED_PROXIES": "127.0.0.1,10.0.0.0/8"}); err != nil {
-		t.Fatal(err)
-	}
-	s := newAuthServer(cfg)
-	cases := []struct{ remote, forwarded, want string }{
-		{"127.0.0.1:5000", "198.51.100.7, 10.1.2.3", "198.51.100.7"},
-		{"127.0.0.1:5000", "203.0.113.9, 198.51.100.7", "198.51.100.7"},
-		{"127.0.0.1:5000", "", "127.0.0.1"},
-		{"203.0.113.5:4000", "198.51.100.7", "203.0.113.5"},
-	}
-	for _, item := range cases {
-		request := httptest.NewRequest("GET", "/v1/models", nil)
-		request.RemoteAddr = item.remote
-		if item.forwarded != "" {
-			request.Header.Set("X-Forwarded-For", item.forwarded)
-		}
-		if got := s.clientIP(request); got != item.want {
-			t.Errorf("%s %q: %s", item.remote, item.forwarded, got)
-		}
-	}
-}

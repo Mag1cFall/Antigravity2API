@@ -35,6 +35,7 @@ export const modelMessages = defineMessages(
     mappingHint:
       '客户端请求别名时改用目标模型，例如把 Claude Code 后台使用的模型名映射到目录中的 Flash 模型。别名同时出现在 /v1/models 中。',
     mappingEmpty: '没有模型映射，客户端按目录中的模型 ID 请求。',
+    mappingLoadFailed: '无法读取模型映射',
     aliasLabel: '别名 {index}',
     aliasPlaceholder: '客户端使用的模型名',
     targetLabel: '别名 {index} 的目标模型',
@@ -84,6 +85,7 @@ export const modelMessages = defineMessages(
     mappingHint:
       'Requests for an alias use the target model instead. For example, map the model Claude Code uses for background tasks to a Flash model in the catalog. Aliases also appear in /v1/models.',
     mappingEmpty: 'No model mapping. Clients request models by their catalog IDs.',
+    mappingLoadFailed: 'Could not load the model mapping',
     aliasLabel: 'Alias {index}',
     aliasPlaceholder: 'Model name the client uses',
     targetLabel: 'Target model for alias {index}',
@@ -131,6 +133,7 @@ export const modelMessages = defineMessages(
     mappingHint:
       '用戶端請求別名時改用目標模型，例如將 Claude Code 在背景使用的模型名稱對應到目錄中的 Flash 模型。別名也會列在 /v1/models 中。',
     mappingEmpty: '沒有模型對應，用戶端依目錄中的模型 ID 發出請求。',
+    mappingLoadFailed: '無法讀取模型對應',
     aliasLabel: '別名 {index}',
     aliasPlaceholder: '用戶端使用的模型名稱',
     targetLabel: '別名 {index} 的目標模型',

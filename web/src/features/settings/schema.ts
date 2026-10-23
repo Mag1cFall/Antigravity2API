@@ -30,32 +30,23 @@ export function validProxy(value: string) {
   }
 }
 
-// validAddress 判断 IPv4 或 IPv6 地址
-function validAddress(value: string) {
-  if (value.includes(':')) {
-    try {
-      return new URL('http://[' + value + ']').hostname !== ''
-    } catch {
-      return false
-    }
+// validBaseURL 判断媒体链接地址为空或为 http、https URL
+export function validBaseURL(value: string) {
+  if (value === '') return true
+  try {
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) && url.hostname !== ''
+  } catch {
+    return false
   }
-  const parts = value.split('.')
-  return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
 }
 
-// validPrefixes 判断逗号分隔的 IP 或 CIDR 列表，空值表示不信任任何代理
-export function validPrefixes(value: string) {
+// proxyLines 返回按行填写的代理，忽略空行
+export function proxyLines(value: string) {
   return value
-    .split(',')
-    .map((item) => item.trim())
+    .split('\n')
+    .map((line) => line.trim())
     .filter(Boolean)
-    .every((item) => {
-      const [address = '', bits, extra] = item.split('/')
-      if (extra !== undefined || !validAddress(address)) return false
-      if (bits === undefined) return true
-      const max = address.includes(':') ? 128 : 32
-      return /^\d{1,3}$/.test(bits) && Number(bits) <= max
-    })
 }
 
 // SchemaMessages 是校验失败时的提示
@@ -65,10 +56,11 @@ interface SchemaMessages {
   errProxy: string
   errPositive: string
   errDuration: string
-  errProxies: string
   errLogTotal: string
+  errReserve: string
   errAdminUser: string
   errAdminPassword: string
+  errMediaBase: string
 }
 
 // settingsSchema 与 internal/config 的 Validate 规则一致，字段名即 .env 配置项，passwordSet 表示已保存过管理密码；API_KEYS 在接入页、MODEL_MAPPING 在模型页单独保存
@@ -79,7 +71,9 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
       LISTEN: z.string().trim().refine(validListen, m.errListen),
       AUTH_DIR: z.string().trim().min(1, m.errRequired),
       RUNTIME_DIR: z.string().trim().min(1, m.errRequired),
-      PROXY: z.string().trim().refine(validProxy, m.errProxy),
+      MEDIA_OUTPUT: z.enum(['inline', 'url']),
+      MEDIA_BASE_URL: z.string().trim().refine(validBaseURL, m.errMediaBase),
+      PROXY: z.string().refine((value) => proxyLines(value).every(validProxy), m.errProxy),
       SYSTEM_PROMPT: z.enum(['full', 'medium', 'aggressive', 'custom']),
       SYSTEM_PROMPT_SECTIONS: z.array(z.string()),
       SYSTEM_PROMPT_WRAP: z.enum(['full', 'time', 'none']),
@@ -91,7 +85,12 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
         .string()
         .trim()
         .refine((value) => value === '0' || goDuration.test(value), m.errDuration),
-      TRUSTED_PROXIES: z.string().trim().refine(validPrefixes, m.errProxies),
+      QUOTA_RESERVE_PERCENT: z
+        .number({ error: m.errReserve })
+        .int(m.errReserve)
+        .min(0, m.errReserve)
+        .max(99, m.errReserve),
+      WEEKLY_QUOTA_WARMUP: z.boolean(),
       LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']),
       LOG_FORMAT: z.enum(['json', 'text']),
       LOG_FILE: z.boolean(),
@@ -139,7 +138,9 @@ export function toForm(settings: Settings): SettingsForm {
     LISTEN: v('LISTEN', '127.0.0.1:8017'),
     AUTH_DIR: v('AUTH_DIR', 'auth'),
     RUNTIME_DIR: v('RUNTIME_DIR', 'runtime'),
-    PROXY: v('PROXY', ''),
+    MEDIA_OUTPUT: v('MEDIA_OUTPUT', 'inline') as SettingsForm['MEDIA_OUTPUT'],
+    MEDIA_BASE_URL: v('MEDIA_BASE_URL', ''),
+    PROXY: list('PROXY', '').join('\n'),
     SYSTEM_PROMPT: v('SYSTEM_PROMPT', 'full') as SettingsForm['SYSTEM_PROMPT'],
     SYSTEM_PROMPT_SECTIONS: list(
       'SYSTEM_PROMPT_SECTIONS',
@@ -151,7 +152,8 @@ export function toForm(settings: Settings): SettingsForm {
     PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS', ''),
     REQUEST_TIMEOUT: v('REQUEST_TIMEOUT', '5m'),
     QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL', '15m'),
-    TRUSTED_PROXIES: v('TRUSTED_PROXIES', ''),
+    QUOTA_RESERVE_PERCENT: num('QUOTA_RESERVE_PERCENT', '0'),
+    WEEKLY_QUOTA_WARMUP: bool('WEEKLY_QUOTA_WARMUP', 'false'),
     LOG_LEVEL: v('LOG_LEVEL', 'info') as SettingsForm['LOG_LEVEL'],
     LOG_FORMAT: v('LOG_FORMAT', 'json') as SettingsForm['LOG_FORMAT'],
     LOG_FILE: bool('LOG_FILE', 'true'),
@@ -163,10 +165,10 @@ export function toForm(settings: Settings): SettingsForm {
   }
 }
 
-// toValues 把表单值换成 PATCH /api/settings 的 values，列表以逗号相连，密码留空时不提交
+// toValues 把表单值换成 PATCH /api/settings 的 values，列表与按行填写的代理以逗号相连，密码留空时不提交
 export function toValues(form: SettingsForm): Record<string, string> {
-  const { ADMIN_PASSWORD, ...rest } = form
-  const values: Record<string, string> = {}
+  const { ADMIN_PASSWORD, PROXY, ...rest } = form
+  const values: Record<string, string> = { PROXY: proxyLines(PROXY).join(',') }
   for (const [key, value] of Object.entries(rest))
     values[key] = Array.isArray(value) ? value.join(',') : String(value)
   if (ADMIN_PASSWORD) values.ADMIN_PASSWORD = ADMIN_PASSWORD

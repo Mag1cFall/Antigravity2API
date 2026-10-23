@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -45,6 +46,8 @@ type login struct {
 	done  chan struct{}
 	// callback 是 browser 模式在本机回环端口等待的回调地址
 	callback *url.URL
+	// device 是登录开始时生成的设备档案，登录前虚拟进程与登录成功后的账户共用它
+	device antigravity.Device
 }
 
 // logins 保存进行中的登录
@@ -119,7 +122,7 @@ func (s *server) submitLoginCode(w http.ResponseWriter, r *http.Request) {
 func (l *logins) start(ctx context.Context, mode string) (loginState, error) {
 	s := l.server
 	flow, cancel := context.WithTimeout(s.ctx, loginTimeout)
-	item := &login{cancel: cancel, codes: make(chan string, 1), done: make(chan struct{})}
+	item := &login{cancel: cancel, codes: make(chan string, 1), done: make(chan struct{}), device: antigravity.NewLoginDevice()}
 	item.state = loginState{ID: strings.ToLower(rand.Text()), Mode: mode, State: "pending", ExpiresAt: time.Now().Add(loginTimeout).UTC()}
 	links := make(chan string, 1)
 	go l.run(flow, item, mode, links)
@@ -145,12 +148,15 @@ func (l *logins) start(ctx context.Context, mode string) (loginState, error) {
 	}
 }
 
-// run 完成 OAuth 授权并把账户写入账户目录
+// run 完成 OAuth 授权并把账户写入账户目录，授权等待期间以登录开始的设备档案运行登录前虚拟进程
 func (l *logins) run(ctx context.Context, item *login, mode string, links chan<- string) {
 	defer item.cancel()
 	var token *oauth2.Token
 	var err error
 	proxy := func(request *http.Request) (*url.URL, error) { return l.server.live.Load().ProxyURL(request) }
+	prelogin, stop := context.WithCancel(ctx)
+	defer stop()
+	go antigravity.NewPrelogin(item.device, proxy).Run(prelogin)
 	if mode == "browser" {
 		token, err = antigravity.LoginBrowser(ctx, proxy, func(link string) error {
 			links <- link
@@ -167,10 +173,11 @@ func (l *logins) run(ctx context.Context, item *login, mode string, links chan<-
 			}
 		})
 	}
+	stop()
 	id := ""
 	if err == nil {
 		var added *auth.Account
-		if added, err = l.server.deps.Store.Add(l.server.ctx, token); err == nil {
+		if added, err = l.server.deps.Store.AddWithDevice(l.server.ctx, token, item.device); err == nil {
 			id = added.ID
 		}
 	}
@@ -228,7 +235,7 @@ func authorizationCode(value string) string {
 	return value
 }
 
-// forwardCallback 把浏览器地址栏中回调地址的查询参数转交本机回环监听，监听没有接受时返回错误
+// forwardCallback 把浏览器地址栏中回调地址的查询参数转交本机回环监听，监听没有接受时返回带其应答正文的错误
 func forwardCallback(callback *url.URL, value string) error {
 	forward := *callback
 	if pasted, err := url.Parse(value); err == nil {
@@ -239,9 +246,10 @@ func forwardCallback(callback *url.URL, value string) error {
 	if err != nil {
 		return fmt.Errorf("转交回调: %w", err)
 	}
-	response.Body.Close()
+	defer response.Body.Close()
 	if response.StatusCode != http.StatusFound {
-		return fmt.Errorf("回调地址中的 code 或 state 与本次登录不一致")
+		reason, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("回调地址被拒绝：%s", strings.TrimSpace(string(reason)))
 	}
 	return nil
 }

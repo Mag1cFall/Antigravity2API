@@ -37,10 +37,16 @@ type Account struct {
 	PaidTier string             `json:"paid_tier,omitempty"`
 	Region   string             `json:"region,omitempty"`
 	Device   antigravity.Device `json:"device"`
-	Enabled  bool               `json:"enabled"`
+	// AuthMethod 为账户认证方式，空与 personal_consumer 为个人账户，business_licensed_enterprise 为企业 WIF 账户
+	AuthMethod string `json:"auth_method,omitempty"`
+	// WIFProvider 为企业 WIF 账户的 provider 名
+	WIFProvider string `json:"wif_provider,omitempty"`
+	Enabled     bool   `json:"enabled"`
 	// Priority 为调度优先级，越大越先使用，默认 0
 	Priority int       `json:"priority,omitempty"`
 	AddedAt  time.Time `json:"added_at"`
+	// AICredits 为真时额度用尽后继续以 Google One AI 积分生成
+	AICredits bool `json:"ai_credits,omitempty"`
 }
 
 // Rank 返回账户套餐的等级：Ultra 为 2，Pro 为 1，其余为 0，有付费套餐时按付费套餐判断，与管理端套餐徽标一致
@@ -174,12 +180,17 @@ func (s *Store) Token(id string) *oauth2.Token {
 	return s.tokens[id]
 }
 
-// Add 取 id_token 中的邮箱，没有 id_token 时请求 userinfo，以邮箱为 ID 写入 token 与资料；新账户生成设备档案，已有账户保留其余字段；项目、套餐与地区由服务初始化账户时写回
+// Add 以邮箱为 ID 写入账户，新账户生成设备档案
 func (s *Store) Add(ctx context.Context, token *oauth2.Token) (*Account, error) {
+	return s.AddWithDevice(ctx, token, antigravity.Device{})
+}
+
+// AddWithDevice 取 id_token 中的邮箱，没有 id_token 时请求 userinfo，以邮箱为 ID 写入个人账户的 token 与资料；device 带 installation_id 时用它补齐用户名与目录，否则新账户生成设备档案，已有账户清除企业认证方式与 provider、保留其余字段；项目、套餐与地区由服务初始化账户时写回
+func (s *Store) AddWithDevice(ctx context.Context, token *oauth2.Token, device antigravity.Device) (*Account, error) {
 	latest := token
 	email := tokenEmail(token)
 	if email == "" {
-		source := antigravity.NewTokenSource(token, s.proxy, func(refreshed *oauth2.Token) error {
+		source := antigravity.NewTokenSource(token, antigravity.AuthMethodConsumer, s.proxy, func(refreshed *oauth2.Token) error {
 			latest = refreshed
 			return nil
 		})
@@ -189,15 +200,33 @@ func (s *Store) Add(ctx context.Context, token *oauth2.Token) (*Account, error) 
 		}
 		email = user.Email
 	}
-	account := &Account{ID: email, Email: email, Device: antigravity.NewDevice(email), Enabled: true, AddedAt: time.Now()}
+	profile := antigravity.NewDevice(email)
+	if device.InstallationID != "" {
+		profile = device.WithAccount(email)
+	}
+	account := &Account{ID: email, Email: email, Device: profile, Enabled: true, AddedAt: time.Now()}
 	s.mu.Lock()
 	if existing, ok := s.accounts[email]; ok {
 		account = &existing
+		account.AuthMethod, account.WIFProvider = "", ""
 	}
 	s.mu.Unlock()
 	if err := s.SaveToken(account.ID, latest); err != nil {
 		return nil, err
 	}
+	if err := s.Save(account); err != nil {
+		return nil, err
+	}
+	return account, nil
+}
+
+// AddWIF 以企业 WIF 登录结果写入账户，设备档案补齐用户名与目录，记认证方式与 provider
+func (s *Store) AddWIF(ctx context.Context, login *antigravity.WIFLogin, device antigravity.Device) (*Account, error) {
+	account, err := s.AddWithDevice(ctx, login.Token, device)
+	if err != nil {
+		return nil, err
+	}
+	account.AuthMethod, account.WIFProvider = antigravity.AuthMethodEnterprise, login.Provider
 	if err := s.Save(account); err != nil {
 		return nil, err
 	}

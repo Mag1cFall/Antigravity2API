@@ -4,7 +4,7 @@ import { ScrollText, X } from 'lucide-react'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
-import { logsKey } from '@/app/events'
+import { logsKey, useConnection } from '@/app/events'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { SearchInput } from '@/components/ui/search-input'
@@ -219,11 +219,13 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
   )
 }
 
-// LogsPage 是服务日志：实时尾随与已保存日志检索，视图与筛选条件保存在 URL
+// LogsPage 是服务日志：实时尾随与已保存日志检索，视图与筛选条件保存在 URL；实时日志区占满页面剩余高度
 export function LogsPage() {
   const m = useMessages(logMessages)
   const { locale } = useI18n()
+  const connection = useConnection()
   const client = useQueryClient()
+  const lastTop = useRef(0)
   const [params, setParams] = useSearchParams()
   const filter = parseLogFilter(params)
   const [follow, setFollow] = useState(true)
@@ -250,10 +252,11 @@ export function LogsPage() {
     hour12: false,
   })
 
+  const totalSize = virtualizer.getTotalSize()
   useEffect(() => {
-    if (follow && visible.length > 0)
-      virtualizer.scrollToIndex(visible.length - 1, { align: 'end' })
-  }, [follow, visible.length, virtualizer])
+    const element = scrollRef.current
+    if (follow && element) element.scrollTop = element.scrollHeight
+  }, [follow, visible.length, totalSize])
 
   const update = (key: string, value: string) => {
     setParams(
@@ -350,7 +353,7 @@ export function LogsPage() {
           {settingsLink}
         </div>
       </div>
-      <Card>
+      <Card className={visible.length > 0 ? 'flex-1' : undefined}>
         <CardToolbar>
           {viewSwitch}
           <Segmented
@@ -388,7 +391,11 @@ export function LogsPage() {
           />
         </CardToolbar>
         {visible.length === 0 ? (
-          all.length === 0 ? (
+          all.length === 0 && connection === 'connecting' ? (
+            <Loading label={m.loading} />
+          ) : all.length === 0 && connection === 'closed' ? (
+            <ErrorState title={m.liveFailed} error={m.liveFailedDescription} retryLabel={m.retry} />
+          ) : all.length === 0 ? (
             <EmptyState
               icon={<ScrollText size={20} aria-hidden />}
               title={m.emptyTitle}
@@ -419,11 +426,12 @@ export function LogsPage() {
             onScroll={(event) => {
               const element = event.currentTarget
               const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 48
-              if (!atBottom && follow) setFollow(false)
+              if (element.scrollTop < lastTop.current && !atBottom && follow) setFollow(false)
+              lastTop.current = element.scrollTop
             }}
-            className="h-log [scrollbar-gutter:stable] overflow-y-auto"
+            className="min-h-[320px] flex-1 [scrollbar-gutter:stable] overflow-y-auto contain-size"
           >
-            <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+            <div className="relative w-full" style={{ height: totalSize }}>
               {virtualizer.getVirtualItems().map((item) => {
                 const entry = visible[item.index]
                 if (!entry) return null

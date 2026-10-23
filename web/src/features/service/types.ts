@@ -13,3 +13,17 @@ export interface Session {
   enabled: boolean
   authenticated: boolean
 }
+
+// UpdateStatus 对应 GET /api/update，mode 为 binary（可在线更新）、container（随镜像更新）或 development（源码构建）
+export interface UpdateStatus {
+  current: string
+  latest?: string
+  available: boolean
+  mode: 'binary' | 'container' | 'development'
+  notes?: string
+  url?: string
+  published_at?: string
+  checked_at?: string
+  error?: string
+  updating: boolean
+}

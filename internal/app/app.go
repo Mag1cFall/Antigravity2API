@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -39,6 +38,8 @@ type Deps struct {
 	Host string
 	// UI 是管理端静态资源处理器，为 nil 时不挂载
 	UI http.Handler
+	// Restart 在在线更新安装完成后重启到新版本
+	Restart func()
 }
 
 // shutdownTimeout 是退出时等待进行中请求的上限
@@ -64,6 +65,8 @@ type server struct {
 	settingsMu sync.Mutex
 	// latest 是官方更新清单中的最新客户端版本
 	latest atomic.Pointer[string]
+	// updater 是本程序的在线更新
+	updater *selfUpdater
 }
 
 // Serve 在启动配置的监听地址上运行服务直到 ctx 结束；live 是已应用命令行覆盖的配置，设置保存后替换为新值供下一次请求读取，账户池在启动后于后台初始化
@@ -76,6 +79,7 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 		auth: newAdminAuth(boot), refreshes: make(chan struct{}, 1),
 	}
 	s.logins = &logins{server: s, items: map[string]*login{}}
+	s.updater = newSelfUpdater(s)
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewMultiHandler(deps.Logger.Handler(), s.events.handler(deps.Logger.Leveler(), s.ledger))))
 	defer slog.SetDefault(previous)
@@ -93,6 +97,7 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	workers.Go(s.refreshWorker)
 	workers.Go(s.quotaWorker)
 	workers.Go(s.checkVersions)
+	workers.Go(func() { deps.Service.WatchProxies(ctx) })
 	defer workers.Wait()
 	defer cancel()
 	s.refreshLater()
@@ -115,15 +120,21 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	}
 }
 
-// routes 挂载公开 API 与 Gemini 文件上传、健康检查、远程配对、管理 API 与管理端静态资源，全部请求经过访问日志
+// routes 挂载公开 API、Gemini 文件上传与生成媒体、健康检查、远程配对、管理 API 与管理端静态资源，全部请求经过访问日志
 func (s *server) routes() http.Handler {
 	root := http.NewServeMux()
 	keys := func() []string { return s.live.Load().APIKeys }
-	public := s.recordPublic(api.NewHandler(recordingService{Service: s.deps.Service, server: s}, api.Options{APIKeys: keys, FilesDir: filepath.Join(s.boot.RuntimeDir, "files")}))
+	media := func() (bool, string) {
+		cfg := s.live.Load()
+		return cfg.MediaOutput == "url", cfg.MediaBaseURL
+	}
+	public := s.recordPublic(api.NewHandler(recordingService{Service: s.deps.Service, server: s}, api.Options{
+		APIKeys: keys, FilesDir: filepath.Join(s.boot.RuntimeDir, "files"), MediaDir: filepath.Join(s.boot.RuntimeDir, "media"), MediaLinks: media,
+	}))
 	root.Handle("/v1/", public)
 	root.Handle("/v1beta/", public)
 	root.Handle("/upload/", public)
-	root.HandleFunc("GET /readyz", s.readyz)
+	root.Handle("/media/", public)
 	root.HandleFunc("POST /api/pairing/accounts", s.pairAccount)
 	root.Handle("/api/", s.requireAdmin(s.admin()))
 	if s.deps.UI != nil {
@@ -132,18 +143,7 @@ func (s *server) routes() http.Handler {
 	return s.access(securityHeaders(root))
 }
 
-// readyz 在至少一个启用账户就绪时返回 200，否则返回 503
-func (s *server) readyz(w http.ResponseWriter, _ *http.Request) {
-	for _, account := range s.deps.Service.Accounts() {
-		if account.Enabled && account.Ready {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-			return
-		}
-	}
-	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
-}
-
-// access 为每个请求生成请求 ID 并经 X-Request-ID 回传，结束后写一行访问日志；就绪检查与静态资源成功只在 debug 级别记录
+// access 为每个请求生成请求 ID 并经 X-Request-ID 回传，结束后写一行访问日志；静态资源成功只在 debug 级别记录
 func (s *server) access(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
@@ -152,11 +152,9 @@ func (s *server) access(next http.Handler) http.Handler {
 		ctx := logging.WithRequestID(r.Context(), id)
 		writer := &recordWriter{ResponseWriter: w}
 		next.ServeHTTP(writer, r.WithContext(ctx))
-		status, latency, ip := cmp.Or(writer.status, http.StatusOK), time.Since(started), s.clientIP(r)
+		status, latency, ip := cmp.Or(writer.status, http.StatusOK), time.Since(started), clientIP(r)
 		level := slog.LevelInfo
 		switch {
-		case r.URL.Path == "/readyz":
-			level = slog.LevelDebug
 		case status >= http.StatusInternalServerError:
 			level = slog.LevelError
 		case status >= http.StatusBadRequest:
@@ -170,24 +168,9 @@ func (s *server) access(next http.Handler) http.Handler {
 	})
 }
 
-// clientIP 返回客户端 IP；直连地址属于可信反向代理时，取 X-Forwarded-For 中从右起第一个不可信地址
-func (s *server) clientIP(r *http.Request) string {
+// clientIP 返回直连客户端的 IP
+func clientIP(r *http.Request) string {
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	cfg := s.live.Load()
-	peer, err := netip.ParseAddr(host)
-	if err != nil || !cfg.Trusted(peer) {
-		return host
-	}
-	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
-	for index := len(hops) - 1; index >= 0; index-- {
-		addr, err := netip.ParseAddr(strings.TrimSpace(hops[index]))
-		if err != nil {
-			return host
-		}
-		if !cfg.Trusted(addr) {
-			return addr.Unmap().String()
-		}
-	}
 	return host
 }
 
@@ -223,7 +206,7 @@ func (s *server) refresh(ctx context.Context) {
 	slog.Info(fmt.Sprintf("账户池刷新完成 | 耗时=%s", time.Since(started).Round(time.Millisecond)), "source", "service")
 }
 
-// quotaWorker 按实时配置的 QUOTA_REFRESH_INTERVAL 定时读取全部账户的额度：每分钟检查一次，启动约 1 分钟后读取第一次，此后距上次读取的整分钟数达到间隔时再读取，间隔为 0 时不读取
+// quotaWorker 按实时配置的 QUOTA_REFRESH_INTERVAL 定时读取全部账户的额度，再重新初始化异常账户与唤醒周额度：每分钟检查一次，启动约 1 分钟后读取第一次，此后距上次读取的整分钟数达到间隔时再读取，间隔为 0 时不读取
 func (s *server) quotaWorker() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -238,6 +221,8 @@ func (s *server) quotaWorker() {
 		if interval := s.live.Load().QuotaRefreshInterval; interval > 0 && (minutes == 0 || time.Duration(minutes)*time.Minute >= interval) {
 			minutes = 0
 			s.readQuotas(s.ctx)
+			s.retryAccounts(s.ctx)
+			s.deps.Service.Warmup(s.ctx)
 		}
 	}
 }
@@ -250,6 +235,15 @@ func (s *server) readQuotas(ctx context.Context) map[string]error {
 	failed := s.deps.Service.RefreshQuotas(ctx)
 	slog.Info(fmt.Sprintf("额度刷新完成 | 失败=%d | 耗时=%s", len(failed), time.Since(started).Round(time.Millisecond)), "source", "service")
 	return failed
+}
+
+// retryAccounts 在定时额度刷新后重新初始化异常与需要验证的账户，成功的账户恢复调度
+func (s *server) retryAccounts(ctx context.Context) {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+	if retried, remaining := s.deps.Service.RetryFailed(ctx); retried > 0 {
+		slog.Info(fmt.Sprintf("异常账户重新初始化完成 | 重试=%d | 仍失败=%d", retried, remaining), "source", "service")
+	}
 }
 
 // securityHeaders 禁止页面被其他站点嵌入并关闭 MIME 嗅探与 Referer

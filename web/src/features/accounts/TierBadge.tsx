@@ -44,8 +44,8 @@ export function TierBadge({ tier }: { tier: string }) {
   )
 }
 
-// FamilyBadge 是家庭组徽标，账户与其他就绪账户共用额度池时显示，悬停列出各额度组的共用账户
-export function FamilyBadge({ account }: { account: Account }) {
+// FamilyBadge 是家庭组徽标，账户与其他就绪账户共用额度池时显示，悬停列出各额度组的共用账户；compact 时只显示图标
+export function FamilyBadge({ account, compact = false }: { account: Account; compact?: boolean }) {
   const m = useMessages(accountMessages)
   const q = useMessages(quotaMessages)
   const { locale } = useI18n()
@@ -66,7 +66,7 @@ export function FamilyBadge({ account }: { account: Account }) {
     >
       <span className="inline-flex h-icon shrink-0 items-center gap-1 rounded-sm bg-success-soft px-2 text-xs font-semibold whitespace-nowrap text-success-text">
         <UsersRound size={12} aria-hidden />
-        {m.family}
+        <span className={compact ? 'sr-only' : undefined}>{m.family}</span>
       </span>
     </Tooltip>
   )

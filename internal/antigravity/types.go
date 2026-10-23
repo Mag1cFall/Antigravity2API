@@ -84,11 +84,20 @@ type ToolConfig struct {
 	ParallelCalls        *bool    `json:"parallel_calls,omitempty"`
 }
 
-// Tools 表示一次请求启用的工具，GoogleSearch 为客户端请求的内置搜索工具配置
+// Tools 表示一次请求启用的工具，GoogleSearch 为客户端请求的内置搜索工具配置，Search 为公开协议搜索工具的选项
 type Tools struct {
 	Functions    []FunctionDeclaration `json:"functions,omitempty"`
 	GoogleSearch json.RawMessage       `json:"google_search,omitempty"`
+	Search       *SearchOptions        `json:"search,omitempty"`
 	ToolConfig   ToolConfig            `json:"tool_config,omitempty"`
+}
+
+// SearchOptions 表示搜索工具的选项：ContextSize 为 low、medium 或 high，Location 为用户的大致位置描述，AllowedDomains 与 BlockedDomains 为只用与不用的来源站点
+type SearchOptions struct {
+	ContextSize    string   `json:"context_size,omitempty"`
+	Location       string   `json:"location,omitempty"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	BlockedDomains []string `json:"blocked_domains,omitempty"`
 }
 
 // SafetySetting 表示一个安全类别的拦截阈值
@@ -139,6 +148,8 @@ type GenerateRequest struct {
 	AccountID string           `json:"account_id,omitempty"`
 	// Suffix 为补全请求中光标之后的文字
 	Suffix string `json:"suffix,omitempty"`
+	// Unary 标记非流式请求，生成结束后才输出
+	Unary bool `json:"-"`
 }
 
 // Model 表示实时模型目录中的模型
@@ -228,13 +239,15 @@ type GroundingSegment struct {
 
 // Event 表示协议核心输出的规范事件
 type Event struct {
-	Kind          EventKind     `json:"kind"`
-	Text          string        `json:"text,omitempty"`
-	ToolCall      *FunctionCall `json:"tool_call,omitempty"`
-	Media         *Blob         `json:"media,omitempty"`
-	Usage         *Usage        `json:"usage,omitempty"`
-	FinishReason  string        `json:"finish_reason,omitempty"`
-	ProviderModel string        `json:"provider_model,omitempty"`
+	Kind         EventKind     `json:"kind"`
+	Text         string        `json:"text,omitempty"`
+	ToolCall     *FunctionCall `json:"tool_call,omitempty"`
+	Media        *Blob         `json:"media,omitempty"`
+	Usage        *Usage        `json:"usage,omitempty"`
+	FinishReason string        `json:"finish_reason,omitempty"`
+	// FinishMessage 为上游 candidate 的 finishMessage，只在结束事件上
+	FinishMessage string `json:"finish_message,omitempty"`
+	ProviderModel string `json:"provider_model,omitempty"`
 	// TraceID 与 ResponseID 为上游流的 traceId 与 responseId，只在结束与错误事件上
 	TraceID          string `json:"trace_id,omitempty"`
 	ResponseID       string `json:"response_id,omitempty"`
