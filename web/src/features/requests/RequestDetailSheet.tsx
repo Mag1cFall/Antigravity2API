@@ -1,13 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
+import { LoaderCircle } from 'lucide-react'
 import { Fragment, type ReactNode } from 'react'
 import { Link } from 'react-router'
 
+import { useRunning } from '@/app/events'
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
-import { ErrorState, Loading } from '@/components/ui/states'
+import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { DotList } from '@/components/ui/stats'
 import { Table, Td, Th } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -123,7 +125,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
     ]
   const available = bodies.filter((item) => item.body)
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
         <RequestStateBadge state={record.state} />
         <span className={'text-sm ' + (record.status >= 400 ? 'text-error-text' : '')}>
@@ -337,14 +339,15 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
   )
 }
 
-// RequestDetailSheet 是从右侧滑入的请求详情，id 来自 URL
+// RequestDetailSheet 是从右侧滑入的请求详情，id 来自 URL；请求进行中时显示等待，结束后读取记录
 export function RequestDetailSheet({ id, onClose }: { id: string | null; onClose: () => void }) {
   const m = useMessages(requestMessages)
   const app = useMessages(appMessages)
+  const running = useRunning().some((record) => record.id === id)
   const detail = useQuery({
     queryKey: ['request', id],
     queryFn: () => api<RequestDetail>('/api/usage/records/' + encodeURIComponent(id ?? '')),
-    enabled: id !== null,
+    enabled: id !== null && !running,
   })
   return (
     <Dialog
@@ -365,7 +368,12 @@ export function RequestDetailSheet({ id, onClose }: { id: string | null; onClose
           }
           closeLabel={app.closeDialog}
         >
-          {detail.isPending ? (
+          {running ? (
+            <EmptyState
+              icon={<LoaderCircle size={20} aria-hidden className="animate-spin" />}
+              title={m.detailRunning}
+            />
+          ) : detail.isPending ? (
             <Loading label={app.loading} />
           ) : detail.isError ? (
             <ErrorState

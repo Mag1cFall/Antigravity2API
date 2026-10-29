@@ -47,6 +47,10 @@ type Account struct {
 	AddedAt  time.Time `json:"added_at"`
 	// AICredits 为真时额度用尽后继续以 Google One AI 积分生成
 	AICredits bool `json:"ai_credits,omitempty"`
+	// CreditBalance 为付费套餐的 Google One AI 积分余额，套餐没有该积分时为空
+	CreditBalance string `json:"credit_balance,omitempty"`
+	// CreditMinimum 为以积分生成所需的最低余额
+	CreditMinimum string `json:"credit_minimum,omitempty"`
 }
 
 // Rank 返回账户套餐的等级：Ultra 为 2，Pro 为 1，其余为 0，有付费套餐时按付费套餐判断，与管理端套餐徽标一致
@@ -162,15 +166,57 @@ func (s *Store) Save(account *Account) error {
 	return nil
 }
 
+// Update 以 change 修改仍在账户库中的账户，有变化时原子写回 account.json，返回修改后的账户与账户是否存在；已删除的账户不写入
+func (s *Store) Update(id string, change func(*Account)) (Account, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	if !ok {
+		return Account{}, false, nil
+	}
+	updated := account
+	change(&updated)
+	if updated == account {
+		return account, true, nil
+	}
+	if err := writeJSON(filepath.Join(s.dir, id, accountFile), &updated); err != nil {
+		return account, true, err
+	}
+	s.accounts[id] = updated
+	return updated, true, nil
+}
+
 // SaveToken 原子写回 token.json
 func (s *Store) SaveToken(id string, token *oauth2.Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveToken(id, token)
+}
+
+// UpdateToken 原子写回仍在账户库中的账户的 token.json，账户已删除时不写入
+func (s *Store) UpdateToken(id string, token *oauth2.Token) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.accounts[id]; !ok {
+		return nil
+	}
+	return s.saveToken(id, token)
+}
+
+// saveToken 在持有锁时原子写回 token.json
+func (s *Store) saveToken(id string, token *oauth2.Token) error {
 	if err := writeJSON(filepath.Join(s.dir, id, tokenFile), token); err != nil {
 		return err
 	}
 	s.tokens[id] = token
 	return nil
+}
+
+// Enabled 报告账户是否仍在账户库中且启用
+func (s *Store) Enabled(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.accounts[id].Enabled
 }
 
 // Token 返回账户最近保存的 token

@@ -8,7 +8,6 @@ import {
   LogOut,
   type LucideIcon,
   Minus,
-  Monitor,
   Moon,
   Settings,
   Square,
@@ -16,10 +15,11 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { type ReactNode, useEffect, useRef, useState } from 'react'
-import { Link, NavLink, useNavigate } from 'react-router'
+import { type ReactNode, useEffect, useState, useSyncExternalStore } from 'react'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router'
 
 import { appMessages } from '@/app/messages'
+import { lastLocation } from '@/app/remember'
 import logo from '@/assets/logo.png'
 import { Button } from '@/components/ui/button'
 import {
@@ -35,7 +35,7 @@ import { sessionKey, useSession } from '@/features/service/queries'
 import { api } from '@/lib/api'
 import { isDesktop, maximisedEvent, windowControl } from '@/lib/desktop'
 import { type Language, languages, useI18n, useMessages } from '@/lib/i18n'
-import { readTheme, saveTheme, type ThemePreference } from '@/lib/theme'
+import { currentTheme, subscribeTheme, toggleTheme } from '@/lib/theme'
 
 // NavItem 是一个导航目的地
 interface NavItem {
@@ -48,8 +48,9 @@ interface NavItem {
 const roundButton =
   'size-control rounded-full border-card-border bg-surface text-foreground shadow-card no-drag enabled:hover:border-border enabled:hover:bg-muted enabled:hover:text-foreground enabled:active:bg-hover'
 
-// MainNav 是居中的等宽胶囊导航，当前页的深色胶囊滑到该项；compact 用于窄屏顶栏下方每行三项的两行
+// MainNav 是居中的等宽胶囊导航，当前页的深色胶囊滑到该项，各项回到该页上次的子页面与查询参数；compact 用于窄屏顶栏下方每行三项的两行
 function MainNav({ items, label, compact }: { items: NavItem[]; label: string; compact: boolean }) {
+  const location = useLocation()
   return (
     <nav
       aria-label={label}
@@ -65,7 +66,7 @@ function MainNav({ items, label, compact }: { items: NavItem[]; label: string; c
         {items.map((item) => (
           <li key={item.to} className="flex">
             <NavLink
-              to={item.to}
+              to={lastLocation(item.to, item.to === '/', location)}
               end={item.to === '/'}
               className={
                 'relative flex h-control-sm w-full items-center justify-center gap-2 rounded-full text-sm font-medium whitespace-nowrap text-foreground-muted transition-colors duration-200 ease-out no-drag hover:text-foreground not-aria-[current=page]:hover:bg-muted aria-[current=page]:text-surface pointer-coarse:h-touch ' +
@@ -154,15 +155,11 @@ function WindowControls() {
   )
 }
 
-// themeIcons 是各配色偏好在顶栏按钮上的图标
-const themeIcons: Record<ThemePreference, LucideIcon> = { system: Monitor, light: Sun, dark: Moon }
-
 // Header 是顶栏：左侧标志，居中胶囊导航，右侧语言与配色，桌面窗口中整条可拖动并带窗口按钮；minimal 时不显示导航
 export function Header({ minimal = false }: { minimal?: boolean }) {
   const m = useMessages(appMessages)
   const { language, setLanguage } = useI18n()
-  const [theme, setTheme] = useState(readTheme)
-  const themeButton = useRef<HTMLButtonElement>(null)
+  const theme = useSyncExternalStore(subscribeTheme, currentTheme)
   const client = useQueryClient()
   const navigate = useNavigate()
   const session = useSession()
@@ -182,7 +179,7 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
     { to: '/requests', label: m.requests, icon: History },
     { to: '/settings', label: m.settings, icon: Settings },
   ]
-  const ThemeIcon = themeIcons[theme]
+  const themeLabel = theme === 'dark' ? m.themeToLight : m.themeToDark
   return (
     <header className={'shrink-0 select-none ' + (isDesktop ? 'drag-region' : '')}>
       <div
@@ -234,38 +231,30 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
-          <DropdownMenu>
-            <Tooltip label={m.theme}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  ref={themeButton}
-                  variant="secondary"
-                  size="icon"
-                  aria-label={m.theme}
-                  className={roundButton}
-                >
-                  <ThemeIcon size={18} aria-hidden />
-                </Button>
-              </DropdownMenuTrigger>
-            </Tooltip>
-            <DropdownMenuContent>
-              <DropdownMenuRadioGroup
-                value={theme}
-                onValueChange={(value) => {
-                  const rect = themeButton.current?.getBoundingClientRect()
-                  setTheme(value as ThemePreference)
-                  saveTheme(
-                    value as ThemePreference,
-                    rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
-                  )
-                }}
-              >
-                <DropdownMenuRadioItem value="system">{m.themeSystem}</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="light">{m.themeLight}</DropdownMenuRadioItem>
-                <DropdownMenuRadioItem value="dark">{m.themeDark}</DropdownMenuRadioItem>
-              </DropdownMenuRadioGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <Tooltip label={themeLabel}>
+            <Button
+              variant="secondary"
+              size="icon"
+              aria-label={themeLabel}
+              data-theme-current={theme}
+              className={roundButton + ' group/theme relative overflow-hidden'}
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect()
+                toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
+              }}
+            >
+              <Sun
+                size={18}
+                aria-hidden
+                className="absolute transition-[transform,opacity] duration-300 ease-out group-data-[theme-current=dark]/theme:scale-50 group-data-[theme-current=dark]/theme:rotate-90 group-data-[theme-current=dark]/theme:opacity-0"
+              />
+              <Moon
+                size={18}
+                aria-hidden
+                className="absolute transition-[transform,opacity] duration-300 ease-out group-data-[theme-current=light]/theme:scale-50 group-data-[theme-current=light]/theme:-rotate-90 group-data-[theme-current=light]/theme:opacity-0"
+              />
+            </Button>
+          </Tooltip>
           {canLogout && (
             <Tooltip label={m.logout}>
               <Button

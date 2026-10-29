@@ -26,8 +26,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// loopbackHost 判断 Host 或 Origin 主机名是否为 localhost 或回环地址
-func loopbackHost(host string) bool {
+// LoopbackHost 判断 Host 或 Origin 主机名是否为 localhost 或回环地址
+func LoopbackHost(host string) bool {
 	name := host
 	if hostname, _, err := net.SplitHostPort(host); err == nil {
 		name = hostname
@@ -53,7 +53,7 @@ func browserOriginMiddleware(keys func() []string, next http.Handler) http.Handl
 		}
 		origin, err := url.Parse(originValue)
 		webOrigin := err != nil || originValue == "null" || origin.Scheme == "http" || origin.Scheme == "https"
-		if webOrigin && (err != nil || !loopbackHost(origin.Host)) {
+		if webOrigin && (err != nil || !LoopbackHost(origin.Host)) {
 			writeAuthError(w, r)
 			return
 		}
@@ -92,14 +92,7 @@ func requestAPIKey(r *http.Request) string {
 
 // matchedAPIKey 返回请求头或 URL 中与配置相同的 API key
 func matchedAPIKey(r *http.Request, keys []string) (string, bool) {
-	candidates := []string{
-		r.Header.Get("X-Goog-API-Key"),
-		r.Header.Get("X-API-Key"),
-		bearerToken(r.Header.Get("Authorization")),
-		r.URL.Query().Get("key"),
-	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
+	for _, candidate := range apiKeyCandidates(r) {
 		if candidate == "" {
 			continue
 		}
@@ -110,6 +103,20 @@ func matchedAPIKey(r *http.Request, keys []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// apiKeyCandidates 返回请求头与 URL 中给出的 API key，去掉首尾空白
+func apiKeyCandidates(r *http.Request) []string {
+	candidates := []string{
+		r.Header.Get("X-Goog-API-Key"),
+		r.Header.Get("X-API-Key"),
+		bearerToken(r.Header.Get("Authorization")),
+		r.URL.Query().Get("key"),
+	}
+	for index, candidate := range candidates {
+		candidates[index] = strings.TrimSpace(candidate)
+	}
+	return candidates
 }
 
 // bearerToken 返回 Authorization Bearer 凭据

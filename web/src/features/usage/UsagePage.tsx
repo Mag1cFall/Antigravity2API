@@ -1,26 +1,23 @@
-import {
-  Activity,
-  BarChart3,
-  Clock,
-  Coins,
-  Database,
-  Download,
-  Layers,
-  TrendingUp,
-} from 'lucide-react'
+import { BarChart3, ChevronDown, Download, X } from 'lucide-react'
 import { type RefObject, useLayoutEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardHeader, CardToolbar } from '@/components/ui/card'
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Meter } from '@/components/ui/meter'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { dots, StatCards } from '@/components/ui/stats'
 import { stackThird, stackTwoThirds, Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
-import { rangeQuery, useUsage } from '@/features/usage/queries'
+import { filterQuery, rangeQuery, useUsage } from '@/features/usage/queries'
 import type { UsageReport, UsageStats } from '@/features/usage/types'
 import {
   formatCompact,
@@ -35,15 +32,18 @@ import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
 const usageMessages = defineMessages(
   {
     title: '用量',
-    description: '按模型、API key、账户或日汇总的请求数、token、缓存命中、耗时与估算费用',
     range: '时间范围',
+    filters: '筛选',
+    filterCount: '{dimension} {count}',
+    filterClear: '清除筛选',
+    filterNone: '这段时间没有可选项',
+    emptyFiltered: '没有符合筛选的请求',
     range24h: '24 小时',
     range7d: '7 天',
     range30d: '30 天',
     range90d: '90 天',
     groupBy: '分组',
     breakdown: '分项',
-    breakdownHint: '按所选维度汇总的请求、token、缓存、耗时与估算费用',
     model: '模型',
     api_key: 'API key',
     account: '账户',
@@ -64,8 +64,7 @@ const usageMessages = defineMessages(
     costDetail: '按各模型官方 API 单价估算',
     unpriced: '另有 {count} 个请求的模型没有单价',
     unpricedShort: '未定价 {count}',
-    trend: '趋势',
-    trendDescription: '每 {bucket}的请求数',
+    trend: '每 {bucket}的请求数',
     trendLabel: '请求趋势，峰值 {peak} 个请求',
     recent: '近 {minutes} 分钟 {requests} 个请求、{tokens} token',
     share: '请求占比',
@@ -83,16 +82,18 @@ const usageMessages = defineMessages(
   },
   {
     title: 'Usage',
-    description:
-      'Requests, tokens, cache hits, latency and estimated cost by model, API key, account or day',
     range: 'Time range',
+    filters: 'Filters',
+    filterCount: '{dimension} {count}',
+    filterClear: 'Clear filters',
+    filterNone: 'Nothing to choose in this period',
+    emptyFiltered: 'No requests match the filters',
     range24h: '24 hours',
     range7d: '7 days',
     range30d: '30 days',
     range90d: '90 days',
     groupBy: 'Group by',
     breakdown: 'Breakdown',
-    breakdownHint: 'Requests, tokens, cache, latency and estimated cost by the chosen dimension',
     model: 'Model',
     api_key: 'API key',
     account: 'Account',
@@ -113,8 +114,7 @@ const usageMessages = defineMessages(
     costDetail: 'Estimated from official API prices per model',
     unpriced: 'Unpriced requests: {count}',
     unpricedShort: '{count} unpriced',
-    trend: 'Trend',
-    trendDescription: 'Requests per {bucket}',
+    trend: 'Requests per {bucket}',
     trendLabel: 'Request trend, peak {peak} requests',
     recent: '{requests} requests and {tokens} tokens in the last {minutes} minutes',
     share: 'Share of requests',
@@ -133,15 +133,18 @@ const usageMessages = defineMessages(
   },
   {
     title: '用量',
-    description: '依模型、API key、帳號或日期彙整的請求數、token、快取命中、耗時與估算費用',
     range: '時間範圍',
+    filters: '篩選',
+    filterCount: '{dimension} {count}',
+    filterClear: '清除篩選',
+    filterNone: '這段期間沒有可選項目',
+    emptyFiltered: '沒有符合篩選的請求',
     range24h: '24 小時',
     range7d: '7 天',
     range30d: '30 天',
     range90d: '90 天',
     groupBy: '分組',
     breakdown: '明細',
-    breakdownHint: '依所選維度彙整的請求、token、快取、耗時與估算費用',
     model: '模型',
     api_key: 'API key',
     account: '帳號',
@@ -162,8 +165,7 @@ const usageMessages = defineMessages(
     costDetail: '依各模型官方 API 單價估算',
     unpriced: '另有 {count} 個請求的模型沒有單價',
     unpricedShort: '未定價 {count}',
-    trend: '趨勢',
-    trendDescription: '每 {bucket}的請求數',
+    trend: '每 {bucket}的請求數',
     trendLabel: '請求趨勢，峰值 {peak} 個請求',
     recent: '近 {minutes} 分鐘 {requests} 個請求、{tokens} token',
     share: '請求佔比',
@@ -234,9 +236,7 @@ function TrendCard({ data }: { data: UsageReport }) {
   return (
     <Card>
       <CardHeader
-        icon={<TrendingUp size={16} aria-hidden />}
-        title={m.trend}
-        description={fill(m.trendDescription, {
+        title={fill(m.trend, {
           bucket: formatDuration(data.bucket_seconds * 1000 * per, locale),
         })}
         actions={
@@ -271,7 +271,62 @@ function TrendCard({ data }: { data: UsageReport }) {
   )
 }
 
-// UsagePage 是用量统计，范围与分组保存在 URL
+// filterDimensions 是用量页可筛选的维度，取值写入同名 URL 参数，多个取值以逗号分隔
+const filterDimensions = ['model', 'account', 'api_key'] as const
+type FilterDimension = (typeof filterDimensions)[number]
+
+// FilterMenu 是一个维度的多选筛选，候选来自报告中这段时间出现过的非空取值
+function FilterMenu({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string
+  options: string[]
+  selected: string[]
+  onChange: (values: string[]) => void
+}) {
+  const m = useMessages(usageMessages)
+  const values = [...new Set([...selected, ...options.filter(Boolean)])]
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size="sm"
+          className={
+            'gap-2 ' +
+            (selected.length > 0 ? 'border-primary-border bg-primary-soft text-primary' : '')
+          }
+        >
+          {selected.length > 0
+            ? fill(m.filterCount, { dimension: label, count: selected.length })
+            : label}
+          <ChevronDown size={16} aria-hidden className="text-foreground-muted" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {values.length === 0 ? (
+          <p className="px-4 py-2 text-sm text-foreground-muted">{m.filterNone}</p>
+        ) : (
+          values.map((value) => (
+            <DropdownMenuCheckboxItem
+              key={value}
+              checked={selected.includes(value)}
+              onCheckedChange={(checked) => {
+                onChange(checked ? [...selected, value] : selected.filter((item) => item !== value))
+              }}
+            >
+              <span className="font-mono text-xs">{value || m.none}</span>
+            </DropdownMenuCheckboxItem>
+          ))
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+// UsagePage 是用量统计，范围、分组与筛选保存在 URL
 export function UsagePage() {
   const m = useMessages(usageMessages)
   const app = useMessages(appMessages)
@@ -280,18 +335,27 @@ export function UsagePage() {
   const range =
     (Object.keys(ranges) as RangeKey[]).find((key) => key === params.get('range')) ?? '7d'
   const grouping: Grouping = groupings.find((key) => key === params.get('by')) ?? 'model'
-  const usage = useUsage(ranges[range], grouping === 'day' ? '86400' : 'auto')
-  const update = (key: string, value: string) => {
+  const filters: Record<FilterDimension, string[]> = {
+    model: (params.get('model') ?? '').split(',').filter(Boolean),
+    account: (params.get('account') ?? '').split(',').filter(Boolean),
+    api_key: (params.get('api_key') ?? '').split(',').filter(Boolean),
+  }
+  const filtered = filterDimensions.some((dimension) => filters[dimension].length > 0)
+  const usage = useUsage(ranges[range], grouping === 'day' ? '86400' : 'auto', filters)
+  const update = (changes: Record<string, string>) => {
     setParams(
       (current) => {
         const next = new URLSearchParams(current)
-        next.set(key, value)
+        for (const [key, value] of Object.entries(changes)) {
+          if (value) next.set(key, value)
+          else next.delete(key)
+        }
         return next
       },
       { replace: true },
     )
   }
-  const csv = '/api/usage/records.csv?' + rangeQuery(ranges[range]).toString()
+  const csv = '/api/usage/records.csv?' + filterQuery(rangeQuery(ranges[range]), filters).toString()
   const rangeLabels: Record<RangeKey, string> = {
     '24h': m.range24h,
     '7d': m.range7d,
@@ -299,18 +363,44 @@ export function UsagePage() {
     '90d': m.range90d,
   }
   const header = (
-    <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="flex flex-wrap items-center gap-2">
       <Segmented
         label={m.range}
         value={range}
         onValueChange={(value) => {
-          update('range', value)
+          update({ range: value })
         }}
         options={(Object.keys(ranges) as RangeKey[]).map((value) => ({
           value,
           label: rangeLabels[value],
         }))}
       />
+      <div role="group" aria-label={m.filters} className="flex flex-wrap items-center gap-2">
+        {filterDimensions.map((dimension) => (
+          <FilterMenu
+            key={dimension}
+            label={m[dimension]}
+            options={usage.data?.options[dimension] ?? []}
+            selected={filters[dimension]}
+            onChange={(values) => {
+              update({ [dimension]: values.join(',') })
+            }}
+          />
+        ))}
+        {filtered && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              update({ model: '', account: '', api_key: '' })
+            }}
+          >
+            <X size={16} aria-hidden />
+            {m.filterClear}
+          </Button>
+        )}
+      </div>
+      <span className="flex-1" />
       {usage.data && usage.data.totals.requests > 0 ? (
         <Button size="sm" asChild>
           <a href={csv} download>
@@ -365,8 +455,8 @@ export function UsagePage() {
         <Card>
           <EmptyState
             icon={<BarChart3 size={20} aria-hidden />}
-            title={m.emptyTitle}
-            description={m.emptyDescription}
+            title={filtered ? m.emptyFiltered : m.emptyTitle}
+            description={filtered ? undefined : m.emptyDescription}
           />
         </Card>
       </>
@@ -394,8 +484,6 @@ export function UsagePage() {
         items={[
           {
             key: 'requests',
-            icon: <Activity size={16} />,
-            tone: 'info',
             label: m.requests,
             value: formatNumber(totals.requests, locale),
             detail: dots(
@@ -413,8 +501,6 @@ export function UsagePage() {
           },
           {
             key: 'cache',
-            icon: <Database size={16} />,
-            tone: 'success',
             label: m.cacheRate,
             value: formatPercent(cacheRate(totals), locale),
             detail: [
@@ -426,8 +512,6 @@ export function UsagePage() {
           },
           {
             key: 'tokens',
-            icon: <Layers size={16} />,
-            tone: 'violet',
             label: m.tokens,
             value: formatCompact(totals.total_tokens, locale),
             detail: dots(
@@ -439,8 +523,6 @@ export function UsagePage() {
           },
           {
             key: 'latency',
-            icon: <Clock size={16} />,
-            tone: 'warning',
             label: m.latency,
             value: formatDuration(totals.duration.p50_ms, locale),
             detail: dots(
@@ -452,8 +534,6 @@ export function UsagePage() {
           },
           {
             key: 'cost',
-            icon: <Coins size={16} />,
-            tone: 'info',
             label: m.cost,
             value: formatCost(totals.cost_usd, locale),
             detail: [
@@ -466,13 +546,13 @@ export function UsagePage() {
       />
       {grouping !== 'day' && <TrendCard data={data} />}
       <Card>
-        <CardHeader title={m.breakdown} description={m.breakdownHint} />
-        <CardToolbar className="border-t">
+        <CardToolbar>
+          <h2 className="text-md font-semibold">{m.breakdown}</h2>
           <Segmented
             label={m.groupBy}
             value={grouping}
             onValueChange={(value) => {
-              update('by', value)
+              update({ by: value })
             }}
             options={groupings.map((value) => ({ value, label: m[value] }))}
           />

@@ -11,7 +11,7 @@ import {
   Server,
 } from 'lucide-react'
 import { ToggleGroup } from 'radix-ui'
-import { type ReactNode, type SyntheticEvent, useState } from 'react'
+import { type ReactNode, type SyntheticEvent, useEffect, useState } from 'react'
 
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
@@ -19,7 +19,7 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { useImportAccounts } from '@/features/accounts/actions'
+import { keepAccounts, useImportAccounts } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
 import { accountsKey } from '@/features/accounts/queries'
 import type { Login, Pairing } from '@/features/accounts/types'
@@ -42,6 +42,9 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
   const [code, setCode] = useState('')
   const [error, setError] = useState<string>()
   const remaining = new Date(login.expires_at).getTime() - now.getTime()
+  useEffect(() => {
+    if (login.state === 'completed' && login.account) keepAccounts([login.account])
+  }, [login.state, login.account])
   const submit = useMutation({
     mutationFn: (value: string) =>
       api<Login>('/api/logins/' + encodeURIComponent(login.id) + '/code', {
@@ -313,7 +316,6 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
       <DialogContent
         wide
         title={m.dialogTitle}
-        description={m.dialogDescription}
         closeLabel={app.closeDialog}
         footer={
           <Button
@@ -326,7 +328,7 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
           </Button>
         }
       >
-        <div className="flex flex-col gap-6">
+        <div className="flex flex-col gap-4">
           {!completed && (
             <ToggleGroup.Root
               type="single"
@@ -371,12 +373,25 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
             <LoginProgress login={login.data} onRestart={reset} />
           ) : (
             <div className="flex flex-col items-start gap-3">
-              <p className="text-sm text-foreground-muted">{text[current][1]}</p>
+              <p className="text-sm text-foreground-muted sm:hidden">{text[current][1]}</p>
               <Button
                 variant="primary"
                 loading={create.isPending}
                 onClick={() => {
-                  create.mutate(current)
+                  const tab = isDesktop ? null : window.open('', '_blank')
+                  create.mutate(current, {
+                    onSuccess: (created) => {
+                      if (tab) {
+                        tab.opener = null
+                        tab.location.href = created.url
+                      } else {
+                        window.open(created.url, '_blank')
+                      }
+                    },
+                    onError: () => {
+                      tab?.close()
+                    },
+                  })
                 }}
               >
                 {m.start}

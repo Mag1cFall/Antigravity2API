@@ -17,6 +17,8 @@ const (
 	clearcutPeriod = 5 * time.Second
 	// clearcutOffset 为 clearcut 上报循环相对虚拟进程启动的偏移
 	clearcutOffset = 700 * time.Millisecond
+	// clearcutBatch 为一次 clearcut 上报最多带的事件数
+	clearcutBatch = 200
 	// sidebarRefresh 为界面定时统计侧栏会话数的间隔
 	sidebarRefresh = time.Minute
 	// searchIndexPages 为会话搜索索引数据库的最少页数
@@ -30,13 +32,14 @@ type HubState struct {
 	Marketplaces  map[string]MarketplaceCache `json:"marketplaces,omitempty"`
 }
 
-// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动、是否已加载过会话、各会话的进度、待上报的 clearcut 事件、本虚拟进程是否已读取插件市场目录与待记录的目录读取事件
+// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动、冷启动迁移组的记录时刻、是否已加载过会话、各会话的进度、待上报的 clearcut 事件、本虚拟进程是否已读取插件市场目录与待记录的目录读取事件
 type hub struct {
 	state    HubState
 	save     func(HubState) error
 	launched time.Time
 	browser  string
 	cold     bool
+	migrated time.Time
 	loaded   bool
 	sessions map[string]*sessionTrack
 	queue    [][]byte
@@ -44,9 +47,9 @@ type hub struct {
 	market   []marketplaceEvent
 }
 
-// eventShape 表示 clearcut 事件的外层形态：bare 为真时套餐与地区留空，blank 为真时公共参数留空，flags 为真时附实验开关，empty 为真时附空的开关字段，ui 为真时带界面会话与事件时刻，env 为真时载荷带客户端环境
+// eventShape 表示 clearcut 事件的外层形态：bare 为真时套餐与地区留空，blank 为真时公共参数留空，flags 为真时附实验开关，empty 为真时附空的开关字段，ui 为真时带界面会话与事件时刻，env 为真时载荷带客户端环境，compared 为真时开关取对照用的 listExperiments 开关
 type eventShape struct {
-	bare, blank, flags, empty, ui, env bool
+	bare, blank, flags, empty, ui, env, compared bool
 }
 
 // SetHub 设置虚拟 Hub 的本地状态与保存函数
@@ -91,11 +94,10 @@ func (c *Client) log(event []byte) {
 	c.mu.Unlock()
 }
 
-// flushClearcut 把队列中的全部事件合成一个 LogRequest，以账户 Bearer 经 HTTP/2 上报，队列为空时不发；连接失败或返回 5xx 时这些事件放回队列前部，随下一次上报重发
+// flushClearcut 把队列前部最多 clearcutBatch 个事件合成一个 LogRequest，以账户 Bearer 经 HTTP/2 上报，队列为空时不发；连接失败或返回 408、429、5xx 时这些事件留在队列前部随下一次上报重发，其余状态码时移出队列
 func (c *Client) flushClearcut(ctx context.Context) {
 	c.mu.Lock()
-	events := c.hub.queue
-	c.hub.queue = nil
+	events := c.hub.queue[:min(len(c.hub.queue), clearcutBatch)]
 	c.mu.Unlock()
 	if len(events) == 0 {
 		return
@@ -105,11 +107,13 @@ func (c *Client) flushClearcut(ctx context.Context) {
 		return
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
-	if status, err := c.discard(c.auth, request); err != nil || status >= http.StatusInternalServerError {
-		c.mu.Lock()
-		c.hub.queue = append(events, c.hub.queue...)
-		c.mu.Unlock()
+	status, err := c.discard(c.auth, request)
+	if err != nil || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= http.StatusInternalServerError {
+		return
 	}
+	c.mu.Lock()
+	c.hub.queue = c.hub.queue[len(events):]
+	c.mu.Unlock()
 }
 
 // Clearcut 在虚拟进程启动 5.7 s 后首次上报队列中的事件，此后每次上报结束 5 s 后再上报，ctx 结束时返回
@@ -146,7 +150,6 @@ func hubParams(device Device, blank bool, params map[string]any) map[string]any 
 // hubEnvironment 返回界面事件载荷第 4 字段的客户端环境
 func hubEnvironment(device Device) []byte {
 	env := appendBytes(nil, 1, []byte("electron"))
-	env = appendBytes(env, 2, []byte("hub"))
 	env = appendBytes(env, 3, []byte("desktop"))
 	env = appendBytes(env, 4, []byte("external"))
 	env = appendBytes(env, 5, []byte(strings.ToLower(device.OS)))
@@ -158,7 +161,7 @@ func (c *Client) hubEvent(name string, shape eventShape, params map[string]any) 
 	return c.hubEventAt(time.Now(), name, shape, params)
 }
 
-// hubEventAt 把一个时刻为 at 的 Hub 事件放入上报队列并返回其时刻，界面事件的 client_event_time_ms 比 language_server 收到时早 2–3 ms
+// hubEventAt 把一个时刻为 at 的 Hub 事件放入上报队列并返回其时刻，界面事件的 client_event_time_ms 比 language_server 收到时早 1–4 ms
 func (c *Client) hubEventAt(at time.Time, name string, shape eventShape, params map[string]any) time.Time {
 	c.mu.Lock()
 	state, browser := c.state, c.hub.browser
@@ -166,7 +169,7 @@ func (c *Client) hubEventAt(at time.Time, name string, shape eventShape, params 
 	params = hubParams(c.device, shape.blank, params)
 	if shape.ui {
 		params["browserSessionId"] = browser
-		params["client_event_time_ms"] = int(at.UnixMilli()) - between(2, 3)
+		params["client_event_time_ms"] = int(at.UnixMilli()) - between(1, 4)
 	}
 	c.log(state.clearcutEvent(at, c.device, name, params, shape))
 	return at
@@ -186,56 +189,95 @@ func (c *Client) sinceLaunch() int {
 	return int(time.Since(c.hub.launched).Milliseconds())
 }
 
-// hubLoaded 记录冷启动的会话摘要核对与安装状态加载，两者在套餐写入前生成
+// hubLoaded 记录冷启动第一次 fetchUserInfo 之后的安装状态加载、用户配置与 Hub 存储加载，会话摘要核对按官方 2.28.1 的 11 次冷启动以 3:6:1:1 插在三者之前、安装状态之后、用户配置之后或最后，安装状态与会话摘要核对不带套餐与地区
 func (c *Client) hubLoaded() {
 	conversations := c.conversations()
 	reconcile := map[string]any{"duration_ms": between(3, 6), "outcome": "success", "rows": conversations, "trigger": "startup", "pruned": 0}
 	if conversations == 0 {
 		reconcile = map[string]any{"duration_ms": 0, "outcome": "empty", "rows": 0, "trigger": "empty_on_open", "pruned": 0}
 	}
-	c.hubEvent("summary_store_reconcile", eventShape{bare: true}, reconcile)
-	c.hubEvent("hub_store_load_succeeded", eventShape{bare: true, blank: true}, c.installation(map[string]any{"file_type": "app_state"}))
+	stores := []func(){
+		func() {
+			c.hubEvent("hub_store_load_succeeded", eventShape{bare: true, blank: true}, c.installation(map[string]any{"file_type": "app_state"}))
+		},
+		func() {
+			c.hubEvent("hub_store_load_succeeded", eventShape{blank: true}, c.installation(map[string]any{"file_type": "user_config", "auto_execution_policy": "CASCADE_COMMANDS_AUTO_EXECUTION_OFF"}))
+		},
+		func() {
+			c.hubEvent("hub_store_load_succeeded", eventShape{blank: true}, c.installation(map[string]any{}))
+		},
+	}
+	slot := []int{0, 0, 0, 1, 1, 1, 1, 1, 1, 2, 3}[between(0, 10)]
+	for index, store := range stores {
+		if index == slot {
+			c.hubEvent("summary_store_reconcile", eventShape{bare: true}, reconcile)
+		}
+		store()
+	}
+	if slot == len(stores) {
+		c.hubEvent("summary_store_reconcile", eventShape{bare: true}, reconcile)
+	}
 }
 
-// hubStored 记录冷启动的用户配置与 Hub 存储加载
-func (c *Client) hubStored() {
-	c.hubEvent("hub_store_load_succeeded", eventShape{blank: true}, c.installation(map[string]any{"file_type": "user_config", "auto_execution_policy": "CASCADE_COMMANDS_AUTO_EXECUTION_OFF"}))
-	c.hubEvent("hub_store_load_succeeded", eventShape{blank: true}, c.installation(map[string]any{}))
-}
-
-// hubMigrations 记录冷启动第二次 fetchConfig 开始且第二轮结束时的迁移、摘要订阅、启动耗时与摘要核对事件
+// hubMigrations 记录冷启动的迁移、摘要订阅、摘要核对、摘要存储对照、启动耗时与搜索索引预热事件并记下搜索索引预热的时刻，后五个事件的先后按 migrationOrders 随机取一种；实验开关为空（listExperiments 失败）时以 retroactive_migration_skipped_feature_disabled 代替前两个迁移事件
 func (c *Client) hubMigrations() {
 	conversations := c.conversations()
-	c.hubEvent("retroactive_migration_attempted", eventShape{blank: true}, nil)
-	c.hubEvent("retroactive_migration_skipped_already_completed", eventShape{blank: true}, map[string]any{"status": "RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY"})
+	c.mu.Lock()
+	disabled := len(c.state.ccpa.Flags) == 0
+	c.mu.Unlock()
+	if disabled {
+		c.hubEvent("retroactive_migration_skipped_feature_disabled", eventShape{blank: true}, nil)
+	} else {
+		c.hubEvent("retroactive_migration_attempted", eventShape{blank: true}, nil)
+		c.hubEvent("retroactive_migration_skipped_already_completed", eventShape{blank: true}, map[string]any{"status": "RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY"})
+	}
 	c.hubEvent("projects_migration_skipped_already_completed", eventShape{blank: true}, map[string]any{"status": "MIGRATION_STATUS_COMPLETED"})
-	c.hubEvent("summaries_store_subscribe_called", eventShape{}, nil)
-	c.hubEvent("summaries_reconciled", eventShape{}, c.installation(map[string]any{
-		"checked": conversations, "cached": conversations, "restored": 0, "dropped": 0, "skipped": 0, "cancelled": "false",
-		"trajectories_in_cascade_map": 0, "trajectories_in_cascade_map_start": 0, "duration_ms": between(0, 1),
-	}))
-	c.hubEvent("conversation_search_index_warm", eventShape{}, c.searchIndex(conversations))
-	c.hubEvent("LS_BINARY_STARTUP", eventShape{}, map[string]any{"durationMs": c.sinceLaunch()})
-	c.hubEvent("summary_store_json_vs_sqlite", eventShape{}, map[string]any{
-		"json_count": conversations, "store_count": conversations, "raw_summary_count": conversations, "raw_summary_bytes": conversations * between(285, 314),
-		"count_delta": 0, "missing_in_store": 0, "extra_in_store": 0, "field_mismatch_count": 0, "missing_settled": 0,
-		"db_size_bytes": 53248 + conversations*between(4300, 10900), "store_read_error": "false", "store_read_error_reason": "",
-	})
+	var migrated time.Time
+	events := map[byte]func(){
+		's': func() { c.hubEvent("summaries_store_subscribe_called", eventShape{}, nil) },
+		'r': func() {
+			c.hubEvent("summaries_reconciled", eventShape{}, c.installation(map[string]any{
+				"checked": conversations, "cached": conversations, "restored": 0, "dropped": 0, "skipped": 0, "cancelled": "false",
+				"trajectories_in_cascade_map": 0, "trajectories_in_cascade_map_start": 0, "duration_ms": between(0, 1),
+			}))
+		},
+		'j': func() {
+			c.hubEvent("summary_store_json_vs_sqlite", eventShape{}, map[string]any{
+				"json_count": conversations, "store_count": conversations, "raw_summary_count": conversations, "raw_summary_bytes": conversations * between(285, 314),
+				"count_delta": 0, "missing_in_store": 0, "extra_in_store": 0, "field_mismatch_count": 0, "missing_settled": 0,
+				"db_size_bytes": 53248 + conversations*between(4300, 10900), "store_read_error": "false", "store_read_error_reason": "", "raw_summary_missing": 0, "raw_summary_drift": 0,
+			})
+		},
+		'l': func() { c.hubEvent("LS_BINARY_STARTUP", eventShape{}, map[string]any{"durationMs": c.sinceLaunch()}) },
+		'w': func() {
+			migrated = c.hubEvent("conversation_search_index_warm", eventShape{}, c.searchIndex(conversations))
+		},
+	}
+	for _, event := range migrationOrders[between(0, len(migrationOrders)-1)] {
+		events[byte(event)]()
+	}
+	c.mu.Lock()
+	c.hub.migrated = migrated
+	c.mu.Unlock()
 }
+
+// migrationOrders 为冷启动迁移组后五个事件的先后：s 摘要订阅、r 摘要核对、j 摘要存储对照、l 启动耗时、w 搜索索引预热，按官方 2.28.1 的 6 次冷启动出现的次数各列一次
+var migrationOrders = []string{"rsjlw", "rsjwl", "srljw", "srwlj", "srjlw", "srjlw"}
 
 // searchIndex 返回会话搜索索引预热事件的参数，数据库页数随会话数增长，不少于 searchIndexPages
 func (c *Client) searchIndex(conversations int) map[string]any {
 	return map[string]any{"convo_count": conversations, "duration_ms": 0, "extracted_count": 0, "db_size_bytes": 4096 * max(searchIndexPages, between(conversations+4, 2*conversations+8))}
 }
 
-// hubLogin 记录登录序列中对照事件之前的迁移、摘要订阅、搜索索引预热与权限迁移事件，前五个的开关字段留空
+// hubLogin 记录登录序列中对照事件之前的迁移、摘要订阅、搜索索引预热与权限迁移事件，前五个的开关字段留空；权限迁移事件在 fetchConfig 之前生成，use-aicode-mendel 开启时开关字段同样留空
 func (c *Client) hubLogin() {
+	mendel := c.routed()
 	c.hubEvent("retroactive_migration_attempted", eventShape{blank: true, empty: true}, nil)
 	c.hubEvent("retroactive_migration_skipped_already_completed", eventShape{blank: true, empty: true}, map[string]any{"status": "RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY"})
 	c.hubEvent("projects_migration_skipped_already_completed", eventShape{blank: true, empty: true}, map[string]any{"status": "MIGRATION_STATUS_COMPLETED"})
 	c.hubEvent("summaries_store_subscribe_called", eventShape{empty: true}, nil)
 	c.hubEvent("conversation_search_index_warm", eventShape{empty: true}, c.searchIndex(c.conversations()))
-	c.hubEvent("app_migration_permission_grants_v2_completed", eventShape{blank: true, flags: true}, map[string]any{
+	c.hubEvent("app_migration_permission_grants_v2_completed", eventShape{blank: true, flags: !mendel, empty: mendel}, map[string]any{
 		"projects_total": 1, "projects_migrated": 0, "projects_failed": 0, "global_failed": "false", "deduped": 0, "dropped_allow": 0, "invalid": 0,
 		"rewritten_allow": 0, "rewritten_deny": 0, "rewritten_ask": 0,
 	})
@@ -248,18 +290,21 @@ func (c *Client) coldStarted() bool {
 	return c.hub.cold
 }
 
-// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件，加载项目列表后读取 cascadeNuxes 并此后每 120 s 读取一次，每次读取后记录一次会话面板展示事件，两种侧栏会话数统计此后各约每 60 s 统计一次当时的会话数；ctx 结束时返回
+// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件，从冷启动迁移组之后 0.59–0.68 s 开始；加载项目列表后读取 cascadeNuxes 并此后每 120 s 读取一次，每次读取后记录一次会话面板展示事件，两种侧栏会话数统计此后各约每 60 s 统计一次当时的会话数；ctx 结束时返回
 func (c *Client) hubInterface(ctx context.Context) {
 	conversations := c.conversations()
 	shift := between(63, 83)
 	since := func() int { return c.sinceLaunch() - shift }
-	wait := func(low, high int) bool {
+	until := func(at time.Time) bool {
 		select {
-		case <-time.After(time.Duration(between(low, high)) * time.Millisecond):
+		case <-time.After(time.Until(at)):
 			return true
 		case <-ctx.Done():
 			return false
 		}
+	}
+	wait := func(low, high int) bool {
+		return until(time.Now().Add(time.Duration(between(low, high)) * time.Millisecond))
 	}
 	interfaceEvent := func(name string, env bool, params map[string]any) time.Time {
 		return c.hubEvent(name, eventShape{flags: true, ui: true, env: env}, params)
@@ -268,12 +313,12 @@ func (c *Client) hubInterface(ctx context.Context) {
 		return interfaceEvent("sidebar_conversations", false, map[string]any{"conversationCount": count})
 	}
 	grouped := func(count int) time.Time {
-		return interfaceEvent("sidebar_conversations", true, map[string]any{"conversationCount": count, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "mode": "agentManager", "project_4k_mode": "default"})
+		return interfaceEvent("sidebar_conversations", true, map[string]any{"conversationCount": count, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "pinnedConversationCount": 0, "loadedProjectCount": 1, "knownProjectCount": 1, "mode": "agentManager", "project_4k_mode": "default"})
 	}
-	group := func() {
-		interfaceEvent("sidebar_group_by_state", true, map[string]any{"groupBy": "project", "mode": "agentManager", "project_4k_mode": "default"})
-	}
-	if !wait(430, 500) {
+	c.mu.Lock()
+	migrated := c.hub.migrated
+	c.mu.Unlock()
+	if !until(migrated.Add(time.Duration(between(590, 680)) * time.Millisecond)) {
 		return
 	}
 	c.hubEvent("summaries_store_subscribe_called", eventShape{}, nil)
@@ -281,11 +326,11 @@ func (c *Client) hubInterface(ctx context.Context) {
 		return
 	}
 	c.hubEvent("projects_listed", eventShape{blank: true}, map[string]any{"num_projects": 1})
-	if !wait(2, 7) {
+	if !wait(1, 7) {
 		return
 	}
 	counted := sidebar(0)
-	if !wait(44, 64) {
+	if !wait(38, 64) {
 		return
 	}
 	c.hubEvent("projects_listed", eventShape{blank: true, flags: true}, map[string]any{"num_projects": 1, "project_ids": "outside-of-project"})
@@ -297,32 +342,17 @@ func (c *Client) hubInterface(ctx context.Context) {
 	if !wait(1, 3) {
 		return
 	}
-	interfaceEvent("sidebar_load", false, map[string]any{"durationMs": load - between(21, 30)})
-	if conversations > 0 {
-		if !wait(205, 240) {
-			return
-		}
-		interfaceEvent("sidebar_conversation_list_loaded", false, map[string]any{"conversationCount": conversations, "latencyMs": since()})
-	}
-	if !wait(3, 5) {
-		return
-	}
-	group()
-	if !wait(33, 39) {
-		return
-	}
-	rendered := since()
-	interfaceEvent("input_area_rendered", false, map[string]any{"iframeLocalTtirMs": rendered, "endToEndTtirMs": rendered + between(640, 810)})
-	if !wait(120, 285) {
+	loaded := interfaceEvent("sidebar_load", false, map[string]any{"durationMs": load - between(21, 30)})
+	if !wait(83, 118) {
 		return
 	}
 	interfaceEvent("project_list_load", false, map[string]any{"durationMs": between(440, 780)})
 	go func() {
-		if !wait(165, 265) {
+		if !wait(227, 251) {
 			return
 		}
 		for {
-			if c.nuxes(ctx) == nil && wait(56, 104) {
+			if c.nuxes(ctx) == nil && wait(60, 70) {
 				interfaceEvent("CASCADE_IMPRESSION_EVENT", true, map[string]any{"type": "", "mode": "agentManager", "project_4k_mode": "default"})
 			}
 			select {
@@ -332,14 +362,22 @@ func (c *Client) hubInterface(ctx context.Context) {
 			}
 		}
 	}()
-	if !wait(35, 41) {
+	if !until(loaded.Add(time.Duration(between(258, 282)) * time.Millisecond)) {
+		return
+	}
+	if conversations > 0 {
+		interfaceEvent("sidebar_conversation_list_loaded", false, map[string]any{"conversationCount": conversations, "latencyMs": since()})
+	}
+	if !wait(3, 5) {
 		return
 	}
 	regrouped := grouped(conversations)
-	if !wait(126, 223) {
+	interfaceEvent("sidebar_group_by_state", true, map[string]any{"groupBy": "project", "mode": "agentManager", "project_4k_mode": "default"})
+	if !wait(28, 34) {
 		return
 	}
-	group()
+	rendered := since()
+	interfaceEvent("input_area_rendered", false, map[string]any{"iframeLocalTtirMs": rendered, "endToEndTtirMs": rendered + between(580, 776)})
 	recounts := []struct {
 		at    time.Time
 		count func(int) time.Time

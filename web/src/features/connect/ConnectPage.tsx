@@ -32,8 +32,8 @@ export function ConnectPage() {
   const m = useMessages(connectMessages)
   return (
     <>
-      <PageHeader title={m.title} description={m.description} />
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <PageHeader title={m.title} />
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader
             icon={<Link2 size={16} aria-hidden />}

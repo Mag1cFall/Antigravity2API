@@ -21,14 +21,15 @@ interface ProxyStatus {
 // proxiesKey 是代理池状态的查询键
 const proxiesKey = ['proxies'] as const
 
-// ProxyPool 是设置中代理池的状态：每个代理是否可用、延迟与使用它的账户，可立即检测
+// ProxyPool 是设置中代理池的状态：每个代理是否可用、延迟与使用它的账户，可立即检测；有未检测的代理时每 2 秒读取一次，否则每 30 秒
 export function ProxyPool() {
   const m = useMessages(settingsMessages)
   const client = useQueryClient()
   const proxies = useQuery({
     queryKey: proxiesKey,
     queryFn: () => api<{ proxies: ProxyStatus[] }>('/api/proxies'),
-    refetchInterval: 30_000,
+    refetchInterval: (query) =>
+      query.state.data?.proxies.some((proxy) => !proxy.checked_at) ? 2000 : 30_000,
   })
   const check = useMutation({
     mutationFn: () => api<{ proxies: ProxyStatus[] }>('/api/proxies/check', { method: 'POST' }),

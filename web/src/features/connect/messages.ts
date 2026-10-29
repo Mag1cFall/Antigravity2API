@@ -4,7 +4,6 @@ import { defineMessages } from '@/lib/i18n'
 export const connectMessages = defineMessages(
   {
     title: '接入',
-    description: '让客户端接入本服务：接口地址、API key 与各客户端的现成配置',
     endpoints: '接口地址',
     endpointsHint: '客户端或 SDK 的 base URL 填下面的地址，请求按协议转发到 Antigravity',
     openai: 'OpenAI 兼容',
@@ -87,7 +86,6 @@ export const connectMessages = defineMessages(
   },
   {
     title: 'Connect',
-    description: 'Point clients at this service: endpoint URLs, API keys and ready-made configs',
     endpoints: 'Endpoints',
     endpointsHint:
       'Use these as the base URL in clients or SDKs; requests are forwarded to Antigravity by protocol',
@@ -181,7 +179,6 @@ export const connectMessages = defineMessages(
   },
   {
     title: '串接',
-    description: '讓用戶端串接本服務：端點網址、API key 與各用戶端的現成設定',
     endpoints: '端點網址',
     endpointsHint: '在用戶端或 SDK 的 base URL 填入下方網址，請求會依協定轉送到 Antigravity',
     openai: 'OpenAI 相容',

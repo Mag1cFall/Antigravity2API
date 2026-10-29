@@ -5,6 +5,17 @@
     if (target) open(target);
     return null;
   };
+  const route = () => invoke("desktop:route:" + location.pathname + location.search);
+  for (const name of ["pushState", "replaceState"]) {
+    const original = history[name];
+    history[name] = function (...args) {
+      const result = original.apply(this, args);
+      route();
+      return result;
+    };
+  }
+  window.addEventListener("popstate", route);
+  route();
   document.addEventListener("click", (event) => {
     const link = event.target.closest("a[href]");
     if (!link || event.defaultPrevented) return;
@@ -13,6 +24,12 @@
       open(link.href);
     }
   });
+  window.addEventListener("dragover", (event) => {
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "none";
+  });
+  window.addEventListener("drop", (event) => event.preventDefault());
 
   const resizable = window._wails.environment.OS !== "darwin";
   let maximised = false;

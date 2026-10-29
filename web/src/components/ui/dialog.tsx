@@ -91,7 +91,7 @@ export function DialogContent({
           {children}
         </div>
         {footer && (
-          <footer className="flex shrink-0 flex-wrap justify-end gap-3 px-6 pt-2 pb-6">
+          <footer className="flex shrink-0 flex-wrap justify-end gap-3 px-6 pt-2 pb-4">
             {footer}
           </footer>
         )}

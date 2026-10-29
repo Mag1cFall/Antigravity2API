@@ -93,11 +93,7 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		return writeSSE(w, "", chunk(event.Text, nil))
 	}, func() error { return writeSSEHeartbeat(w) })
 	if err != nil {
-		if shouldWriteRequestError(r, err) {
-			status := statusFromError(err)
-			code := openAIErrorCode(err)
-			_ = writeSSE(w, "", map[string]any{"error": map[string]any{"message": publicErrorMessage(status, err.Error()), "type": openAIErrorType(status, code), "param": nil, "code": code}})
-		}
+		writeOpenAIStreamError(w, r, err)
 		return
 	}
 	final := chunk("", openAIFinishReason(result.finishReason, false))

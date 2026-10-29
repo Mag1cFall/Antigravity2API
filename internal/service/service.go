@@ -175,9 +175,8 @@ func loadCatalogs(dir string) (map[string][]antigravity.CatalogModel, error) {
 	return catalogs, nil
 }
 
-// setModels 把账户的公开目录交给账户池并保存到 RUNTIME_DIR/catalogs，调用方持有 s.mu
+// setModels 记下账户的公开目录并保存到 RUNTIME_DIR/catalogs，调用方持有 s.mu
 func (s *Service) setModels(id string, models []antigravity.CatalogModel) {
-	s.pool.Set(id, models)
 	s.catalogs[id] = models
 	dir := filepath.Join(s.live.Load().RuntimeDir, "catalogs")
 	saved := make([]savedModel, len(models))
@@ -281,7 +280,7 @@ func (s *Service) Accounts() []AccountStatus {
 	return statuses
 }
 
-// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，逐个初始化尚未就绪、账户代理已变或重新登录过的启用账户，相邻两次初始化之间随机间隔 1 到 3 秒；停用或已删除的账户移出调度
+// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，初始化尚未就绪、账户代理已变或重新登录过的启用账户：相邻两个账户的初始化相隔随机 1 到 3 秒开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度
 func (s *Service) Refresh(ctx context.Context) error {
 	records := s.store.Accounts()
 	for _, record := range records {
@@ -306,6 +305,8 @@ func (s *Service) Refresh(ctx context.Context) error {
 	}
 	known, enabled := make(map[string]bool), make(map[string]bool)
 	var errs []error
+	var started sync.WaitGroup
+	var collect sync.Mutex
 	waited := false
 	for _, record := range records {
 		known[record.ID] = true
@@ -324,12 +325,20 @@ func (s *Service) Refresh(ctx context.Context) error {
 			select {
 			case <-time.After(time.Second + rand.N(2*time.Second)):
 			case <-ctx.Done():
+				started.Wait()
 				return errors.Join(append(errs, ctx.Err())...)
 			}
 		}
 		waited = true
-		errs = append(errs, s.initialize(ctx, record, record.Project == "" || current != nil && current.refresh != refresh))
+		login := record.Project == "" || current != nil && current.refresh != refresh
+		started.Go(func() {
+			err := s.initialize(ctx, record, login)
+			collect.Lock()
+			errs = append(errs, err)
+			collect.Unlock()
+		})
 	}
+	started.Wait()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id := range s.accounts {
@@ -407,11 +416,17 @@ func (s *Service) proxy(record *auth.Account) antigravity.Proxy {
 	return func(*http.Request) (*url.URL, error) { return proxy, err }
 }
 
-// assisted 返回按 loadCodeAssist 响应更新项目、当前套餐与付费套餐后的账户
+// assisted 返回按 loadCodeAssist 响应更新项目、当前套餐、付费套餐与 Google One AI 积分余额后的账户
 func assisted(record auth.Account, assist antigravity.LoadCodeAssistResponse) auth.Account {
 	record.Project, record.Tier, record.PaidTier = assist.CloudAICompanionProject, assist.CurrentTier.ID, ""
+	record.CreditBalance, record.CreditMinimum = "", ""
 	if assist.PaidTier != nil {
 		record.PaidTier = assist.PaidTier.ID
+		for _, credit := range assist.PaidTier.AvailableCredits {
+			if credit.CreditType == antigravity.CreditGoogleOneAI {
+				record.CreditBalance, record.CreditMinimum = cmp.Or(credit.CreditAmount, "0"), credit.MinimumCreditAmountForUsage
+			}
+		}
 	}
 	return record
 }
@@ -420,28 +435,21 @@ func assisted(record auth.Account, assist antigravity.LoadCodeAssistResponse) au
 func (s *Service) tokenSource(record *auth.Account, proxy antigravity.Proxy) *antigravity.TokenSource {
 	return antigravity.NewTokenSource(s.store.Token(record.ID), record.AuthMethod, proxy, func(token *oauth2.Token) error {
 		slog.Info(fmt.Sprintf("token 已刷新 | 到期=%s", token.Expiry.Format(time.RFC3339)), "source", record.ID)
-		return s.store.SaveToken(record.ID, token)
+		return s.store.UpdateToken(record.ID, token)
 	})
 }
 
-// initialize 以账户的设备档案与代理开始虚拟客户端，login 为真时按登录序列、否则按冷启动序列初始化，写回套餐、项目与地区，记下额度快照（冷启动不读额度，沿用最近一次读取）并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接
+// initialize 以账户的设备档案与代理开始虚拟客户端，login 为真时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），成功且账户仍在账户库中启用时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接
 func (s *Service) initialize(ctx context.Context, record *auth.Account, login bool) error {
 	token := s.store.Token(record.ID)
 	proxy := s.proxy(record)
 	source := s.tokenSource(record, proxy)
 	client := antigravity.NewClient(record.ID, source, record.Device, proxy)
+	client.Observe(s.observe(record.ID, client))
 	path := s.hubPath(record.ID)
 	client.SetHub(loadHub(path), saveHub(path))
 	watch, cancel := context.WithCancel(context.Background())
 	companion, initialization, err := boot(ctx, watch, client, record.ID, login, record.AuthMethod == antigravity.AuthMethodEnterprise)
-	updated := *record
-	if err == nil {
-		updated = assisted(*record, initialization.Assist)
-		updated.Region = initialization.Settings.RegionCode
-		if updated != *record {
-			err = s.store.Save(&updated)
-		}
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err != nil {
@@ -454,20 +462,54 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account, login bo
 		s.stop(record.ID, reason)
 		return fmt.Errorf("%s: %w", record.ID, err)
 	}
+	if !s.store.Enabled(record.ID) {
+		cancel()
+		return nil
+	}
 	s.remove(record.ID)
 	current := &account{id: record.ID, proxy: record.Proxy, refresh: token.RefreshToken, client: client, source: source, device: record.Device, cancel: cancel}
 	s.accounts[record.ID] = current
 	delete(s.failures, record.ID)
-	s.setModels(record.ID, initialization.Catalog.PublicModels())
-	s.pool.Profile(record.ID, updated.Priority, updated.Rank())
-	s.pool.Credits(record.ID, updated.AICredits)
-	if len(initialization.Quota.Groups) > 0 {
-		s.quotas[record.ID] = quotaRead{summary: initialization.Quota, at: time.Now()}
-		s.ledger.RecordQuota(record.ID, initialization.Quota.Groups)
-	}
+	s.pool.Set(record.ID, s.catalogs[record.ID])
+	s.pool.Profile(record.ID, record.Priority, assisted(*record, initialization.Assist).Rank())
+	s.pool.Credits(record.ID, record.AICredits)
 	s.pool.SetQuota(record.ID, s.quotas[record.ID].summary)
-	go companion.Run(watch, func(catalog antigravity.Catalog) { s.setCatalog(current, catalog) })
+	go companion.Run(watch)
 	return nil
+}
+
+// observe 返回账户客户端的读取回调，是上游账户状态唯一的写回点：套餐、项目、AI 积分与地区写回仍在账户库中的账户并更新调度档案，目录与额度摘要记下并更新账户池，目录只在账户由该客户端调度时进入账户池；账户已删除时不写回
+func (s *Service) observe(id string, client *antigravity.Client) func(antigravity.Observed) {
+	return func(observed antigravity.Observed) {
+		record, ok, err := s.store.Update(id, func(record *auth.Account) {
+			if observed.Assist != nil {
+				*record = assisted(*record, *observed.Assist)
+			}
+			if observed.Settings != nil {
+				record.Region = observed.Settings.RegionCode
+			}
+		})
+		if err != nil {
+			slog.Warn("保存账户失败 | 错误="+err.Error(), "source", id)
+		}
+		if !ok {
+			return
+		}
+		switch {
+		case observed.Assist != nil:
+			s.pool.Profile(id, record.Priority, record.Rank())
+		case observed.Catalog != nil:
+			models := observed.Catalog.PublicModels()
+			s.mu.Lock()
+			s.setModels(id, models)
+			if current := s.accounts[id]; current != nil && current.client == client {
+				s.pool.Set(id, models)
+			}
+			s.mu.Unlock()
+		case observed.Quota != nil:
+			s.setQuota(id, *observed.Quota)
+		}
+	}
 }
 
 // account 返回已初始化的账户
@@ -501,12 +543,9 @@ func (s *Service) quote(ctx context.Context, current *account) {
 	if quoted {
 		return
 	}
-	summary, err := current.client.RetrieveUserQuotaSummary(context.WithoutCancel(ctx))
-	if err != nil {
+	if _, err := current.client.RetrieveUserQuotaSummary(context.WithoutCancel(ctx)); err != nil {
 		slog.WarnContext(ctx, "读取额度摘要失败 | 错误="+err.Error(), "source", current.id)
-		return
 	}
-	s.setQuota(current.id, summary)
 }
 
 // setQuota 记下账户的额度摘要及读取时间，更新账户池并写入额度快照
@@ -521,7 +560,7 @@ func (s *Service) setQuota(id string, summary antigravity.QuotaSummary) {
 // quotaWorkers 是同时读取额度摘要的账户数上限
 const quotaWorkers = 5
 
-// RefreshQuota 实时读取一个账户的套餐与额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理读取；先读套餐与项目（已初始化的账户从当前 cloudcode 端点，未初始化的企业 WIF 账户按 BusinessAssist，其余为 daily loadCodeAssist），项目或套餐变化时写回账户库并更新调度等级
+// RefreshQuota 实时读取一个账户的套餐与额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理读取；先读套餐与项目（已初始化的账户从当前 cloudcode 端点，未初始化的企业 WIF 账户按 BusinessAssist，其余为 daily loadCodeAssist），读到的套餐与额度经 observe 写回
 func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 	var record *auth.Account
 	for _, item := range s.store.Accounts() {
@@ -533,35 +572,25 @@ func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 		return fmt.Errorf("账户 %s 不存在", id)
 	}
 	var client *antigravity.Client
-	var assist antigravity.LoadCodeAssistResponse
 	var err error
 	if current := s.account(id); current != nil {
 		client = current.client
-		assist, err = client.Assist(ctx)
+		_, err = client.Assist(ctx)
 	} else {
 		proxy := s.proxy(record)
 		client = antigravity.NewClient(id, s.tokenSource(record, proxy), record.Device, proxy)
+		client.Observe(s.observe(id, client))
 		if record.AuthMethod == antigravity.AuthMethodEnterprise {
-			assist, err = client.BusinessAssist(ctx)
+			_, err = client.BusinessAssist(ctx)
 		} else {
-			assist, err = client.LoadCodeAssist(ctx, antigravity.EndpointDaily)
+			_, err = client.LoadCodeAssist(ctx, antigravity.EndpointDaily)
 		}
 	}
 	if err != nil {
 		return err
 	}
-	if updated := assisted(*record, assist); updated != *record {
-		if err := s.store.Save(&updated); err != nil {
-			return err
-		}
-		s.pool.Profile(id, updated.Priority, updated.Rank())
-	}
-	summary, err := client.RetrieveUserQuotaSummary(ctx)
-	if err != nil {
-		return err
-	}
-	s.setQuota(id, summary)
-	return nil
+	_, err = client.RetrieveUserQuotaSummary(ctx)
+	return err
 }
 
 // RefreshQuotas 读取全部账户的额度摘要，同时最多 quotaWorkers 个，返回读取失败的账户及原因

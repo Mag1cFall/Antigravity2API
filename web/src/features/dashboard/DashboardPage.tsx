@@ -1,14 +1,4 @@
 import { useQuery } from '@tanstack/react-query'
-import {
-  Activity,
-  Bot,
-  History,
-  RefreshCw,
-  Sparkles,
-  Star,
-  TriangleAlert,
-  Users,
-} from 'lucide-react'
 import { useState } from 'react'
 import { Link } from 'react-router'
 
@@ -18,27 +8,19 @@ import { Callout } from '@/components/ui/callout'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page'
 import { ErrorState, Loading } from '@/components/ui/states'
-import { dots, StatCards } from '@/components/ui/stats'
-import { useRefreshAccounts } from '@/features/accounts/actions'
 import { AddAccountButton } from '@/features/accounts/AddAccountDialog'
-import { accountMessages } from '@/features/accounts/messages'
 import { useAccounts } from '@/features/accounts/queries'
+import { RefreshAllButton } from '@/features/accounts/RefreshAllButton'
 import { statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
 import { useProgress } from '@/features/connect/progress'
 import { dashboardMessages } from '@/features/dashboard/messages'
+import { Pulse } from '@/features/dashboard/Pulse'
 import { SetupBanner, SetupGuide, type SetupSteps } from '@/features/dashboard/SetupGuide'
 import { quotaMessages } from '@/features/quota/messages'
-import {
-  available,
-  groupBuckets,
-  groups,
-  lowQuota,
-  nameOf,
-  type QuotaGroup,
-} from '@/features/quota/quota'
+import { available, groupBuckets, groups, nameOf, type QuotaGroup } from '@/features/quota/quota'
 import { QuotaHistory } from '@/features/quota/QuotaHistory'
 import { QuotaLine } from '@/features/quota/QuotaLine'
 import { apiQuery, parseFilter } from '@/features/requests/filters'
@@ -46,43 +28,9 @@ import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import type { RequestPage } from '@/features/requests/types'
 import { useUsage } from '@/features/usage/queries'
 import { api } from '@/lib/api'
-import {
-  formatCost,
-  formatDateTime,
-  formatDuration,
-  formatNumber,
-  formatPercent,
-} from '@/lib/format'
+import { formatDateTime, formatDuration } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
-
-// average 返回数值的平均值，没有数值时为 null
-function average(values: (number | null)[]) {
-  const present = values.filter((value): value is number => value !== null)
-  return present.length ? present.reduce((sum, value) => sum + value, 0) / present.length : null
-}
-
-// windowAverage 返回各账户在一个额度组一个窗口上的平均剩余比例
-function windowAverage(accounts: Account[], group: string, window: string) {
-  return average(
-    accounts.map(
-      (account) =>
-        groupBuckets(account.quota, group).find((bucket) => bucket.window === window)
-          ?.remaining_fraction ?? null,
-    ),
-  )
-}
-
-// pooled 返回一个额度组中每个额度池的一个账户，共用额度池的家庭组成员只计一次
-function pooled(accounts: Account[], group: QuotaGroup) {
-  const seen = new Set<string>()
-  return accounts.filter((account) => {
-    if (seen.has(account.id)) return false
-    seen.add(account.id)
-    for (const member of account.shared?.[group] ?? []) seen.add(member)
-    return true
-  })
-}
 
 // bestAccount 返回一个额度组中可用比例最高的就绪账户
 function bestAccount(accounts: Account[], group: QuotaGroup) {
@@ -103,14 +51,14 @@ function BestAccounts({ accounts, now }: { accounts: Account[]; now: Date }) {
   const q = useMessages(quotaMessages)
   return (
     <Card>
-      <CardHeader icon={<Star size={16} aria-hidden />} title={m.best} description={m.bestHint} />
-      <CardBody className="flex flex-col gap-3">
+      <CardHeader title={m.best} />
+      <CardBody className="flex flex-col gap-2">
         {groups.map((group) => {
           const best = bestAccount(accounts, group)
           return (
             <div
               key={group}
-              className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-md border border-border p-4"
+              className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-border px-3 py-2"
             >
               <div className="min-w-0 flex-[1_1_220px]">
                 <span className="text-xs font-medium text-foreground-muted">
@@ -122,7 +70,7 @@ function BestAccounts({ accounts, now }: { accounts: Account[]; now: Date }) {
                       <span className="text-sm font-medium wrap-anywhere">{best.account.id}</span>
                       <TierBadge tier={best.account.tier} />
                     </div>
-                    <div className="mt-3 flex max-w-[360px] flex-col gap-2">
+                    <div className="mt-2 flex max-w-[360px] flex-col gap-1">
                       {groupBuckets(best.account.quota, group).map((bucket) => (
                         <QuotaLine
                           key={bucket.bucket_id}
@@ -164,9 +112,7 @@ function RecentRequests({ now }: { now: Date }) {
   return (
     <Card>
       <CardHeader
-        icon={<History size={16} aria-hidden />}
         title={m.recent}
-        description={m.recentHint}
         actions={
           <Button variant="link" asChild>
             <Link to="/requests">{m.allRequests}</Link>
@@ -197,7 +143,7 @@ function RecentRequests({ now }: { now: Date }) {
             <li key={record.id} className="border-t border-border first:border-t-0">
               <Link
                 to={'/requests?id=' + encodeURIComponent(record.id)}
-                className="grid grid-cols-[96px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-6 py-3 hover:bg-muted/60 max-sm:px-4"
+                className="grid grid-cols-[96px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-4 py-2 hover:bg-muted/60"
               >
                 <RequestStateBadge state={record.state} />
                 <span className="min-w-0">
@@ -221,93 +167,19 @@ function RecentRequests({ now }: { now: Date }) {
   )
 }
 
-// Overview 是有账户后的仪表盘：统计卡片、推荐账户、最近请求与额度变化
+// Overview 是有账户后的仪表盘：概览条、推荐账户、最近请求与额度变化
 function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
   const m = useMessages(dashboardMessages)
-  const a = useMessages(accountMessages)
-  const { locale } = useI18n()
   const usage = useUsage(86_400_000)
-  const totals = usage.data?.totals
-  const enabled = accounts.filter((account) => account.state !== 'disabled')
-  const count = (status: string) =>
-    accounts.filter((account) => statusOf(account) === status).length
-  const notReady = (['cooling', 'verify', 'error', 'pending', 'disabled'] as const)
-    .filter((status) => count(status) > 0)
-    .map((status) => a[status] + ' ' + String(count(status)))
-  const low = enabled.filter((account) =>
-    account.quota.some((bucket) => bucket.remaining_fraction < lowQuota),
-  ).length
-  const percent = (value: number | null) => (value === null ? '—' : formatPercent(value, locale))
-  const quotaStat = (group: QuotaGroup) => {
-    const pools = pooled(enabled, group)
-    const value = average(pools.map((account) => available(account.quota, group)))
-    return {
-      value: percent(value),
-      detail:
-        value === null
-          ? [m.quotaNone]
-          : dots(
-              fill(m.quotaDetail, {
-                short: percent(windowAverage(pools, group, '5h')),
-                weekly: percent(windowAverage(pools, group, 'weekly')),
-              }),
-            ),
-    }
-  }
-  const gemini = quotaStat('gemini')
-  const third = quotaStat('3p')
   return (
     <>
-      <StatCards
-        items={[
-          {
-            key: 'accounts',
-            label: m.accounts,
-            icon: <Users size={16} />,
-            tone: 'info',
-            value:
-              formatNumber(count('ready'), locale) + ' / ' + formatNumber(accounts.length, locale),
-            detail: notReady.length ? notReady : [m.accountsAllReady],
-          },
-          {
-            key: 'gemini',
-            label: m.geminiQuota,
-            icon: <Sparkles size={16} />,
-            tone: 'success',
-            ...gemini,
-          },
-          { key: '3p', label: m.thirdQuota, icon: <Bot size={16} />, tone: 'violet', ...third },
-          {
-            key: 'low',
-            label: m.lowAccounts,
-            icon: <TriangleAlert size={16} />,
-            tone: low > 0 ? 'warning' : 'success',
-            value: formatNumber(low, locale),
-            detail: [m.lowDetail],
-          },
-          {
-            key: 'requests',
-            label: m.requests,
-            icon: <Activity size={16} />,
-            tone: 'info',
-            value: totals ? formatNumber(totals.requests, locale) : '—',
-            detail: totals
-              ? dots(
-                  fill(m.requestsDetail, {
-                    failed: formatNumber(totals.failed, locale),
-                    cost: formatCost(totals.cost_usd, locale),
-                  }),
-                )
-              : [],
-          },
-        ]}
-      />
+      <Pulse accounts={accounts} usage={usage.data} />
       {usage.isError && (
         <Callout tone="error" role="alert">
           <p>{fill(m.usageFailed, { message: usage.error.message })}</p>
         </Callout>
       )}
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <BestAccounts accounts={accounts} now={now} />
         <RecentRequests now={now} />
       </div>
@@ -324,8 +196,6 @@ export function DashboardPage() {
   const accounts = useAccounts()
   const usage = useUsage(86_400_000)
   const progress = useProgress()
-  const refresh = useRefreshAccounts()
-  const a = useMessages(accountMessages)
   const [guiding, setGuiding] = useState(false)
   if (accounts.data?.accounts.length === 0 && !guiding) setGuiding(true)
   if (accounts.isPending || accounts.isError) {
@@ -372,15 +242,7 @@ export function DashboardPage() {
         description={fill(m.summary, { total: list.length, ready })}
         actions={
           <>
-            <Button
-              loading={refresh.isPending}
-              onClick={() => {
-                refresh.mutate()
-              }}
-            >
-              <RefreshCw size={16} aria-hidden />
-              {a.refreshAll}
-            </Button>
+            <RefreshAllButton accounts={list} />
             <AddAccountButton />
           </>
         }

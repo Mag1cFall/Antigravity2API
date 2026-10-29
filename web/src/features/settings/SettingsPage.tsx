@@ -1,5 +1,4 @@
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowRight,
   ChevronDown,
@@ -42,10 +41,9 @@ import {
   PromptWrapField,
 } from '@/features/settings/PromptSection'
 import { ProxyPool } from '@/features/settings/ProxyPool'
-import { settingsKey, splitList, useSettings } from '@/features/settings/queries'
+import { splitList, useSaveSettings, useSettings } from '@/features/settings/queries'
 import { type SettingsForm, settingsSchema, toForm, toValues } from '@/features/settings/schema'
 import type { Settings } from '@/features/settings/types'
-import { api } from '@/lib/api'
 import { isDesktop } from '@/lib/desktop'
 import { codeText, fill, useI18n, useMessages } from '@/lib/i18n'
 
@@ -180,13 +178,13 @@ function LowerTierField({
     <ul
       id="PREFER_LOWER_TIER_MODELS"
       aria-describedby="PREFER_LOWER_TIER_MODELS-hint"
-      className="max-h-80 flex flex-col divide-y divide-border overflow-y-auto rounded-md border border-border"
+      className="flex max-h-[264px] flex-col divide-y divide-border overflow-y-auto rounded-md border border-border"
     >
       {ids.map((id) => (
         <li key={id}>
           <label
             htmlFor={'lower-tier-' + id}
-            className="flex cursor-pointer items-center gap-3 px-3 py-2"
+            className="flex cursor-pointer items-center gap-3 px-3 py-1"
           >
             <Switch
               id={'lower-tier-' + id}
@@ -195,11 +193,13 @@ function LowerTierField({
                 onChange(ids.filter((item) => (item === id ? checked : value.includes(item))))
               }}
             />
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate text-sm">
+            <span className="flex min-w-0 items-baseline gap-2">
+              <span className="shrink-0 text-sm">
                 {chat.find((model) => model.id === id)?.name ?? id}
               </span>
-              <span className="truncate font-mono text-xs text-foreground-muted">{id}</span>
+              <span className="truncate font-mono text-xs text-foreground-muted" title={id}>
+                {id}
+              </span>
             </span>
           </label>
         </li>
@@ -280,7 +280,6 @@ function SettingsEditor({
   onInvalid: (sections: Set<Section>) => void
 }) {
   const m = useMessages(settingsMessages)
-  const client = useQueryClient()
   const navigate = useNavigate()
   const form = useForm<SettingsForm>({
     resolver: zodResolver(settingsSchema(m, settings.admin_password_set)),
@@ -295,18 +294,7 @@ function SettingsEditor({
     name: ['SYSTEM_PROMPT', 'SYSTEM_PROMPT_SECTIONS', 'SYSTEM_PROMPT_WRAP'],
   })
   const [remoteShown, setRemoteShown] = useState(false)
-  const save = useMutation({
-    mutationFn: (next: SettingsForm) =>
-      api<Settings>('/api/settings', { method: 'PATCH', json: { values: toValues(next) } }),
-    onSuccess: (result) => {
-      client.setQueryData(settingsKey, result)
-      form.reset(toForm(result))
-      toast({ tone: 'success', title: m.saved })
-    },
-    onError: (error) => {
-      form.setError('root', { message: fill(m.saveFailed, { message: error.message }) })
-    },
-  })
+  const save = useSaveSettings()
   const invalidSections = new Set(
     Object.keys(errors)
       .filter((key) => key in fieldSection)
@@ -323,7 +311,15 @@ function SettingsEditor({
     if (first && first !== section) void navigate('/settings/' + first)
   }
   const submit = form.handleSubmit((next) => {
-    save.mutate(next)
+    save.mutate(toValues(next), {
+      onSuccess: (result) => {
+        form.reset(toForm(result))
+        toast({ tone: 'success', title: m.saved })
+      },
+      onError: (error) => {
+        form.setError('root', { message: fill(m.saveFailed, { message: error.message }) })
+      },
+    })
   }, handleInvalid)
 
   useEffect(() => {
@@ -709,7 +705,7 @@ export function SettingsPage() {
   const [invalid, setInvalid] = useState<Set<Section>>(new Set())
   return (
     <>
-      <PageHeader title={m.title} description={m.description} />
+      <PageHeader title={m.title} />
       {settings.data && settings.data.restart_required.length > 0 && (
         <Callout tone="warning" role="status">
           {fill(m.restartNotice, {
@@ -721,7 +717,7 @@ export function SettingsPage() {
       )}
       <Card className="md:flex-row">
         <SectionNav section={section} invalid={invalid} />
-        <div className="min-w-0 flex-1 px-8 pt-6 pb-8 max-sm:px-4 max-sm:pt-4">
+        <div className="min-w-0 flex-1 px-6 pt-4 pb-6 max-sm:px-4">
           <SectionTitle section={section} />
           {section === 'about' && <AboutSection />}
           {settings.isPending ? (

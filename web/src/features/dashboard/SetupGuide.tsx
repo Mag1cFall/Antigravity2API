@@ -114,7 +114,7 @@ export function SetupGuide({ steps, onEnter }: { steps: SetupSteps; onEnter: () 
   return (
     <>
       <header className="flex flex-col items-center gap-3 pt-6 pb-2 text-center">
-        <img src={logo} alt="" width={56} height={56} className="size-14" />
+        <img src={logo} alt="" width={56} height={56} className="size-[56px]" />
         <h1 className="text-2xl font-semibold">{m.welcome}</h1>
         <p className="max-w-prose text-sm text-foreground-muted">{m.welcomeHint}</p>
         <Button

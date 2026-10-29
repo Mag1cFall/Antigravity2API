@@ -20,7 +20,6 @@ import { defineMessages, useI18n, useMessages } from '@/lib/i18n'
 const historyMessages = defineMessages(
   {
     title: '额度变化',
-    description: '各账户剩余比例的平均值，实线为 5 小时窗口，虚线为每周窗口',
     range: '时间范围',
     range24h: '24 小时',
     range7d: '7 天',
@@ -35,8 +34,6 @@ const historyMessages = defineMessages(
   },
   {
     title: 'Quota over time',
-    description:
-      'Average remaining share across accounts; solid lines are 5-hour windows, dashed lines weekly',
     range: 'Time range',
     range24h: '24 hours',
     range7d: '7 days',
@@ -52,7 +49,6 @@ const historyMessages = defineMessages(
   },
   {
     title: '額度變化',
-    description: '各帳號剩餘比例的平均值，實線為 5 小時額度，虛線為每週額度',
     range: '時間範圍',
     range24h: '24 小時',
     range7d: '7 天',
@@ -122,7 +118,6 @@ export function QuotaHistory() {
       <CardHeader
         icon={<LineChart size={16} aria-hidden />}
         title={m.title}
-        description={m.description}
         actions={
           <div className="flex flex-wrap items-center gap-3">
             <Select

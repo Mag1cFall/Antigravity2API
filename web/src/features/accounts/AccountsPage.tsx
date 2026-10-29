@@ -1,4 +1,4 @@
-import { RefreshCw, Trash2, Users } from 'lucide-react'
+import { Download, Trash2, Upload, Users } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
@@ -19,7 +19,7 @@ import {
   useAccountRemoval,
   useAccountUsage,
   useBatchAccounts,
-  useRefreshAccounts,
+  useQuotaRefresh,
   useRefreshingAccounts,
   useRefreshQuota,
   useToggleAccount,
@@ -30,7 +30,13 @@ import { AddAccountButton } from '@/features/accounts/AddAccountDialog'
 import { accountMessages } from '@/features/accounts/messages'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { useAccounts } from '@/features/accounts/queries'
+import { RefreshAllButton } from '@/features/accounts/RefreshAllButton'
 import { type Status, statuses, statusOf } from '@/features/accounts/status'
+import {
+  exportURL,
+  ImportAccountsDialog,
+  transferMessages,
+} from '@/features/accounts/TransferDialog'
 import type { Account } from '@/features/accounts/types'
 import { fill, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
@@ -83,6 +89,7 @@ function sortAccounts(accounts: Account[], sort: Sort, lastUsed: Map<string, str
 export function AccountsPage() {
   const m = useMessages(accountMessages)
   const app = useMessages(appMessages)
+  const transfer = useMessages(transferMessages)
   const now = useNow(30_000)
   const accounts = useAccounts()
   const usage = useAccountUsage()
@@ -90,8 +97,9 @@ export function AccountsPage() {
   const verify = useVerifyAccount()
   const refreshQuota = useRefreshQuota()
   const verifying = useVerifyingAccounts()
-  const refreshing = useRefreshingAccounts()
-  const refresh = useRefreshAccounts()
+  const pendingQuota = useRefreshingAccounts()
+  const quotaRefresh = useQuotaRefresh()
+  const refreshing = new Set([...pendingQuota, ...quotaRefresh.running])
   const batch = useBatchAccounts()
   const { hidden, remove } = useAccountRemoval()
   const [params, setParams] = useSearchParams()
@@ -177,15 +185,21 @@ export function AccountsPage() {
         description={accounts.data ? fill(m.summary, { total: list.length, ready }) : m.description}
         actions={
           <>
-            <Button
-              loading={refresh.isPending}
-              onClick={() => {
-                refresh.mutate()
-              }}
-            >
-              <RefreshCw size={16} aria-hidden />
-              {m.refreshAll}
-            </Button>
+            <RefreshAllButton accounts={list} />
+            <ImportAccountsDialog>
+              <Button>
+                <Upload size={16} aria-hidden />
+                {transfer.import}
+              </Button>
+            </ImportAccountsDialog>
+            {list.length > 0 && (
+              <Button asChild>
+                <a href={exportURL([])} download>
+                  <Download size={16} aria-hidden />
+                  {transfer.export}
+                </a>
+              </Button>
+            )}
             <AddAccountButton />
           </>
         }
@@ -268,7 +282,7 @@ export function AccountsPage() {
                   <div
                     role="toolbar"
                     aria-label={fill(m.selected, { count: picked.length })}
-                    className="flex flex-wrap items-center gap-2 border-b border-border bg-primary-soft px-6 py-3 max-sm:px-4"
+                    className="flex flex-wrap items-center gap-2 border-b border-border bg-primary-soft px-4 py-2"
                   >
                     <span className="mr-2 text-sm font-medium">
                       {fill(m.selected, { count: picked.length })}
@@ -317,6 +331,12 @@ export function AccountsPage() {
                       <Trash2 size={16} aria-hidden />
                       {m.batchDelete}
                     </Button>
+                    <Button size="sm" variant="ghost" asChild>
+                      <a href={exportURL(picked.map((account) => account.id))} download>
+                        <Download size={16} aria-hidden />
+                        {fill(transfer.exportSelected, { count: picked.length })}
+                      </a>
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -336,6 +356,7 @@ export function AccountsPage() {
                   selected={selected}
                   verifying={verifying}
                   refreshing={refreshing}
+                  quotaRefresh={quotaRefresh}
                   actions={actions}
                 />
                 <Pagination

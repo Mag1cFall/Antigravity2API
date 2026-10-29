@@ -798,24 +798,20 @@ func geminiOutputParts(result generationResult) []map[string]any {
 
 	for _, event := range result.events {
 		switch event.Kind {
-		case antigravity.EventText:
+		case antigravity.EventText, antigravity.EventReasoning:
+			thought := event.Kind == antigravity.EventReasoning
 			if len(parts) > 0 {
 				last := parts[len(parts)-1]
-				if lastText, ok := last["text"].(string); ok && last["thought"] != true && last["thoughtSignature"] == nil && event.ThoughtSignature == "" {
+				if lastText, ok := last["text"].(string); ok && (last["thought"] == true) == thought && last["thoughtSignature"] == nil && event.ThoughtSignature == "" {
 					last["text"] = lastText + event.Text
 					continue
 				}
 			}
-			appendPart(map[string]any{"text": event.Text}, event.ThoughtSignature)
-		case antigravity.EventReasoning:
-			if len(parts) > 0 {
-				last := parts[len(parts)-1]
-				if lastText, ok := last["text"].(string); ok && last["thought"] == true && last["thoughtSignature"] == nil && event.ThoughtSignature == "" {
-					last["text"] = lastText + event.Text
-					continue
-				}
+			part := map[string]any{"text": event.Text}
+			if thought {
+				part["thought"] = true
 			}
-			appendPart(map[string]any{"text": event.Text, "thought": true}, event.ThoughtSignature)
+			appendPart(part, event.ThoughtSignature)
 		case antigravity.EventToolCall:
 			if event.ToolCall != nil {
 				appendPart(geminiFunctionCallPart(*event.ToolCall), event.ThoughtSignature)

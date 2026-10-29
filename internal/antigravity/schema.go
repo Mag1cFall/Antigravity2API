@@ -267,9 +267,6 @@ func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 			mergeSchema(output, variant.(map[string]any))
 		}
 	}
-	if output["type"] == "OBJECT" && output["properties"] == nil {
-		output["properties"] = map[string]any{}
-	}
 	return output, nil
 }
 

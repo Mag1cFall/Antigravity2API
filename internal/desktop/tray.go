@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -37,7 +38,11 @@ type trayAccount struct {
 // addTray 创建托盘图标，单击图标在新的 goroutine 中调用 show；菜单依次为各额度组剩余、各账户额度、刷新额度、显示窗口（window 为真时）、在浏览器中打开、复制 API 地址、开机启动与退出；应用启动后每分钟与刷新额度后读取额度并重建菜单
 func addTray(app *application.App, options Options, page *url.URL, window bool, show func()) {
 	tray := app.SystemTray.New()
-	tray.SetIcon(icon)
+	if runtime.GOOS == "darwin" {
+		tray.SetTemplateIcon(trayTemplate)
+	} else {
+		tray.SetIcon(icon)
+	}
 	tray.SetTooltip(options.Title)
 	reread := make(chan struct{}, 1)
 	build := func(accounts []trayAccount) *application.Menu {
@@ -45,7 +50,7 @@ func addTray(app *application.App, options Options, page *url.URL, window bool, 
 		addQuota(menu, accounts)
 		menu.Add("刷新额度").OnClick(func(*application.Context) {
 			go func() {
-				if response, err := http.Post(options.URL+"/api/accounts/refresh", "application/json", nil); err == nil {
+				if response, err := http.Post(origin(page)+"/api/accounts/refresh", "application/json", nil); err == nil {
 					response.Body.Close()
 				}
 				select {
@@ -58,9 +63,9 @@ func addTray(app *application.App, options Options, page *url.URL, window bool, 
 		if window {
 			menu.Add("显示窗口").OnClick(func(*application.Context) { show() })
 		}
-		menu.Add("在浏览器中打开").OnClick(func(*application.Context) { openBrowser(app, options.URL) })
+		menu.Add("在浏览器中打开").OnClick(func(*application.Context) { openBrowser(app, origin(page)) })
 		menu.Add("复制 API 地址").OnClick(func(*application.Context) {
-			app.Clipboard.SetText(page.Scheme + "://" + page.Host)
+			app.Clipboard.SetText(origin(page))
 		})
 		menu.AddSeparator()
 		enabled, _ := app.Autostart.IsEnabled()
@@ -84,7 +89,7 @@ func addTray(app *application.App, options Options, page *url.URL, window bool, 
 		go func() {
 			client := &http.Client{Timeout: 10 * time.Second}
 			for {
-				if accounts, err := readAccounts(client, options.URL); err == nil {
+				if accounts, err := readAccounts(client, origin(page)); err == nil {
 					tray.SetMenu(build(accounts))
 				}
 				select {

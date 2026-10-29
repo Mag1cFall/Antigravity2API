@@ -45,6 +45,8 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{id}/quota", s.refreshQuota)
 	mux.HandleFunc("POST /api/accounts/{id}/switch", s.switchAccount)
 	mux.HandleFunc("POST /api/accounts/import", s.importAccounts)
+	mux.HandleFunc("POST /api/accounts/import/json", s.importAccountFile)
+	mux.HandleFunc("GET /api/accounts/export", s.exportAccounts)
 	mux.HandleFunc("POST /api/accounts/refresh", s.refreshAccounts)
 	mux.HandleFunc("POST /api/logins", s.createLogin)
 	mux.HandleFunc("POST /api/logins/{id}/code", s.submitLoginCode)
@@ -77,7 +79,7 @@ func (s *server) getStatus(w http.ResponseWriter, _ *http.Request) {
 		latest = *value
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"host": s.deps.Host, "version": Version(), "listen": s.boot.Listen, "started_at": s.started,
+		"host": s.deps.Host, "version": Version(), "listen": s.listen, "reserved_listen": s.reserved, "started_at": s.started,
 		"client_version": antigravity.ClientVersion, "latest_version": latest,
 	})
 }

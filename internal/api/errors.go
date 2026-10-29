@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -122,15 +123,62 @@ func validHTTPStatus(status int) int {
 	return http.StatusBadGateway
 }
 
+// writeAuthError 按请求所属协议写入 API key 错误，OpenAI 与 Anthropic 为 401
 func writeAuthError(w http.ResponseWriter, r *http.Request) {
 	switch protocolForRequest(r) {
 	case "anthropic":
 		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "Invalid API Key")
 	case "gemini":
-		writeGeminiError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "Invalid API Key")
+		writeGeminiAuthError(w, r)
 	default:
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "Invalid API Key")
 	}
+}
+
+// geminiInvalidKeyMessage 是 Gemini API 对无效 API key 的错误信息
+const geminiInvalidKeyMessage = "API key not valid. Please pass a valid API key."
+
+// geminiAuthFailure 是 Gemini API 认证错误的 error 对象
+type geminiAuthFailure struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Status  string `json:"status"`
+	Details []any  `json:"details,omitempty"`
+}
+
+// geminiErrorInfo 是 Gemini 错误 details 中的 google.rpc.ErrorInfo
+type geminiErrorInfo struct {
+	Type     string            `json:"@type"`
+	Reason   string            `json:"reason"`
+	Domain   string            `json:"domain"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+// geminiLocalizedMessage 是 Gemini 错误 details 中的 google.rpc.LocalizedMessage
+type geminiLocalizedMessage struct {
+	Type    string `json:"@type"`
+	Locale  string `json:"locale"`
+	Message string `json:"message"`
+}
+
+// writeGeminiAuthError 按 Gemini API 写入 API key 错误：给出的 key 无效时为 400 INVALID_ARGUMENT 带 ErrorInfo 与 LocalizedMessage，没有 key 时为 403 PERMISSION_DENIED；Interactions 与非 SSE 的 streamGenerateContent 外层为数组
+func writeGeminiAuthError(w http.ResponseWriter, r *http.Request) {
+	failure := geminiAuthFailure{
+		Code: http.StatusForbidden, Status: "PERMISSION_DENIED",
+		Message: "Method doesn't allow unregistered callers (callers without established identity). Please use API Key or other form of API consumer identity to call this API.",
+	}
+	if slices.ContainsFunc(apiKeyCandidates(r), func(key string) bool { return key != "" }) {
+		failure = geminiAuthFailure{Code: http.StatusBadRequest, Message: geminiInvalidKeyMessage, Status: "INVALID_ARGUMENT", Details: []any{
+			geminiErrorInfo{Type: "type.googleapis.com/google.rpc.ErrorInfo", Reason: "API_KEY_INVALID", Domain: "googleapis.com", Metadata: map[string]string{"service": "generativelanguage.googleapis.com"}},
+			geminiLocalizedMessage{Type: "type.googleapis.com/google.rpc.LocalizedMessage", Locale: "en-US", Message: geminiInvalidKeyMessage},
+		}}
+	}
+	var payload any = map[string]geminiAuthFailure{"error": failure}
+	if strings.HasPrefix(r.URL.Path, "/v1/interactions") || strings.HasPrefix(r.URL.Path, "/v1beta/interactions") ||
+		strings.HasSuffix(r.URL.Path, ":streamGenerateContent") && r.URL.Query().Get("alt") != "sse" {
+		payload = []any{payload}
+	}
+	writeJSON(w, failure.Code, payload)
 }
 
 // writeRouteNotFound 以请求所属协议的错误体返回 404，消息含请求的方法与路径
@@ -181,13 +229,24 @@ func publicErrorMessage(status int, message string) string {
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, code string, message string) {
-	message = publicErrorMessage(status, message)
-	writeJSON(w, status, map[string]any{"error": map[string]any{
-		"message": message,
+	writeJSON(w, status, openAIErrorBody(status, code, message))
+}
+
+// openAIErrorBody 返回 OpenAI 错误体
+func openAIErrorBody(status int, code string, message string) map[string]any {
+	return map[string]any{"error": map[string]any{
+		"message": publicErrorMessage(status, message),
 		"type":    openAIErrorType(status, code),
 		"param":   nil,
 		"code":    code,
-	}})
+	}}
+}
+
+// writeOpenAIStreamError 在流已开始后把请求错误以 OpenAI 错误体写为一个 SSE 事件，客户端已断开时不写
+func writeOpenAIStreamError(w http.ResponseWriter, r *http.Request, err error) {
+	if shouldWriteRequestError(r, err) {
+		_ = writeSSE(w, "", openAIErrorBody(statusFromError(err), openAIErrorCode(err), err.Error()))
+	}
 }
 
 func openAIErrorType(status int, code string) string {

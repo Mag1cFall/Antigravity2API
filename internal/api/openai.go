@@ -21,6 +21,7 @@ type chatRequest struct {
 	ToolChoice          json.RawMessage   `json:"tool_choice"`
 	Temperature         *float64          `json:"temperature"`
 	TopP                *float64          `json:"top_p"`
+	TopK                *int              `json:"top_k"`
 	MaxTokens           *int64            `json:"max_tokens"`
 	MaxCompletionTokens *int64            `json:"max_completion_tokens"`
 	N                   *int64            `json:"n"`
@@ -297,12 +298,16 @@ func (request chatRequest) toGenerateRequest(id string) (antigravity.GenerateReq
 				}
 				text.WriteString(part.Text)
 			}
+			value := text.String()
+			if message.Name != "" && value != "" {
+				value = message.Name + ": " + value
+			}
 			switch {
-			case text.Len() == 0:
+			case value == "":
 			case len(contents) == 0:
-				system = append(system, text.String())
+				system = append(system, value)
 			default:
-				reminders = append(reminders, systemReminder(text.String()))
+				reminders = append(reminders, systemReminder(value))
 			}
 			continue
 		}
@@ -371,6 +376,11 @@ func chatMessageContent(message chatMessage) (antigravity.Content, error) {
 	parts, err := openAIContentParts(message.Content)
 	if err != nil {
 		return antigravity.Content{}, fmt.Errorf("%s message content: %w", message.Role, err)
+	}
+	if message.Name != "" {
+		if index := slices.IndexFunc(parts, func(part antigravity.Part) bool { return part.Text != "" }); index >= 0 {
+			parts[index].Text = message.Name + ": " + parts[index].Text
+		}
 	}
 	if role == antigravity.RoleAssistant && message.ReasoningContent != "" {
 		parts = append([]antigravity.Part{{Text: message.ReasoningContent, Thought: true}}, parts...)
@@ -695,6 +705,7 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 	config := antigravity.GenerationConfig{
 		Temperature:      request.Temperature,
 		TopP:             request.TopP,
+		TopK:             request.TopK,
 		PresencePenalty:  request.PresencePenalty,
 		FrequencyPenalty: request.FrequencyPenalty,
 		ReasoningEffort:  request.ReasoningEffort,
@@ -865,16 +876,7 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 		return result, write(index, map[string]any{}, &finish)
 	})
 	if err != nil {
-		if shouldWriteRequestError(r, err) {
-			status := statusFromError(err)
-			code := openAIErrorCode(err)
-			_ = writeSSE(w, "", map[string]any{"error": map[string]any{
-				"message": publicErrorMessage(status, err.Error()),
-				"type":    openAIErrorType(status, code),
-				"param":   nil,
-				"code":    code,
-			}})
-		}
+		writeOpenAIStreamError(w, r, err)
 		return
 	}
 	if usage := sumUsage(results); request.StreamOptions.IncludeUsage && usage != nil {

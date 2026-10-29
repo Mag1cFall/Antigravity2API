@@ -100,6 +100,7 @@ func (c *Client) FetchAvailableModels(ctx context.Context) (Catalog, error) {
 		catalog.Models[id] = model
 	}
 	catalog.Raw = raw
+	c.notify(Observed{Catalog: &catalog})
 	return catalog, nil
 }
 

@@ -72,7 +72,7 @@ function ModelSelect({
         value={value}
         onValueChange={onChange}
         options={models.map((model) => ({ value: model.id, label: model.id }))}
-        className="sm:w-64 w-full font-mono"
+        className="w-full font-mono sm:w-[256px]"
       />
     </div>
   )
@@ -156,7 +156,7 @@ export function ClientConfigs() {
           setChoice((current) => ({ ...current, key: next }))
         }}
         options={keys.map((item) => ({ value: item, label: maskKey(item) }))}
-        className="sm:w-48 w-full font-mono"
+        className="w-full font-mono sm:w-[192px]"
       />
     </div>
   )

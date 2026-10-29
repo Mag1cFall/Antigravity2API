@@ -29,7 +29,7 @@ import (
 )
 
 // updaterUserAgent 是官方客户端的 Electron 网络栈经 HTTP 代理建立隧道时 CONNECT 携带的 User-Agent
-const updaterUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/" + antigravity.ClientVersion + " Chrome/152.0.7977.130 Electron/44.4.3 Safari/537.36"
+const updaterUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/" + antigravity.ClientVersion + " Chrome/" + antigravity.ChromeVersion + " Electron/" + antigravity.ElectronVersion + " Safari/537.36"
 
 // updaterSettings 是官方更新器 HTTP/2 连接的 SETTINGS，顺序与取值同 Chromium 152
 var updaterSettings = []http2.Setting{

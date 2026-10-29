@@ -231,7 +231,7 @@ export function PromptSectionsField({
               {open === section.name && (
                 <pre
                   id={id + '-text'}
-                  className="max-h-80 overflow-y-auto rounded-md bg-muted px-4 py-3 font-mono text-xs leading-[20px] break-words whitespace-pre-wrap select-text"
+                  className="max-h-[320px] overflow-y-auto rounded-md bg-muted px-4 py-3 font-mono text-xs leading-[20px] break-words whitespace-pre-wrap select-text"
                 >
                   {section.text}
                 </pre>

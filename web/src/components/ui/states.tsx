@@ -41,7 +41,7 @@ export function Loading({ label, rows = 4 }: { label: string; rows?: number }) {
       {Array.from({ length: rows }, (_, index) => (
         <div
           key={index}
-          className="flex h-12 items-center gap-6 border-t border-border px-6 first:border-t-0 max-sm:px-4"
+          className="flex h-12 items-center gap-6 border-t border-border px-4 first:border-t-0"
         >
           {visible && (
             <>
@@ -69,7 +69,7 @@ export function EmptyState({
   action?: ReactNode
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 px-4 py-12 text-center">
+    <div className="flex flex-col items-center justify-center gap-3 px-4 py-8 text-center">
       <span className="flex size-12 items-center justify-center rounded-lg bg-muted text-foreground-muted">
         {icon}
       </span>

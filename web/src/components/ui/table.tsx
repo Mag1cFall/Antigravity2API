@@ -1,9 +1,9 @@
 import type { ComponentProps, CSSProperties, ReactNode } from 'react'
 import { twMerge } from 'tailwind-merge'
 
-// stackClass 是窄屏时把每行排成一张卡片的样式：单元格依次换行排列，表头只保留带 data-stack 的单元格，没有这样的单元格时整行隐藏
+// stackClass 是窄屏时把每行排成一张卡片的样式：单元格依次换行排列，表头只保留带 data-stack 的单元格，没有这样的单元格时整行隐藏；行的样式不带优先级，行上的类可以替换
 const stackClass =
-  'max-sm:block max-sm:min-w-0 max-sm:[&>colgroup]:hidden max-sm:[&>tbody]:block max-sm:[&>thead]:block max-sm:[&>thead:not(:has([data-stack]))]:hidden max-sm:[&>thead:not(:has([data-stack]))+tbody>tr:first-child]:border-t-0 max-sm:[&>thead>tr]:flex max-sm:[&>thead>tr]:bg-muted max-sm:[&>thead>tr]:px-4 max-sm:[&>thead>tr>th:not([data-stack])]:hidden max-sm:[&>tbody>tr]:flex max-sm:[&>tbody>tr]:flex-wrap max-sm:[&>tbody>tr]:items-start max-sm:[&>tbody>tr]:gap-x-4 max-sm:[&>tbody>tr]:gap-y-3 max-sm:[&>tbody>tr]:border-t max-sm:[&>tbody>tr]:border-border max-sm:[&>tbody>tr]:px-4 max-sm:[&>tbody>tr]:py-3'
+  'max-sm:block max-sm:min-w-0 max-sm:[&>colgroup]:hidden max-sm:[&>tbody]:block max-sm:[&>thead]:block max-sm:[&>thead:not(:has([data-stack]))]:hidden max-sm:[&>thead:not(:has([data-stack]))+tbody>tr:first-child]:border-t-0 max-sm:[&>thead>tr]:flex max-sm:[&>thead>tr]:bg-muted max-sm:[&>thead>tr]:px-4 max-sm:[&>thead>tr>th:not([data-stack])]:hidden max-sm:[:where(&>tbody>tr)]:flex max-sm:[:where(&>tbody>tr)]:flex-wrap max-sm:[:where(&>tbody>tr)]:items-start max-sm:[:where(&>tbody>tr)]:gap-x-4 max-sm:[:where(&>tbody>tr)]:gap-y-3 max-sm:[:where(&>tbody>tr)]:border-t max-sm:[:where(&>tbody>tr)]:border-border max-sm:[:where(&>tbody>tr)]:px-4 max-sm:[:where(&>tbody>tr)]:py-3'
 
 // stackThird 与 stackTwoThirds 是窄屏卡片中占一栏与两栏的单元格宽度，卡片内每行三栏
 export const stackThird = 'max-sm:w-[calc((100%-32px)/3)]'
@@ -29,9 +29,7 @@ export function Table({
     <div
       className={twMerge(
         'relative max-w-full overflow-x-auto',
-        framed
-          ? 'rounded-md border border-border [--edge:16px]'
-          : '[--edge:24px] max-sm:[--edge:16px]',
+        framed ? 'rounded-md border border-border [--edge:12px]' : '[--edge:16px]',
         stack && 'max-sm:[--edge:0px]',
       )}
     >
@@ -58,7 +56,7 @@ export function Th({ className, ...props }: ComponentProps<'th'>) {
     <th
       scope="col"
       className={twMerge(
-        'h-control bg-muted px-3 text-left text-xs font-medium whitespace-nowrap text-foreground-muted first:pl-(--edge) last:pr-(--edge)',
+        'h-control-sm bg-muted px-3 text-left text-xs font-medium whitespace-nowrap text-foreground-muted first:pl-(--edge) last:pr-(--edge)',
         className,
       )}
       {...props}

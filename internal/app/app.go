@@ -11,9 +11,11 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/api"
@@ -40,6 +42,8 @@ type Deps struct {
 	UI http.Handler
 	// Restart 在在线更新安装完成后重启到新版本
 	Restart func()
+	// Ready 在开始监听后以实际监听地址调用
+	Ready func(address string)
 }
 
 // shutdownTimeout 是退出时等待进行中请求的上限
@@ -67,6 +71,8 @@ type server struct {
 	latest atomic.Pointer[string]
 	// updater 是本程序的在线更新
 	updater *selfUpdater
+	// listen 是实际监听地址，reserved 是被 Windows 保留而改用 listen 的配置地址，没有改用时为空
+	listen, reserved string
 }
 
 // Serve 在启动配置的监听地址上运行服务直到 ctx 结束；live 是已应用命令行覆盖的配置，设置保存后替换为新值供下一次请求读取，账户池在启动后于后台初始化
@@ -85,9 +91,16 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	defer slog.SetDefault(previous)
 	s.ledger.SetBodyCapture(boot.RequestLogBodies)
 	listener, err := net.Listen("tcp", boot.Listen)
+	if errors.Is(err, portReserved) {
+		if listener, err = listenAfter(boot.Listen); err == nil {
+			s.reserved = boot.Listen
+			slog.Warn(fmt.Sprintf("监听端口被 Windows 保留，改用其后第一个可用端口 | 配置=%s | 地址=%s", boot.Listen, listener.Addr()), "source", "service")
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("监听 %s: %w", boot.Listen, err)
 	}
+	s.listen = listener.Addr().String()
 	httpServer := &http.Server{
 		Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
 		ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
@@ -103,7 +116,8 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	s.refreshLater()
 	served := make(chan error, 1)
 	go func() { served <- httpServer.Serve(listener) }()
-	slog.Info("服务就绪 | 地址="+listener.Addr().String(), "source", "service")
+	slog.Info("服务就绪 | 地址="+s.listen, "source", "service")
+	deps.Ready(s.listen)
 	select {
 	case err := <-served:
 		return err
@@ -256,4 +270,25 @@ func securityHeaders(next http.Handler) http.Handler {
 		header.Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// portReserved 是 Windows 拒绝监听系统保留端口（Hyper-V、WSL2、Docker 的 WinNAT 保留端口段）时返回的 WSAEACCES
+const portReserved = syscall.Errno(10013)
+
+// listenAfter 从 address 的下一个端口起依次监听，返回第一个监听成功的监听器
+func listenAfter(address string) (net.Listener, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	first, err := strconv.Atoi(port)
+	if err != nil {
+		return nil, err
+	}
+	for next := first + 1; next <= 65535; next++ {
+		if listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(next))); err == nil {
+			return listener, nil
+		}
+	}
+	return nil, fmt.Errorf("%s 之后没有可监听的端口", address)
 }

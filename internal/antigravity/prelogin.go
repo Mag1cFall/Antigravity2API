@@ -5,12 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	crand "crypto/rand"
-	_ "embed"
+	"embed"
 	"encoding/hex"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -33,19 +35,31 @@ var preloginLinux327 []byte
 //go:embed prelogin_linux_src2747.bin.gz
 var preloginLinux2747 []byte
 
-// preloginTemplate 为一个系统的登录前错误上报模板：日志源 327 的结构化帧批次与 2747 的事件批次，install 为模板中的 installation_id
+// preloginLater 为登录前错误上报之后各系统继续发出的批次，文件名为 prelogin_<系统>_after<序号>.bin.gz
+//
+//go:embed prelogin_*_after*.bin.gz
+var preloginLater embed.FS
+
+// preloginTemplate 为一个系统的登录前错误上报模板：日志源 327 的结构化帧批次与 2747 的事件批次，install 为模板中的 installation_id，later 为之后继续发出的批次
 type preloginTemplate struct {
 	src327   []byte
 	src2747  []byte
 	install  []byte
 	sent327  uint64
 	sent2747 uint64
+	later    []preloginBatch
+}
+
+// preloginBatch 为一个登录前批次的正文模板与其中的上报时刻
+type preloginBatch struct {
+	data []byte
+	sent uint64
 }
 
 // preloginTemplates 为各系统的登录前错误上报模板，登录只在本机系统上发起，故只含 windows 与 linux
 var preloginTemplates = map[string]preloginTemplate{
-	"windows": loadPreloginTemplate(preloginWindows327, preloginWindows2747),
-	"linux":   loadPreloginTemplate(preloginLinux327, preloginLinux2747),
+	"windows": loadPreloginTemplate("windows", preloginWindows327, preloginWindows2747),
+	"linux":   loadPreloginTemplate("linux", preloginLinux327, preloginLinux2747),
 }
 
 // gunzip 解压一段 gzip 字节
@@ -61,10 +75,23 @@ func gunzip(data []byte) []byte {
 	return out
 }
 
-// loadPreloginTemplate 解压两个批次并取出模板中的 installation_id 与上报时刻
-func loadPreloginTemplate(gz327, gz2747 []byte) preloginTemplate {
+// loadPreloginTemplate 解压一个系统的各批次并取出模板中的 installation_id 与上报时刻
+func loadPreloginTemplate(system string, gz327, gz2747 []byte) preloginTemplate {
 	src327, src2747 := gunzip(gz327), gunzip(gz2747)
 	t := preloginTemplate{src327: src327, src2747: src2747}
+	names, _ := fs.Glob(preloginLater, "prelogin_"+system+"_after*.bin.gz")
+	slices.Sort(names)
+	for _, name := range names {
+		gz, _ := preloginLater.ReadFile(name)
+		data := gunzip(gz)
+		batch := preloginBatch{data: data}
+		for _, node := range pbParse(data) {
+			if node.num == 4 && node.wire == 0 {
+				batch.sent = node.u
+			}
+		}
+		t.later = append(t.later, batch)
+	}
 	for _, node := range pbParse(src327) {
 		if node.num == 4 && node.wire == 0 {
 			t.sent327 = node.u
@@ -214,28 +241,26 @@ func shiftAddresses(text []byte, imgDelta, heapDelta uint64) []byte {
 	})
 }
 
-// Prelogin 代登录开始时生成的设备在拿到 token 前发出官方 language_server 的登录前请求：unleash 与一次不带 Bearer 的 clearcut 错误上报
+// Prelogin 代登录开始时生成的设备在拿到 token 前发出官方 language_server 的登录前请求：unleash、一次不带 Bearer 的 clearcut 错误上报与其后的 clearcut 批次；browser、imgDelta、heapDelta 为本进程改写模板用的界面会话标识与地址偏移
 type Prelogin struct {
-	client    *Client
-	companion *Companion
+	client              *Client
+	companion           *Companion
+	browser             []byte
+	imgDelta, heapDelta uint64
 }
 
 // NewPrelogin 以登录开始的设备档案创建登录前虚拟进程，日志中的账户记为 login
 func NewPrelogin(device Device, proxy Proxy) *Prelogin {
 	client := NewClient("login", staticToken{}, device, proxy)
 	client.SetHub(HubState{}, nil)
-	return &Prelogin{client: client, companion: NewCompanion(client)}
+	return &Prelogin{client: client, companion: NewCompanion(client), browser: []byte(uuid.NewString()), imgDelta: uint64(rand.N(0x1000)) * 0x10000, heapDelta: uint64(rand.N(0x40)) * 0x4000000}
 }
 
-// Device 返回登录前虚拟进程的设备档案，拿到邮箱后由调用方补齐账户再交给账户池
-func (p *Prelogin) Device() Device {
-	return p.client.device
-}
-
-// Run 立即开始 unleash，并在启动后约 5.6 s 用设备 installation_id 发出一次登录前错误上报；ctx 结束时返回
+// Run 立即开始 unleash，在启动后约 5.6 s 用设备 installation_id 发出一次登录前错误上报，之后按模板中的上报时刻继续发出该系统的后续批次；ctx 结束时返回
 func (p *Prelogin) Run(ctx context.Context) {
 	go p.companion.Unleash(ctx)
-	if _, ok := preloginTemplates[p.client.device.OS]; !ok {
+	template, ok := preloginTemplates[p.client.device.OS]
+	if !ok {
 		<-ctx.Done()
 		return
 	}
@@ -244,30 +269,36 @@ func (p *Prelogin) Run(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	}
+	reported := time.Now()
 	p.reportErrors(ctx)
+	for _, batch := range template.later {
+		select {
+		case <-time.After(time.Until(reported.Add(time.Duration(batch.sent-template.sent2747) * time.Millisecond))):
+		case <-ctx.Done():
+			return
+		}
+		p.send(ctx, batch.data, batch.sent)
+	}
 	<-ctx.Done()
 }
 
 // reportErrors 发出登录前的两个 clearcut 批次：日志源 327 的结构化帧与 2747 的事件，均不带 Bearer
 func (p *Prelogin) reportErrors(ctx context.Context) {
 	template := preloginTemplates[p.client.device.OS]
-	deviceInstall := []byte(p.client.device.InstallationID)
-	browser := []byte(uuid.NewString())
-	imgDelta := uint64(rand.N(0x1000)) * 0x10000
-	heapDelta := uint64(rand.N(0x40)) * 0x4000000
-	now := time.Now().UnixMilli()
-	for _, batch := range []struct {
-		data []byte
-		sent uint64
-	}{{template.src327, template.sent327}, {template.src2747, template.sent2747}} {
-		body := rewritePrelogin(batch.data, template.install, deviceInstall, now-int64(batch.sent), browser, imgDelta, heapDelta)
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointClearcut, bytes.NewReader(body))
-		if err != nil {
-			continue
-		}
-		request.Header.Set("Content-Type", "application/octet-stream")
-		p.client.discard(p.client.web, request)
+	p.send(ctx, template.src327, template.sent327)
+	p.send(ctx, template.src2747, template.sent2747)
+}
+
+// send 以本进程的界面会话标识与地址偏移改写一个登录前批次并不带 Bearer 发出，时刻平移到当前
+func (p *Prelogin) send(ctx context.Context, data []byte, sent uint64) {
+	template := preloginTemplates[p.client.device.OS]
+	body := rewritePrelogin(data, template.install, []byte(p.client.device.InstallationID), time.Now().UnixMilli()-int64(sent), p.browser, p.imgDelta, p.heapDelta)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointClearcut, bytes.NewReader(body))
+	if err != nil {
+		return
 	}
+	request.Header.Set("Content-Type", "application/octet-stream")
+	p.client.discard(p.client.web, request)
 }
 
 // staticToken 是登录前虚拟进程用的空 token 源，unleash 与不带 Bearer 的 clearcut 不读取它

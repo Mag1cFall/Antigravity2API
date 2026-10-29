@@ -15,12 +15,27 @@ export function rangeQuery(rangeMs: number) {
   })
 }
 
-// useUsage 读取一段时间内的用量报告，分桶按本机时区对齐
-export function useUsage(rangeMs: number, bucket: UsageBucketSize = 'auto') {
+// UsageFilters 是按维度筛选的取值，同一维度的多个取值为或关系
+export type UsageFilters = Partial<Record<string, string[]>>
+
+// filterQuery 把维度筛选写入查询参数，多个取值以逗号分隔
+export function filterQuery(query: URLSearchParams, filters: UsageFilters) {
+  for (const [dimension, values] of Object.entries(filters)) {
+    if (values?.length) query.set(dimension, values.join(','))
+  }
+  return query
+}
+
+// useUsage 读取一段时间内符合筛选的用量报告，分桶按本机时区对齐
+export function useUsage(
+  rangeMs: number,
+  bucket: UsageBucketSize = 'auto',
+  filters: UsageFilters = {},
+) {
   return useQuery({
-    queryKey: ['usage', rangeMs, bucket],
+    queryKey: ['usage', rangeMs, bucket, filters],
     queryFn: () => {
-      const query = rangeQuery(rangeMs)
+      const query = filterQuery(rangeQuery(rangeMs), filters)
       query.set('tz', Intl.DateTimeFormat().resolvedOptions().timeZone)
       query.set('bucket', bucket)
       return api<UsageReport>('/api/usage?' + query.toString())

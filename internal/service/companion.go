@@ -41,15 +41,6 @@ func boot(ctx, watch context.Context, client *antigravity.Client, id string, log
 	return companion, initialization, err
 }
 
-// setCatalog 以伴随请求周期读取的目录更新仍在调度中的账户
-func (s *Service) setCatalog(current *account, catalog antigravity.Catalog) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.accounts[current.id] == current {
-		s.setModels(current.id, catalog.PublicModels())
-	}
-}
-
 // hubPath 返回账户虚拟 Hub 状态文件的路径
 func (s *Service) hubPath(id string) string {
 	return filepath.Join(s.live.Load().RuntimeDir, "hub", id+".json")

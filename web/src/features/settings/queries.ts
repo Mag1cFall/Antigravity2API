@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
+import { invalidate, settingsDependents } from '@/app/sync'
 import type { Settings } from '@/features/settings/types'
 import { api } from '@/lib/api'
 
@@ -19,7 +20,7 @@ export function useSaveSettings() {
       api<Settings>('/api/settings', { method: 'PATCH', json: { values } }),
     onSuccess: (result) => {
       client.setQueryData(settingsKey, result)
-      void client.invalidateQueries({ queryKey: ['models'] })
+      invalidate(client, settingsDependents)
     },
   })
 }

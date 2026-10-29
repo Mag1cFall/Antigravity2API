@@ -122,7 +122,7 @@ export function AboutSection() {
   const started = new Date(data.started_at)
   const summary = ['Antigravity2API ' + data.version, data.host, data.listen].join(' · ')
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-4">
       <div className="flex items-center gap-4">
         <img src={logo} alt="" width={64} height={64} className="size-16 shrink-0" />
         <div className="min-w-0">

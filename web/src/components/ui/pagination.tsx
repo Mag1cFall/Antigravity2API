@@ -38,7 +38,7 @@ export function Pagination({
   return (
     <nav
       aria-label={label}
-      className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-6 py-3 max-sm:px-4"
+      className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-2"
     >
       <p className="text-sm text-foreground-muted tabular-nums">{summary}</p>
       {pages > 1 && (

@@ -22,8 +22,6 @@ import (
 )
 
 const (
-	// ClientVersion 为所模拟的官方客户端版本
-	ClientVersion = "2.26.0"
 	// EndpointProd 为登录后首次 loadCodeAssist 使用的 cloudcode 端点
 	EndpointProd = "https://cloudcode-pa.googleapis.com"
 	// EndpointDaily 为个人账户初始化后全部 cloudcode 请求使用的端点
@@ -174,7 +172,7 @@ func (e *UpstreamError) RetryAt(now time.Time) time.Time {
 	return time.Time{}
 }
 
-// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，web 为头像等 HTTP/2 请求的客户端，auth 为带 Bearer 的 HTTP/2 客户端，market 让同一虚拟进程的插件市场目录只读取一次，state 为伴随请求所需的账户状态
+// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，web 为头像等 HTTP/2 请求的客户端，auth 为带 Bearer 的 HTTP/2 客户端，market 让同一虚拟进程的插件市场目录只读取一次，state 为伴随请求所需的账户状态，observe 接收每次成功读取的账户状态
 type Client struct {
 	account string
 	http    *http.Client
@@ -189,6 +187,27 @@ type Client struct {
 	market  sync.Mutex
 	state   companionState
 	hub     hub
+	observe func(Observed)
+}
+
+// Observed 是客户端一次成功读取的账户状态，只有读到的那一项非空
+type Observed struct {
+	Assist   *LoadCodeAssistResponse
+	Settings *UserInfoResponse
+	Catalog  *Catalog
+	Quota    *QuotaSummary
+}
+
+// Observe 设置接收每次成功读取的套餐与项目、账户设置、目录与额度摘要的函数，在发出请求前调用
+func (c *Client) Observe(observe func(Observed)) {
+	c.observe = observe
+}
+
+// notify 把一次成功读取交给 Observe 设置的函数
+func (c *Client) notify(observed Observed) {
+	if c.observe != nil {
+		c.observe(observed)
+	}
 }
 
 // NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode 走只开 HTTP/1 的 Transport，Authorization 由 oauth2.Transport 注入；头像、tokeninfo、unleash 与 clearcut 走克隆的 http.DefaultTransport，clearcut 另由 oauth2.Transport 注入 Authorization
@@ -239,9 +258,17 @@ func (c *Client) Project() string {
 
 // Tier 表示 loadCodeAssist 返回的套餐
 type Tier struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description"`
+	AvailableCredits []Credit `json:"availableCredits"`
+}
+
+// Credit 表示付费套餐的一种积分：余额为零时上游省略 creditAmount，MinimumCreditAmountForUsage 为以积分生成所需的最低余额
+type Credit struct {
+	CreditType                  string `json:"creditType"`
+	CreditAmount                string `json:"creditAmount"`
+	MinimumCreditAmountForUsage string `json:"minimumCreditAmountForUsage"`
 }
 
 // LoadCodeAssistResponse 表示账户的套餐与项目
@@ -303,70 +330,79 @@ type Initialization struct {
 	Quota    QuotaSummary
 }
 
-// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 之后 fetchUserInfo、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，fetchUserInfo 之后依次 listExperiments、fetchConfig 与 cascadeNuxes
+// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 结束 42–48 ms 后 fetchUserInfo、listExperiments、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，listExperiments 结束 551–613 ms 后发 fetchConfig，listExperiments 失败时不发；其余四个请求全部结束后发 cascadeNuxes；只有 loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
 func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 	var result Initialization
-	if _, err := c.LoadCodeAssist(ctx, EndpointProd); err != nil {
-		return Initialization{}, err
-	}
-	settings := func() (err error) {
+	user := optional(func() (err error) {
+		if result.User, err = c.Userinfo(ctx); err == nil {
+			c.avatar(ctx, result.User.Picture)
+		}
+		return err
+	})
+	settings := optional(func() (err error) {
 		result.Settings, err = c.FetchUserInfo(ctx)
 		return err
-	}
+	})
 	assist := func() (err error) {
 		result.Assist, err = c.LoadCodeAssist(ctx, EndpointDaily)
 		return err
 	}
-	err := parallel(func() (err error) {
-		if result.User, err = c.Userinfo(ctx); err == nil {
-			c.avatar(ctx, result.User.Picture)
+	catalog := func() (err error) {
+		if result.Catalog, err = c.FetchAvailableModels(ctx); err == nil {
+			c.recordCatalog(result.Catalog)
 		}
 		return err
-	}, func() error {
-		if err := assist(); err != nil {
-			return err
-		}
-		return settings()
+	}
+	quota := optional(func() (err error) {
+		result.Quota, err = c.RetrieveUserQuotaSummary(ctx)
+		return err
 	})
-	if err != nil {
+	experiments := func() error {
+		if c.listExperiments(ctx) == nil && pause(ctx, 551, 613) == nil {
+			c.fetchConfig(ctx)
+		}
+		return nil
+	}
+	nux := optional(func() error { return c.nuxes(ctx) })
+	controls := optional(func() error {
+		return c.post(ctx, c.base+"/v1internal:fetchAdminControls", projectRequest{Project: c.Project()}, nil)
+	})
+	if _, err := c.LoadCodeAssist(ctx, EndpointProd); err != nil {
 		return Initialization{}, err
 	}
-	err = parallel(func() (err error) {
-		if result.User, err = c.Userinfo(ctx); err == nil {
-			c.avatar(ctx, result.User.Picture)
-		}
-		return err
-	}, func() error {
-		if err := assist(); err != nil {
+	if err := parallel(user, sequence(assist, settings)); err != nil {
+		return Initialization{}, err
+	}
+	err := parallel(user, sequence(assist, func() error {
+		if err := pause(ctx, 42, 48); err != nil {
 			return err
 		}
-		return parallel(func() error {
-			if err := settings(); err != nil {
-				return err
-			}
-			if err := c.listExperiments(ctx); err != nil {
-				return err
-			}
-			if err := c.fetchConfig(ctx); err != nil {
-				return err
-			}
-			return c.nuxes(ctx)
-		}, func() (err error) {
-			result.Quota, err = c.RetrieveUserQuotaSummary(ctx)
-			return err
-		}, func() (err error) {
-			if result.Catalog, err = c.FetchAvailableModels(ctx); err == nil {
-				c.recordCatalog(result.Catalog)
-			}
-			return err
-		}, func() error {
-			return c.post(ctx, c.base+"/v1internal:fetchAdminControls", projectRequest{Project: c.Project()}, nil)
-		})
-	})
+		return parallel(experiments, sequence(func() error { return parallel(settings, quota, catalog, controls) }, nux))
+	}))
 	if err != nil {
 		return Initialization{}, err
 	}
 	return result, nil
+}
+
+// optional 把伴随请求包成不中断初始化的步骤：官方客户端在这些请求失败时照常继续后续请求，失败由请求日志记录
+func optional(step func() error) func() error {
+	return func() error {
+		step()
+		return nil
+	}
+}
+
+// sequence 依次执行各步骤，返回第一个错误并停止
+func sequence(steps ...func() error) func() error {
+	return func() error {
+		for _, step := range steps {
+			if err := step(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // parallel 并发执行各请求，全部结束后返回其中的错误，文字相同的错误只保留一个
@@ -416,6 +452,7 @@ func (c *Client) LoadCodeAssist(ctx context.Context, base string) (LoadCodeAssis
 	c.mu.Lock()
 	c.project, c.state.tier = response.CloudAICompanionProject, tier
 	c.mu.Unlock()
+	c.notify(Observed{Assist: &response})
 	return response, nil
 }
 
@@ -443,13 +480,18 @@ func (c *Client) FetchUserInfo(ctx context.Context) (UserInfoResponse, error) {
 	c.mu.Lock()
 	c.state.region, c.state.telemetry = response.RegionCode, response.UserSettings.TelemetryEnabled
 	c.mu.Unlock()
+	c.notify(Observed{Settings: &response})
 	return response, nil
 }
 
 // RetrieveUserQuotaSummary 读取两组额度桶的剩余比例与重置时间
 func (c *Client) RetrieveUserQuotaSummary(ctx context.Context) (QuotaSummary, error) {
 	var summary QuotaSummary
-	return summary, c.post(ctx, c.base+"/v1internal:retrieveUserQuotaSummary", projectRequest{Project: c.Project()}, &summary)
+	if err := c.post(ctx, c.base+"/v1internal:retrieveUserQuotaSummary", projectRequest{Project: c.Project()}, &summary); err != nil {
+		return QuotaSummary{}, err
+	}
+	c.notify(Observed{Quota: &summary})
+	return summary, nil
 }
 
 type assistMetadata struct {

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
@@ -48,6 +49,9 @@ type account struct {
 	Shared map[string][]string `json:"shared,omitempty"`
 	// AICredits 为真时额度用尽后以 AI 积分继续生成
 	AICredits bool `json:"ai_credits"`
+	// CreditBalance 为 Google One AI 积分余额，CreditMinimum 为以积分生成所需的最低余额，付费套餐没有该积分时都省略
+	CreditBalance *int64 `json:"credit_balance,omitempty"`
+	CreditMinimum *int64 `json:"credit_minimum,omitempty"`
 	// Device 是账户的设备档案
 	Device device `json:"device"`
 }
@@ -128,6 +132,10 @@ func (s *server) account(status service.AccountStatus, now time.Time) account {
 		ID: status.ID, Label: status.Label, Tier: status.Tier, Project: status.Project, Proxy: redactProxy(status.Proxy), Priority: status.Priority, AddedAt: status.AddedAt.UTC(),
 		Active: status.Active, Error: status.Error, VerifyURL: verifyURL(status.Error), Quota: []quotaBucket{}, Shared: status.Shared, AICredits: status.AICredits,
 		Device: device{Device: status.Device, Hostname: status.Device.Hostname(), UserAgent: status.Device.UserAgent()},
+	}
+	if balance, err := strconv.ParseInt(status.CreditBalance, 10, 64); err == nil {
+		minimum, _ := strconv.ParseInt(status.CreditMinimum, 10, 64)
+		item.CreditBalance, item.CreditMinimum = &balance, &minimum
 	}
 	if status.PaidTier != "" {
 		item.Tier = status.PaidTier

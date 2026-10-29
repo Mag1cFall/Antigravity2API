@@ -32,7 +32,7 @@
 - **token 计数**：按模型族本地计算输入 token，GPT-OSS 按官方聊天模板渲染后计数，Gemini 与 Claude 族同一会话以上游实际用量校准
 - **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置，界面支持简体中文、繁体中文（台湾）与英文；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志与请求账本**：结构化日志按请求记录选号、换号、冷却与上游尝试；SQLite 账本保存每个请求的账户、模型、token、缓存命中与分段耗时，并按官方 API 单价估算费用
-- **登录方式**：浏览器登录、粘贴授权码登录、导入本机官方客户端的账户、从另一台电脑配对上传
+- **登录方式**：浏览器登录、粘贴授权码登录、导入本机官方客户端的账户、从另一台电脑配对上传，账户 JSON 导出与导入（兼容 Antigravity Manager、CLIProxyAPI、sub2api、gcli2api、opencode-antigravity-auth 与 antigravity-claude-proxy 的账户文件）
 - **代理**：HTTP、HTTPS、SOCKS5 全局代理与每账户代理，未设置时跟随系统代理
 
 ## 支持的模型
@@ -55,7 +55,7 @@
 
 思考档位按以下顺序确定：
 
-1. 模型名中指定的档位：`claude-opus-5-5-high` 这类带档位的目录 ID、括号后缀 `claude-opus-5-5(low)`（括号内可写 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 或思考预算 token 数）、`-thinking` 后缀（High）
+1. 模型名中指定的档位：`claude-opus-5-5-high` 这类带档位的目录 ID、括号后缀 `claude-opus-5-5(low)`（括号内可写 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、思考预算 token 数，或不指定档位的 `auto`）、`-thinking` 后缀（High）
 2. 请求的思考参数：OpenAI `reasoning_effort` 的 `none`、`minimal`、`low` 为 Low，`medium` 为 Medium，`high`、`xhigh`、`max` 为 High；Anthropic `thinking.budget_tokens` 与 Gemini `thinkingConfig.thinkingBudget` 不超过 1024 为 Low，不超过 8192 为 Medium，更大为 High，`-1` 等负数不指定档位
 3. Medium；模型只有一档时取该档
 
@@ -145,7 +145,7 @@ docker run -d --name antigravity2api -p 8017:8017 -v ./data:/data ghcr.io/mag1cf
 
 `PROXY` 是全局 HTTP、HTTPS 或 SOCKS5 代理，例如 `socks5://127.0.0.1:1080`、`http://user:pass@127.0.0.1:7890`，登录、token 刷新、账户初始化、生成与伴随请求都经过它。代理出口需要位于 Antigravity 支持的地区。
 
-- 代理池：`PROXY` 中的代理（逗号分隔，管理端按行填写，只填一个时也是）组成代理池，每个账户固定使用账户最少的一个代理；登录与在线更新等不属于某个账户的请求使用第一个代理
+- 代理池：`PROXY` 中的代理（逗号分隔，管理端按行填写，只填一个时也是）组成代理池，每个账户绑定账户最少的一个代理；登录与在线更新等不属于某个账户的请求使用第一个代理
 - 检测：服务启动时、每 5 分钟、公开 API 请求访问上游遇到连接错误时（连续多次合并为一次）、保存设置时与设置页点“立即检测”时检测各代理，代理不可用时其上的账户改用可用代理中账户最少的一个；设置页显示各代理的状态、延迟与使用它的账户
 - 系统代理：`PROXY` 为空时跟随系统代理，即环境变量 `HTTPS_PROXY`、`HTTP_PROXY`、`NO_PROXY`，Windows 上另读取系统代理设置
 - 账户代理：单个账户可以在管理端的账户页设置自己的代理，该账户的全部请求改走这个代理，填 `direct` 时直连
@@ -301,7 +301,7 @@ docs/                 # 协议、开发与日志文档
 
 | 变量 | 说明 | 默认值 |
 | --- | --- | --- |
-| `LISTEN` | 公开 API、管理 API 与管理端的监听地址 | `127.0.0.1:8017` |
+| `LISTEN` | 公开 API、管理 API 与管理端的监听地址；端口被 Windows 保留时改用其后第一个可用端口，管理端顶部显示实际地址 | `127.0.0.1:8017` |
 | `API_KEYS` | 公开 API key，逗号分隔多个 | 空 |
 | `AUTH_DIR` | 账户目录 | `auth` |
 | `RUNTIME_DIR` | 运行数据目录：请求账本 `requests.db`、日志 `logs/`、上传的 `files/`、生成媒体 `media/`、会话记录、模型目录与其他运行状态 | `runtime` |
@@ -322,7 +322,7 @@ docs/                 # 协议、开发与日志文档
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
 | `LOG_FORMAT` | 日志格式：`json` 或 `text` | `json` |
 | `LOG_FILE` | 同时把日志写入 `RUNTIME_DIR/logs/`，单文件 10 MB 轮转 | `true` |
-| `LOG_MAX_TOTAL_MB` | 日志文件总量上限：保留 `LOG_MAX_TOTAL_MB / 10 − 1` 个轮转文件，超出时删除最旧的，不小于 20 | `500` |
+| `LOG_MAX_TOTAL_MB` | 日志文件总量上限，不小于 20：保留 `LOG_MAX_TOTAL_MB / 10 − 1` 个轮转文件，超出时删除最旧的 | `500` |
 | `REQUEST_LOG_BODIES` | 保存请求与响应正文 | `false` |
 | `ADMIN_AUTH_ENABLED` | 远程访问管理端时的登录 | `false` |
 | `ADMIN_USERNAME` | 管理端用户名 | `admin` |
@@ -353,29 +353,8 @@ docs/                 # 协议、开发与日志文档
 
 各命令都接受 `--listen`、`--auth`、`--runtime` 与 `--proxy`，分别覆盖 `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR` 与 `PROXY`。命令出错时把原因写到标准错误并以退出码 1 结束，例如服务未运行时 `status` 打印 `服务未在 <LISTEN> 运行: <原因>`；`accounts` 与 `status` 的输出格式见 [开发文档](docs/development.md#子命令输出)。桌面版的可执行文件同样接受这些子命令，不带子命令时打开桌面窗口，`--hidden` 启动后只显示托盘。
 
-## 故障排除
-
-### Windows 端口被系统保留
-
-如果启动时提示 `LISTEN` 配置的端口被占用，任务管理器中又找不到占用进程，可能是 Hyper-V、WSL2 或 Docker 的 NAT 服务保留了端口段。以下命令需要在管理员权限的 PowerShell 或 CMD 中运行。
-
-```powershell
-netsh interface ipv4 show excludedportrange protocol=tcp
-```
-
-如果 `8017` 落在输出的 `Start Port` 和 `End Port` 范围内，可以修改 `LISTEN`，或重启 WinNAT 服务后再次检查：
-
-```powershell
-net stop winnat
-net start winnat
-```
-
-### 账户需要验证
-
-上游要求账户验证时，管理端账户页显示验证链接，该账户停止接收请求。在浏览器中用该账户打开链接完成验证，再点击账户的“重试”恢复。
-
 ## 注意
 
-Antigravity 内部协议随官方客户端更新，模型 ID 以服务启动后返回的动态目录为准。欢迎提 Issue 和 PR。
+欢迎提 Issue 和 PR。
 
 开发与贡献见 [docs/development.md](docs/development.md)，登录、初始化、请求信封与流式解码见 [docs/protocol.md](docs/protocol.md)，日志与请求账本见 [docs/logging.md](docs/logging.md)，官方客户端的抓包与静态分析方法见 [docs/reverse-engineering.md](docs/reverse-engineering.md)。

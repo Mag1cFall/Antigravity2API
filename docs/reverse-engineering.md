@@ -40,7 +40,7 @@ LS 的出站请求全部使用 Go 标准库：cloudcode 请求为 HTTP/1.1；use
 每个 HTTP 交换记录一行：
 
 ```json
-{"sequence": 59, "sender": "language_server", "client": ["127.0.0.1", 61486], "startedAt": 1791960442.96527, "endedAt": 1791960449.91067, "method": "POST", "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", "httpVersion": "HTTP/1.1", "tls": {"sni": "daily-cloudcode-pa.googleapis.com", "alpn": "", "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"}, "requestHeaders": [["Host", "daily-cloudcode-pa.googleapis.com"], ["User-Agent", "antigravity/hub/2.25.0 (aidev_client; os_type=windows; arch=amd64; cl=1003374690)"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer <token>"], ["Content-Type", "application/json"], ["Accept-Encoding", "gzip"]], "requestBody": "00059.request.bin", "status": 200, "responseHeaders": [["Content-Type", "text/event-stream"], ["Transfer-Encoding", "chunked"]], "responseBody": "00059.response.sse"}
+{"sequence": 59, "sender": "language_server", "client": ["127.0.0.1", 61486], "startedAt": 1791960442.96527, "endedAt": 1791960449.91067, "method": "POST", "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", "httpVersion": "HTTP/1.1", "tls": {"sni": "daily-cloudcode-pa.googleapis.com", "alpn": "", "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"}, "requestHeaders": [["Host", "daily-cloudcode-pa.googleapis.com"], ["User-Agent", "antigravity/hub/2.28.1 (aidev_client; os_type=windows; arch=amd64; cl=1009128362)"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer <token>"], ["Content-Type", "application/json"], ["Accept-Encoding", "gzip"]], "requestBody": "00059.request.bin", "status": 200, "responseHeaders": [["Content-Type", "text/event-stream"], ["Transfer-Encoding", "chunked"]], "responseBody": "00059.response.sse"}
 ```
 
 请求头保持发送顺序与重复项，正文保存原始字节。对照时比较头集合与顺序、正文字段顺序、分块方式与连接复用，压缩或重新序列化会隐藏这些差异。
@@ -132,7 +132,7 @@ user-agent: electron-builder
 - QUIC 取 `github.com/refraction-networking/uquic` 的 `QUICSpec`（TLS 层为 `github.com/refraction-networking/utls`）：ClientHello 只含 TLS 1.3 的三个密码套件，扩展与传输参数每次连接重新排列，`version_information` 带一个 GREASE 版本，另有一个 GREASE 传输参数与 AES-128-GCM 的 GREASE ECH
 - Initial 按 Chromium `QuicPacketCreator::MultiPacketChaosProtect` 与 `QuicChaosProtector` 布置：第一个 Initial 放 ClientHello 开头 55–86 字节与末尾，第二个放中间；每个包再把 CRYPTO 帧拆成多段，加 2–10 个 PING，PADDING 分散在各帧之间，帧序随机
 - HTTP/3 握手完成后依次打开控制、QPACK 解码器、QPACK 编码器单向流，控制流的 SETTINGS 按标识符升序并带一个 GREASE 设置，其后是一个 GREASE 帧；收到对端 SETTINGS 后发出请求：编码器流设置动态表容量并插入静态表中没有精确匹配的字段，HEADERS 只引用表项，引用动态表的响应头块在解码器流上确认
-- 经 HTTP 代理时 CONNECT 带 `Host`、`Proxy-Connection: keep-alive` 与 User-Agent `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/<ClientVersion> Chrome/152.0.7977.130 Electron/44.4.3 Safari/537.36`
+- 经 HTTP 代理时 CONNECT 带 `Host`、`Proxy-Connection: keep-alive` 与 User-Agent `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/<ClientVersion> Chrome/<ChromeVersion> Electron/<ElectronVersion> Safari/537.36`
 
 `accept-language` 按 Chromium 规则把系统语言解析为 Electron 随附的 55 个语言包之一：
 
@@ -154,7 +154,7 @@ ru sk sl sr sv sw ta te th tr uk ur vi zh-CN zh-TW
 响应中的 `version` 高于 `internal/antigravity` 的 `ClientVersion` 时，管理端提示有新版本。对齐步骤：
 
 1. 下载并安装新版本，记下 `package.json` 的版本与各系统 `language_server --stamp` 的 CL；灰度版本只对部分 `x-user-staging-id` 返回，换随机标识多次读取各系统的清单可得到下载地址
-2. 更新 `internal/antigravity/client.go` 的 `ClientVersion`、`internal/antigravity/device.go` 的 `changelists` 与 `internal/antigravity/companion.go` 的 `serverRuntimes`（unleash `platformVersion`，取自各系统 `go version -m` 的工具链行）
+2. 更新 `internal/antigravity/version.go`：`ClientVersion`、`ElectronVersion`、`ChromeVersion`、各系统的 `changelists` 与 `serverRuntimes`（unleash `platformVersion`，取自各系统 `go version -m` 的工具链行）
 3. 用 `go version -m` 比较 LS 的 Go 工具链；主版本变化时，用新版本现场的 ClientHello 与产品逐字节对照；Electron 版本变化时，用新版本的更新清单现场对照 `internal/app/updater.go` 的 ClientHello、HTTP/2 帧与 CONNECT 的 User-Agent，不经代理的现场对照 `updater_quic.go` 的 QUIC Initial 与 `updater_h3.go` 的 HTTP/3 帧
 4. 抓登录、冷启动、空闲与各模型最小请求（第 2 节）
 5. 逐项对照：初始化与冷启动序列、周期请求清单与间隔、信封字段与顺序、`labels`、系统提示各段原文、模型目录字段、伴随请求
@@ -163,7 +163,7 @@ ru sk sl sr sv sw ta te th tr uk ur vi zh-CN zh-TW
 | 变化 | 位置 | 是否改码 |
 | --- | --- | --- |
 | 模型增删、档位、上限 | 账户实时目录 | 否 |
-| 版本号、构建号与 Go 运行时 | `ClientVersion`、`changelists`、`serverRuntimes` | 是 |
+| 版本号、构建号、Electron 与 Go 运行时 | `internal/antigravity/version.go` | 是 |
 | 系统提示段落原文 | `internal/prompt/official.txt` | 是 |
 | 系统提示中随实验开关与远端目录生成的内容 | `official.txt` 的模板字段与 `internal/antigravity` 中的取值，如推荐插件段与插件市场目录 | 是 |
 | 会话 clearcut 事件的执行配置、内置工具、提示段与实验开关名 | `internal/antigravity/session.json` | 是 |

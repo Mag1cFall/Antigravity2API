@@ -60,9 +60,6 @@ func (d Device) WithAccount(email string) Device {
 	return d
 }
 
-// changelists 为官方各系统 language_server 的构建号，即 User-Agent 中的 cl
-var changelists = map[string]string{"windows": "1005016104", "darwin": "1005016104", "linux": "1005016104"}
-
 // spaced 返回档案系统的官方 language_server 的 protojson 是否在结构逗号后加空格：protobuf detrand 以构建号为种子，构建号为奇数时加
 func (d Device) spaced() bool {
 	changelist, _ := strconv.Atoi(changelists[d.OS])

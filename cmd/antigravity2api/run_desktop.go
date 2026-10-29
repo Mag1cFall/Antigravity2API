@@ -42,12 +42,11 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	return desktop.Run(desktop.Options{
-		URL:     "http://" + loopback(cfg.Listen),
 		Title:   title,
 		DataDir: filepath.Join(cfg.RuntimeDir, "webview"),
 		Hidden:  *hidden,
-		Serve: func(ctx context.Context) error {
-			return serve(ctx, "desktop", cfg, o.overrides, false, func() {
+		Serve: func(ctx context.Context, ready func(string)) error {
+			return serve(ctx, "desktop", cfg, o.overrides, func(address string) { ready(loopback(address)) }, func() {
 				go func() {
 					if err := desktop.Restart(); err != nil {
 						slog.Error("在线更新重启失败 | 错误="+err.Error(), "source", "service")

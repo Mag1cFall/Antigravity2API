@@ -12,9 +12,15 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { AccountReason, AccountStatusBadge } from '@/features/accounts/AccountStatus'
 import type { RowActions } from '@/features/accounts/AccountTable'
 import { QuotaCell } from '@/features/accounts/AccountTable'
-import { useSetCredits, useSetLabel, useSetPriority } from '@/features/accounts/actions'
+import {
+  quotaFailure,
+  useQuotaRefresh,
+  useSetCredits,
+  useSetLabel,
+  useSetPriority,
+} from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
-import { statusOf } from '@/features/accounts/status'
+import { creditsShort, statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { FamilyBadge, TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
@@ -179,6 +185,8 @@ export function AccountDetailSheet({
   const app = useMessages(appMessages)
   const { locale } = useI18n()
   const status = account ? statusOf(account) : undefined
+  const quotaRefresh = useQuotaRefresh()
+  const failure = account && quotaFailure(quotaRefresh, account)
   return (
     <Dialog
       open={account !== undefined}
@@ -202,7 +210,7 @@ export function AccountDetailSheet({
           }
           closeLabel={app.closeDialog}
         >
-          <div className="flex flex-col gap-8">
+          <div className="flex flex-col gap-6">
             <div className="flex flex-wrap items-center gap-2">
               <SwitchClientDialog email={account.id} variant="button" primary />
               {account.state === 'error' && (
@@ -282,6 +290,11 @@ export function AccountDetailSheet({
               }
             >
               <p className="text-sm text-foreground-muted">{m.detailQuotaHint}</p>
+              {failure && (
+                <p role="status" className="text-sm wrap-anywhere text-error-text">
+                  {fill(m.quotaRefreshFailed, { email: account.id, message: failure })}
+                </p>
+              )}
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 {groups.map((group) => (
                   <div key={group} className="flex flex-col gap-3 rounded-md bg-muted p-4">
@@ -314,6 +327,11 @@ export function AccountDetailSheet({
             <Block title={m.credits}>
               <p className="text-sm text-foreground-muted">{m.creditsHint}</p>
               <CreditsField account={account} />
+              {creditsShort(account) && account.credit_minimum !== undefined && (
+                <p role="status" className="text-sm text-warning-text">
+                  {fill(m.creditsLow, { minimum: formatNumber(account.credit_minimum, locale) })}
+                </p>
+              )}
             </Block>
             <Block
               title={m.detailUsage}
@@ -341,6 +359,18 @@ export function AccountDetailSheet({
                 <Row label={m.detailTier}>
                   <span className="font-mono text-xs">{account.tier || '—'}</span>
                 </Row>
+                {account.credit_balance !== undefined && account.credit_minimum !== undefined && (
+                  <Row label={m.detailCredits}>
+                    <span className={creditsShort(account) ? 'text-warning-text' : undefined}>
+                      {formatNumber(account.credit_balance, locale)}
+                    </span>
+                    <span className="ml-2 text-xs text-foreground-muted">
+                      {fill(m.creditsMinimum, {
+                        minimum: formatNumber(account.credit_minimum, locale),
+                      })}
+                    </span>
+                  </Row>
+                )}
                 <Row label={m.detailProject}>
                   <span className="font-mono text-xs">{account.project || '—'}</span>
                 </Row>

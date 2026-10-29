@@ -9,14 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -24,16 +22,14 @@ import (
 
 // Options 为桌面应用的运行参数
 type Options struct {
-	// URL 是管理端地址，主机部分为服务监听的回环地址与端口
-	URL string
 	// Title 是应用名、窗口标题与托盘提示
 	Title string
 	// DataDir 是 WebView 数据目录
 	DataDir string
 	// Hidden 为 true 时启动后只显示托盘
 	Hidden bool
-	// Serve 在取得单实例锁后运行服务，直到 ctx 取消
-	Serve func(ctx context.Context) error
+	// Serve 在取得单实例锁后运行服务，直到 ctx 取消；开始监听后以可从本机访问的监听地址（主机与端口）调用 ready
+	Serve func(ctx context.Context, ready func(address string)) error
 }
 
 // HiddenFlag 是开机启动附带的启动参数名，cmd 解析到它时设置 Options.Hidden
@@ -50,6 +46,9 @@ const openPrefix = "desktop:open:"
 
 // windowPrefix 为页面顶栏窗口按钮的消息前缀
 const windowPrefix = "desktop:window:"
+
+// routePrefix 为页面报告当前路径与查询的消息前缀
+const routePrefix = "desktop:route:"
 
 // maximisedEvent 是通知页面窗口最大化状态的事件名
 const maximisedEvent = "desktop:maximised"
@@ -69,6 +68,11 @@ var windowActions = map[string]func(*application.WebviewWindow){
 //go:embed icon.png
 var icon []byte
 
+// trayTemplate 是 macOS 菜单栏的单色模板图标，系统按菜单栏配色着色
+//
+//go:embed tray-template.png
+var trayTemplate []byte
+
 // pageScript 在页面中转交外链与窗口按钮，并实现无边框窗口的拖动与边缘缩放
 //
 //go:embed page.js
@@ -83,10 +87,8 @@ var loadedEvents = []events.WindowEventType{
 
 // Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘（隐藏启动只创建托盘，显示时创建窗口），阻塞到退出；已有实例时唤起它的窗口并退出本进程；Windows 缺少 WebView2 运行时时只创建托盘，管理端在默认浏览器中打开
 func Run(options Options) error {
-	page, err := windowURL(options.URL)
-	if err != nil {
-		return err
-	}
+	// page 是带桌面宿主参数的管理端地址，服务开始监听时写入
+	page := &url.URL{Scheme: "http", RawQuery: url.Values{shellQuery: {"desktop"}}.Encode()}
 	dataDir, err := filepath.Abs(options.DataDir)
 	if err != nil {
 		return err
@@ -97,11 +99,18 @@ func Run(options Options) error {
 	var window atomic.Pointer[application.WebviewWindow]
 	// opening 串行化主窗口的创建
 	var opening sync.Mutex
+	// placement 为上一个主窗口销毁前的位置、大小、最大化状态与页面路径，重建窗口时沿用
+	var placement struct {
+		sync.Mutex
+		bounds application.Rect
+		maxed  bool
+		route  string
+	}
 	webview := true
 	var open func() *application.WebviewWindow
 	show := func() {
 		if !webview {
-			openBrowser(app, options.URL)
+			openBrowser(app, origin(page))
 			return
 		}
 		opening.Lock()
@@ -125,6 +134,10 @@ func Run(options Options) error {
 		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
 			if target, ok := strings.CutPrefix(message, openPrefix); ok {
 				openBrowser(app, target)
+			} else if route, ok := strings.CutPrefix(message, routePrefix); ok && strings.HasPrefix(route, "/") {
+				placement.Lock()
+				placement.route = route
+				placement.Unlock()
 			} else if action, ok := strings.CutPrefix(message, windowPrefix); ok && windowActions[action] != nil {
 				if current := window.Load(); current != nil {
 					windowActions[action](current)
@@ -136,25 +149,46 @@ func Run(options Options) error {
 	if runtime.GOOS == "windows" && app.Env.Info().PlatformInfo["WebView2"] == "" {
 		webview = false
 		addTray(app, options, page, false, show)
-		return serve(app, options, page, func(ready bool) {
-			slog.Warn("没有找到 WebView2 运行时，管理端在默认浏览器中打开")
-			if ready && !options.Hidden {
+		slog.Warn("没有找到 WebView2 运行时，管理端在默认浏览器中打开")
+		return serve(app, options, func(address string) {
+			page.Host = address
+			if !options.Hidden {
 				app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) { show() })
 			}
 		})
 	}
 	open = func() *application.WebviewWindow {
-		created := app.Window.NewWithOptions(application.WebviewWindowOptions{
+		placement.Lock()
+		bounds, maxed, route := placement.bounds, placement.maxed, placement.route
+		placement.Unlock()
+		windowOptions := application.WebviewWindowOptions{
 			Title:            options.Title,
-			URL:              page.String(),
+			URL:              pageAt(page, route),
 			Frameless:        true,
 			Width:            1280,
 			Height:           800,
 			MinWidth:         960,
 			MinHeight:        600,
 			BackgroundColour: application.NewRGB(0xe6, 0xe7, 0xed),
-		})
+		}
+		if bounds.Width > 0 {
+			windowOptions.InitialPosition = application.WindowXY
+			windowOptions.X, windowOptions.Y, windowOptions.Width, windowOptions.Height = bounds.X, bounds.Y, bounds.Width, bounds.Height
+		}
+		created := app.Window.NewWithOptions(windowOptions)
+		if maxed {
+			created.Maximise()
+		}
 		window.Store(created)
+		created.RegisterHook(events.Common.WindowClosing, func(*application.WindowEvent) {
+			maxed, minimised, bounds := created.IsMaximised(), created.IsMinimised(), created.Bounds()
+			placement.Lock()
+			placement.maxed = maxed
+			if !maxed && !minimised {
+				placement.bounds = bounds
+			}
+			placement.Unlock()
+		})
 		created.OnWindowEvent(events.Common.WindowClosing, func(*application.WindowEvent) { window.CompareAndSwap(created, nil) })
 		notifyMaximised := func(*application.WindowEvent) {
 			created.ExecJS(fmt.Sprintf("window.dispatchEvent(new CustomEvent(%q,{detail:%t}))", maximisedEvent, created.IsMaximised()))
@@ -169,30 +203,33 @@ func Run(options Options) error {
 		}
 		return created
 	}
-	if !options.Hidden {
-		open()
-	}
 	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(*application.ApplicationEvent) { show() })
 
 	addTray(app, options, page, true, show)
-	return serve(app, options, page, func(ready bool) {
-		if current := window.Load(); !ready && current != nil {
-			current.Hide()
+	return serve(app, options, func(address string) {
+		page.Host = address
+		if !options.Hidden {
+			open()
 		}
 	})
 }
 
-// serve 在后台运行服务，开始监听或先行结束后以是否在监听调用 ready，再运行应用直到退出；服务先于退出结束时显示其错误并退出应用
-func serve(app *application.App, options Options, page *url.URL, ready func(bool)) error {
+// serve 在后台运行服务，开始监听后以监听地址调用 ready（先行结束时不调用），再运行应用直到退出；服务先于退出结束时显示其错误并退出应用
+func serve(app *application.App, options Options, ready func(address string)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var served error
 	finished := make(chan struct{})
+	listening := make(chan string, 1)
 	go func() {
 		defer close(finished)
-		served = options.Serve(ctx)
+		served = options.Serve(ctx, func(address string) { listening <- address })
 	}()
-	ready(waitServing(page.Host, finished))
+	select {
+	case address := <-listening:
+		ready(address)
+	case <-finished:
+	}
 	app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		go func() {
 			<-finished
@@ -211,31 +248,22 @@ func serve(app *application.App, options Options, page *url.URL, ready func(bool
 	return errors.Join(err, served)
 }
 
-// windowURL 返回带桌面宿主查询参数的窗口地址
-func windowURL(raw string) (*url.URL, error) {
-	page, err := url.Parse(raw)
-	if err != nil {
-		return nil, err
-	}
-	query := page.Query()
-	query.Set(shellQuery, "desktop")
-	page.RawQuery = query.Encode()
-	return page, nil
+// origin 返回管理端地址的协议与主机部分
+func origin(page *url.URL) string {
+	return page.Scheme + "://" + page.Host
 }
 
-// waitServing 等到 address 接受 TCP 连接时返回 true，服务先结束时返回 false
-func waitServing(address string, finished <-chan struct{}) bool {
-	for {
-		if conn, err := net.Dial("tcp", address); err == nil {
-			conn.Close()
-			return true
-		}
-		select {
-		case <-finished:
-			return false
-		case <-time.After(50 * time.Millisecond):
-		}
+// pageAt 返回管理端在 route（路径与查询）上的地址，查询带桌面宿主参数；route 为空或无法解析时为首页
+func pageAt(page *url.URL, route string) string {
+	address, err := url.Parse(route)
+	if route == "" || err != nil {
+		return page.String()
 	}
+	query := address.Query()
+	query.Set(shellQuery, "desktop")
+	target := *page
+	target.Path, target.RawQuery = address.Path, query.Encode()
+	return target.String()
 }
 
 // enableAutostart 登记开机启动；能隐藏到托盘的平台启动后只显示托盘

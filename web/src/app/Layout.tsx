@@ -2,7 +2,9 @@ import { Navigate, Outlet, useLocation } from 'react-router'
 
 import { useAdminEvents, useConnection } from '@/app/events'
 import { Header } from '@/app/Header'
+import { ListenNotice } from '@/app/ListenNotice'
 import { appMessages } from '@/app/messages'
+import { useRememberLocation } from '@/app/remember'
 import { Loading } from '@/components/ui/states'
 import { useSession } from '@/features/service/queries'
 import { useMessages } from '@/lib/i18n'
@@ -14,6 +16,7 @@ export function Layout() {
   const session = useSession()
   const authenticated = session.data?.authenticated === true
   useAdminEvents(authenticated)
+  useRememberLocation()
   const connection = useConnection()
   if (session.isPending) return <Loading label={m.loading} />
   if (session.data && !authenticated) {
@@ -38,6 +41,7 @@ export function Layout() {
         tabIndex={-1}
         className="relative flex min-h-0 flex-1 [scrollbar-gutter:stable_both-edges] flex-col overflow-y-auto focus:outline-none"
       >
+        <ListenNotice />
         {connection === 'closed' && (
           <p
             role="status"
@@ -46,7 +50,7 @@ export function Layout() {
             {m.eventsDisconnected}
           </p>
         )}
-        <div className="mx-auto flex w-full max-w-page flex-1 flex-col gap-6 px-6 pt-4 pb-12 max-sm:px-4 max-sm:pt-2">
+        <div className="mx-auto flex w-full max-w-page flex-1 flex-col gap-4 px-6 pt-2 pb-8 max-sm:px-4">
           <Outlet />
         </div>
       </main>

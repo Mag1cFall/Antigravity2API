@@ -1,12 +1,16 @@
 import {
+  Clock,
+  Hourglass,
   Info,
   ListOrdered,
+  LoaderCircle,
   MoreHorizontal,
   Network,
   RefreshCw,
   RotateCcw,
   Sparkles,
   Trash2,
+  TriangleAlert,
 } from 'lucide-react'
 import { memo, type ReactNode, useRef } from 'react'
 
@@ -23,15 +27,18 @@ import { Switch } from '@/components/ui/switch'
 import { Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
 import { AccountReason, AccountStatusBadge } from '@/features/accounts/AccountStatus'
+import { quotaFailure, type QuotaRefresh } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
+import { creditsShort, statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { FamilyBadge, TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
 import { quotaMessages } from '@/features/quota/messages'
 import { groupBuckets, groups, nameOf } from '@/features/quota/quota'
 import { QuotaLine } from '@/features/quota/QuotaLine'
-import { formatFullDateTime, formatRelative } from '@/lib/format'
+import { formatFullDateTime, formatNumber, formatRelative, type Locale } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { usePhone } from '@/lib/media'
 
 // RowActions 是账户行可执行的操作，onSelect 勾选或取消勾选账户
 export interface RowActions {
@@ -44,8 +51,18 @@ export interface RowActions {
   onRemove: (account: Account) => void
 }
 
-// QuotaCell 显示账户一个额度组的 5 小时与每周额度
-export function QuotaCell({ account, group, now }: { account: Account; group: string; now: Date }) {
+// QuotaCell 显示账户一个额度组的 5 小时与每周额度，compact 时窄屏两个窗口排成一行、只显示百分比
+export function QuotaCell({
+  account,
+  group,
+  now,
+  compact = false,
+}: {
+  account: Account
+  group: string
+  now: Date
+  compact?: boolean
+}) {
   const m = useMessages(accountMessages)
   const q = useMessages(quotaMessages)
   const buckets = groupBuckets(account.quota, group)
@@ -57,7 +74,11 @@ export function QuotaCell({ account, group, now }: { account: Account; group: st
     )
   }
   return (
-    <div className="flex flex-col gap-2">
+    <div
+      className={
+        'flex flex-col gap-2 ' + (compact ? 'max-sm:flex-1 max-sm:flex-row max-sm:gap-4' : '')
+      }
+    >
       {buckets.map((bucket) => (
         <QuotaLine
           key={bucket.bucket_id}
@@ -65,32 +86,67 @@ export function QuotaCell({ account, group, now }: { account: Account; group: st
           fraction={bucket.remaining_fraction}
           reset={bucket.reset_time}
           now={now}
+          compact={compact}
         />
       ))}
     </div>
   )
 }
 
-// IconTag 是只显示图标与可选数字的标签，全文在提示与读屏文字中
+// creditsTip 是 AI 积分标签的提示：开启超额使用、积分余额与使用积分所需的最低余额
+function creditsTip(m: (typeof accountMessages)['zh'], account: Account, locale: Locale) {
+  if (account.credit_balance === undefined || account.credit_minimum === undefined) {
+    return m.creditsTag
+  }
+  return [
+    m.creditsTag,
+    fill(m.creditsBalance, { balance: formatNumber(account.credit_balance, locale) }),
+    fill(creditsShort(account) ? m.creditsLow : m.creditsMinimum, {
+      minimum: formatNumber(account.credit_minimum, locale),
+    }),
+  ].join(' · ')
+}
+
+// IconTag 是只显示图标与可选数字的标签，label 是读屏文字，tip 是提示中的全文，缺省时与 label 相同
 function IconTag({
   label,
+  tip = label,
   icon,
+  warning = false,
   children,
 }: {
   label: string
+  tip?: string
   icon: ReactNode
+  warning?: boolean
   children?: ReactNode
 }) {
   return (
-    <Tooltip label={label}>
+    <Tooltip label={tip}>
       <span className="inline-flex">
-        <Tag>
+        <Tag warning={warning}>
           {icon}
           {children}
           <span className="sr-only">{label}</span>
         </Tag>
       </span>
     </Tooltip>
+  )
+}
+
+// CreditsTag 是开启 AI 积分超额使用的账户的积分标签，显示余额，余额低于最低余额时为警示色
+function CreditsTag({ account }: { account: Account }) {
+  const m = useMessages(accountMessages)
+  const { locale } = useI18n()
+  return (
+    <IconTag
+      label={m.creditsTag}
+      tip={creditsTip(m, account, locale)}
+      warning={creditsShort(account)}
+      icon={<Sparkles size={12} aria-hidden />}
+    >
+      {account.credit_balance !== undefined && formatNumber(account.credit_balance, locale)}
+    </IconTag>
   )
 }
 
@@ -159,6 +215,14 @@ function MoreActions({ account, actions }: { account: Account; actions: RowActio
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent>
+        <DropdownMenuItem
+          onSelect={() => {
+            actions.onDetails(account)
+          }}
+        >
+          <Info size={16} aria-hidden className="text-foreground-muted" />
+          {m.details}
+        </DropdownMenuItem>
         <RefreshQuotaItem
           onSelect={() => {
             actions.onRefreshQuota(account)
@@ -194,6 +258,9 @@ const AccountRow = memo(function AccountRow({
   selected,
   verifying,
   refreshing,
+  queued,
+  failure,
+  phone,
   actions,
 }: {
   account: Account
@@ -202,28 +269,31 @@ const AccountRow = memo(function AccountRow({
   selected: boolean
   verifying: boolean
   refreshing: boolean
+  queued: boolean
+  failure: string | undefined
+  phone: boolean
   actions: RowActions
 }) {
   const m = useMessages(accountMessages)
   const q = useMessages(quotaMessages)
   const { locale } = useI18n()
   return (
-    <tr>
-      <Td className="max-sm:basis-full">
-        <div className="flex items-start gap-3">
+    <tr className="max-sm:grid max-sm:grid-cols-[minmax(0,1fr)_auto] max-sm:gap-x-3 max-sm:gap-y-1 max-sm:py-2">
+      <Td className="max-sm:col-start-1">
+        <div className="flex items-start gap-3 max-sm:items-center">
           <Checkbox
             checked={selected}
             aria-label={fill(m.selectOf, { email: account.id })}
             onCheckedChange={(checked) => {
               actions.onSelect([account.id], checked === true)
             }}
-            className="mt-0.5"
+            className="mt-[2px] max-sm:mt-0"
           />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 max-sm:flex max-sm:items-center max-sm:gap-2">
             <Tooltip label={account.id}>
               <button
                 type="button"
-                className="block max-w-full truncate rounded-sm text-left text-sm font-medium hover:text-primary"
+                className="block max-w-full min-w-0 truncate rounded-sm text-left text-sm font-medium hover:text-primary"
                 onClick={() => {
                   actions.onDetails(account)
                 }}
@@ -231,91 +301,150 @@ const AccountRow = memo(function AccountRow({
                 {account.id}
               </button>
             </Tooltip>
-            <div className="mt-1 flex h-[52px] min-w-0 flex-col justify-center gap-1 text-xs text-foreground-muted xl:h-6 xl:flex-row xl:items-center xl:justify-start xl:gap-2">
-              <div className="flex h-6 min-w-0 items-center gap-2">
+            <div className="relative mt-1 flex h-[72px] min-w-0 flex-col justify-center gap-1 overflow-hidden text-xs text-foreground-muted max-sm:hidden xl:h-6 xl:flex-row xl:items-center xl:justify-start xl:gap-2">
+              <div className="flex h-6 min-w-0 shrink-0 items-center gap-2 *:shrink-0">
                 {account.label && (
                   <span
-                    className="max-w-40 min-w-0 truncate font-medium text-foreground"
+                    className="max-w-[120px] min-w-0 truncate font-medium text-foreground"
                     title={account.label}
                   >
                     {account.label}
                   </span>
                 )}
-                <TierBadge tier={account.tier} />
+                {!phone && <TierBadge tier={account.tier} />}
               </div>
               <div className="flex h-6 shrink-0 items-center gap-2 empty:hidden">
                 <FamilyBadge account={account} compact />
                 {account.priority !== 0 && (
                   <IconTag
                     label={fill(m.priorityTag, { priority: account.priority })}
-                    icon={<ListOrdered size={12} aria-hidden className="mr-1" />}
+                    icon={<ListOrdered size={12} aria-hidden />}
                   >
                     {account.priority}
                   </IconTag>
                 )}
-                {account.ai_credits && (
-                  <IconTag label={m.creditsTag} icon={<Sparkles size={12} aria-hidden />} />
+                {!phone && account.ai_credits && <CreditsTag account={account} />}
+                {account.proxy && (
+                  <IconTag
+                    label={fill(m.proxyInUse, { proxy: account.proxy })}
+                    icon={<Network size={12} aria-hidden />}
+                  />
                 )}
               </div>
-            </div>
-            <div className="mt-1 flex h-4 min-w-0 items-center gap-x-2 text-xs text-foreground-muted">
-              {lastUsed ? (
-                <Tooltip label={formatFullDateTime(new Date(lastUsed), locale)}>
-                  <span className="shrink-0">
-                    {fill(m.lastUsedAt, { time: formatRelative(new Date(lastUsed), now, locale) })}
-                  </span>
-                </Tooltip>
-              ) : (
-                <span className="shrink-0 text-foreground-subtle">{m.neverUsed}</span>
-              )}
-              {account.proxy && (
-                <span className="min-w-0 truncate font-mono" title={account.proxy}>
-                  {fill(m.proxyInUse, { proxy: account.proxy })}
-                </span>
-              )}
+              <div className="flex h-4 min-w-0 items-center">
+                {lastUsed ? (
+                  <Tooltip
+                    label={
+                      fill(m.lastUsedAt, {
+                        time: formatRelative(new Date(lastUsed), now, locale),
+                      }) +
+                      ' · ' +
+                      formatFullDateTime(new Date(lastUsed), locale)
+                    }
+                  >
+                    <span className="flex min-w-0 items-center gap-1">
+                      <Clock size={12} aria-hidden className="shrink-0" />
+                      <span className="truncate">
+                        {formatRelative(new Date(lastUsed), now, locale)}
+                      </span>
+                    </span>
+                  </Tooltip>
+                ) : (
+                  <span className="shrink-0 text-foreground-subtle">{m.neverUsed}</span>
+                )}
+              </div>
             </div>
           </div>
         </div>
       </Td>
-      <Td className="max-sm:basis-full">
-        <div className="flex h-[80px] flex-col items-start justify-center gap-1 pointer-coarse:h-[92px]">
-          <AccountStatusBadge account={account} />
-          <div
-            className={
-              'max-w-full text-xs ' + (account.state === 'error' ? 'line-clamp-1' : 'line-clamp-2')
-            }
-          >
-            <AccountReason account={account} now={now} />
+      <Td className="max-sm:col-span-2">
+        <div className="flex h-[72px] flex-col items-start justify-center gap-1 max-sm:h-6 max-sm:flex-row max-sm:items-center max-sm:justify-start max-sm:gap-2 max-sm:overflow-hidden xl:h-[60px]">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 max-sm:shrink-0 max-sm:flex-nowrap">
+            <AccountStatusBadge account={account} />
+            {account.state === 'error' && (
+              <Tooltip label={m.verifyAction}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  aria-label={fill(m.verifyActionOf, { email: account.id })}
+                  loading={verifying}
+                  className="size-6 px-0 pointer-coarse:size-6"
+                  onClick={() => {
+                    actions.onVerify(account)
+                  }}
+                >
+                  <RotateCcw size={12} aria-hidden />
+                </Button>
+              </Tooltip>
+            )}
+            {refreshing && (
+              <span role="status" className="inline-flex text-foreground-muted xl:hidden">
+                <LoaderCircle size={14} aria-hidden className="animate-spin" />
+                <span className="sr-only">{fill(m.quotaRefreshingOf, { email: account.id })}</span>
+              </span>
+            )}
+            {queued && (
+              <Tooltip label={m.quotaQueued}>
+                <span className="inline-flex text-foreground-subtle">
+                  <Hourglass size={14} aria-hidden />
+                  <span className="sr-only">{fill(m.quotaQueuedOf, { email: account.id })}</span>
+                </span>
+              </Tooltip>
+            )}
+            {failure && !refreshing && !queued && (
+              <Tooltip label={failure}>
+                <button
+                  type="button"
+                  aria-label={fill(m.quotaFailedOf, { email: account.id })}
+                  className="inline-flex rounded-sm text-error-text"
+                  onClick={() => {
+                    actions.onDetails(account)
+                  }}
+                >
+                  <TriangleAlert size={14} aria-hidden />
+                </button>
+              </Tooltip>
+            )}
           </div>
-          {account.state === 'error' && (
-            <Tooltip label={m.verifyAction}>
-              <Button
-                size="sm"
-                variant="outline"
-                aria-label={fill(m.verifyActionOf, { email: account.id })}
-                loading={verifying}
-                className="h-6 px-2 text-xs"
+          {phone && (
+            <span className="flex shrink-0 items-center gap-x-2">
+              <TierBadge tier={account.tier} />
+              {account.ai_credits && <CreditsTag account={account} />}
+            </span>
+          )}
+          {statusOf(account) === 'error' ? (
+            <Tooltip label={account.error}>
+              <button
+                type="button"
+                aria-label={fill(m.errorOf, { email: account.id })}
+                className="line-clamp-2 max-w-full min-w-0 rounded-sm text-left text-xs max-sm:line-clamp-1 max-sm:flex-1"
                 onClick={() => {
-                  actions.onVerify(account)
+                  actions.onDetails(account)
                 }}
               >
-                <RotateCcw size={12} aria-hidden />
-                {m.verifyShort}
-              </Button>
+                <AccountReason account={account} now={now} />
+              </button>
             </Tooltip>
+          ) : (
+            <div className="line-clamp-2 max-w-full min-w-0 text-xs max-sm:line-clamp-1 max-sm:flex-1">
+              <AccountReason account={account} now={now} />
+            </div>
           )}
         </div>
       </Td>
       {groups.map((group) => (
-        <Td key={group} label={q[group]} className="max-sm:flex-[1_1_144px]">
+        <Td key={group} className="max-sm:col-span-2">
           <div className="@container">
-            <div className="flex h-[80px] flex-col justify-center @min-[200px]:h-[40px]">
-              <QuotaCell account={account} group={group} now={now} />
+            <div className="flex h-[80px] flex-col justify-center max-sm:h-4! max-sm:flex-row max-sm:items-center max-sm:justify-start max-sm:gap-3 @min-[200px]:h-[40px]">
+              <span className="w-[6rem] shrink-0 truncate text-xs text-foreground-muted sm:hidden">
+                {q[group]}
+              </span>
+              <QuotaCell account={account} group={group} now={now} compact />
             </div>
           </div>
         </Td>
       ))}
-      <Td className="max-sm:basis-full">
+      <Td className="max-sm:col-start-2 max-sm:row-start-1 max-sm:-my-2 max-sm:self-center">
         <div className="flex items-center justify-end gap-1">
           <Tooltip label={m.enabledLabel}>
             <span className="mr-2 inline-flex">
@@ -328,14 +457,6 @@ const AccountRow = memo(function AccountRow({
               />
             </span>
           </Tooltip>
-          <IconAction
-            label={fill(m.detailsOf, { email: account.id })}
-            tooltip={m.details}
-            icon={<Info size={16} aria-hidden />}
-            onClick={() => {
-              actions.onDetails(account)
-            }}
-          />
           <span className="inline-flex max-xl:hidden">
             <IconAction
               label={fill(m.refreshQuotaOf, { email: account.id })}
@@ -347,7 +468,9 @@ const AccountRow = memo(function AccountRow({
               }}
             />
           </span>
-          <SwitchClientDialog email={account.id} variant="icon" />
+          <span className="contents max-sm:hidden">
+            <SwitchClientDialog email={account.id} variant="icon" />
+          </span>
           <MoreActions account={account} actions={actions} />
         </div>
       </Td>
@@ -363,6 +486,7 @@ export function AccountTable({
   selected,
   verifying,
   refreshing,
+  quotaRefresh,
   actions,
 }: {
   accounts: Account[]
@@ -371,19 +495,21 @@ export function AccountTable({
   selected: ReadonlySet<string>
   verifying: Set<string>
   refreshing: Set<string>
+  quotaRefresh: QuotaRefresh
   actions: RowActions
 }) {
   const m = useMessages(accountMessages)
   const q = useMessages(quotaMessages)
+  const phone = usePhone()
   const picked = accounts.filter((account) => selected.has(account.id)).length
   return (
     <Table label={m.title} fixed stack minWidth={880}>
       <colgroup>
         <col />
-        <col className="w-[156px]" />
+        <col className="w-[156px] xl:w-[192px]" />
         <col className="w-[164px] xl:w-[224px]" />
         <col className="w-[164px] xl:w-[224px]" />
-        <col className="w-[188px] xl:w-[224px]" />
+        <col className="w-[188px] xl:w-[192px]" />
       </colgroup>
       <thead>
         <tr>
@@ -418,6 +544,9 @@ export function AccountTable({
             selected={selected.has(account.id)}
             verifying={verifying.has(account.id)}
             refreshing={refreshing.has(account.id)}
+            queued={quotaRefresh.queued.has(account.id)}
+            failure={quotaFailure(quotaRefresh, account)}
+            phone={phone}
             actions={actions}
           />
         ))}

@@ -44,10 +44,15 @@ export function Badge({ tone, children }: { tone: BadgeTone; children: ReactNode
   )
 }
 
-// Tag 是不表达状态的中性小标签，用于能力、方法等枚举值
-export function Tag({ children }: { children: ReactNode }) {
+// Tag 是不表达状态的中性小标签，用于能力、方法等枚举值；warning 时为警示色
+export function Tag({ children, warning = false }: { children: ReactNode; warning?: boolean }) {
   return (
-    <span className="inline-flex h-6 shrink-0 items-center justify-self-start rounded-sm bg-muted px-2 font-mono text-xs whitespace-nowrap text-foreground-muted">
+    <span
+      className={
+        'inline-flex h-6 shrink-0 items-center gap-1 justify-self-start rounded-sm px-2 font-mono text-xs whitespace-nowrap ' +
+        (warning ? 'bg-warning-soft text-warning-text' : 'bg-muted text-foreground-muted')
+      }
+    >
       {children}
     </span>
   )

@@ -1,6 +1,8 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 
+import { invalidate, requestDependents } from '@/app/sync'
+import { accountsKey } from '@/features/accounts/queries'
 import type { Account, Login } from '@/features/accounts/types'
 import type { LogEntry } from '@/features/logs/types'
 import type { RequestRecord } from '@/features/requests/types'
@@ -35,7 +37,7 @@ type AdminEvent =
 function apply(client: QueryClient, event: AdminEvent) {
   switch (event.type) {
     case 'accounts':
-      client.setQueryData(['accounts'], { accounts: event.data })
+      client.setQueryData(accountsKey, { accounts: event.data })
       break
     case 'log':
       client.setQueryData<LogEntry[]>(logsKey, (logs = []) =>
@@ -50,7 +52,7 @@ function apply(client: QueryClient, event: AdminEvent) {
         const others = running.filter((item) => item.id !== record.id)
         return record.state === 'running' ? [...others, record] : others
       })
-      if (record.state !== 'running') void client.invalidateQueries({ queryKey: ['requests'] })
+      if (record.state !== 'running') invalidate(client, requestDependents)
       break
     }
     case 'login':
@@ -92,6 +94,18 @@ export function useAdminEvents(enabled: boolean) {
       source.close()
     }
   }, [client, enabled])
+}
+
+// useRunning 返回事件流推送的进行中请求
+export function useRunning() {
+  const client = useQueryClient()
+  return (
+    useQuery({
+      queryKey: runningKey,
+      queryFn: () => client.getQueryData<RequestRecord[]>(runningKey) ?? [],
+      staleTime: Number.POSITIVE_INFINITY,
+    }).data ?? []
+  )
 }
 
 // useConnection 返回事件流的连接状态

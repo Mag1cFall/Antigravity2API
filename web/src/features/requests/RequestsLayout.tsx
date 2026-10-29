@@ -11,7 +11,7 @@ export function RequestsLayout() {
   const m = useMessages(requestMessages)
   return (
     <>
-      <PageHeader title={m.pageTitle} description={m.pageDescription} />
+      <PageHeader title={m.pageTitle} />
       <NavTabs
         label={m.tabs}
         items={[

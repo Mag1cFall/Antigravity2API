@@ -75,7 +75,7 @@ JSON 格式每行一条事件：
 INFO  service  服务就绪 | 地址=127.0.0.1:8017
 INFO  account@example.com  token 已刷新 | 到期=2026-10-15T10:08:15+08:00
 INFO  account@example.com  上游请求 | POST daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist | 状态=200 | 耗时=412ms
-INFO  service  官方客户端最新版本 | 版本=2.27.0 当前=2.26.0
+INFO  service  官方客户端最新版本 | 版本=2.29.0 当前=2.28.1
 INFO  service  账户池刷新完成 | 耗时=40.272s
 ```
 

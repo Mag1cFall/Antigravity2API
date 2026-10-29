@@ -2,7 +2,7 @@ import { ExternalLink } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
 import { accountMessages } from '@/features/accounts/messages'
-import { earliestCooldown, statusOf, statusTone } from '@/features/accounts/status'
+import { earliestCooldown, errorReason, statusOf, statusTone } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
 import { quotaMessages } from '@/features/quota/messages'
 import { nameOf } from '@/features/quota/quota'
@@ -55,12 +55,13 @@ export function AccountReason({
     )
   }
   if (status === 'error') {
+    const reason = errorReason(account.error ?? '')
+    if (!full)
+      return <span className="text-xs wrap-anywhere text-error-text">{reason.message}</span>
     return (
-      <span
-        title={full ? undefined : account.error}
-        className="text-xs wrap-anywhere text-error-text"
-      >
-        {account.error}
+      <span className="flex flex-col gap-1 text-xs wrap-anywhere">
+        <span className="text-error-text">{reason.message}</span>
+        {reason.code && <span className="font-mono text-foreground-muted">{reason.code}</span>}
       </span>
     )
   }

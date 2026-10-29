@@ -8,8 +8,8 @@ import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { replaceAccount } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
-import { accountsKey } from '@/features/accounts/queries'
 import type { Account } from '@/features/accounts/types'
 import { validProxy } from '@/features/settings/schema'
 import { api } from '@/lib/api'
@@ -39,13 +39,7 @@ export function ProxyDialog({
         json: { proxy },
       }),
     onSuccess: (result) => {
-      client.setQueryData<{ accounts: Account[] }>(
-        accountsKey,
-        (data) =>
-          data && {
-            accounts: data.accounts.map((item) => (item.id === result.id ? result : item)),
-          },
-      )
+      replaceAccount(client, result)
       toast({ tone: 'success', title: fill(m.proxySaved, { email: account.id }) })
       onClose()
     },

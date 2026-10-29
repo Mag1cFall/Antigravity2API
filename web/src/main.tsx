@@ -7,14 +7,15 @@ import { RouterProvider } from 'react-router'
 
 import { appMessages } from '@/app/messages'
 import { router } from '@/app/router'
+import { syncQueries } from '@/app/sync'
 import { Toaster } from '@/components/ui/toast'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { sessionKey } from '@/features/service/queries'
 import { ApiError } from '@/lib/api'
 import { I18nProvider, useMessages } from '@/lib/i18n'
-import { applyTheme, readTheme, watchSystemTheme } from '@/lib/theme'
+import { applyTheme, initialTheme, watchSystemTheme } from '@/lib/theme'
 
-applyTheme(readTheme())
+applyTheme(initialTheme())
 watchSystemTheme()
 
 // queryClient 管理全部服务端数据，401 时重新读取会话并转到登录页
@@ -33,6 +34,8 @@ const queryClient: QueryClient = new QueryClient({
     },
   },
 })
+
+syncQueries(queryClient)
 
 // AppToaster 以当前语言渲染提示
 function AppToaster() {

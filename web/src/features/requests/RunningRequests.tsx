@@ -1,13 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation } from '@tanstack/react-query'
 import { Activity, Square } from 'lucide-react'
 
-import { runningKey } from '@/app/events'
+import { useRunning } from '@/app/events'
 import { Button } from '@/components/ui/button'
 import { Card, CardHeader } from '@/components/ui/card'
 import { Table, Td, Th } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
 import { requestMessages } from '@/features/requests/messages'
-import type { RequestRecord } from '@/features/requests/types'
 import { api } from '@/lib/api'
 import { formatDateTime, formatDuration } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
@@ -18,13 +17,7 @@ export function RunningRequests() {
   const m = useMessages(requestMessages)
   const { locale } = useI18n()
   const now = useNow(1000)
-  const client = useQueryClient()
-  const running =
-    useQuery({
-      queryKey: runningKey,
-      queryFn: () => client.getQueryData<RequestRecord[]>(runningKey) ?? [],
-      staleTime: Number.POSITIVE_INFINITY,
-    }).data ?? []
+  const running = useRunning()
   const stop = useMutation({
     mutationFn: (id: string) =>
       api('/api/requests/' + encodeURIComponent(id) + '/cancel', { method: 'POST' }),

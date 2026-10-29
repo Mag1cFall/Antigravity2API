@@ -1,6 +1,7 @@
 import type { LucideIcon } from 'lucide-react'
-import { NavLink } from 'react-router'
+import { NavLink, useLocation } from 'react-router'
 
+import { lastLocation } from '@/app/remember'
 import { Indicator } from '@/components/ui/indicator'
 
 // NavTab 是一个页内导航项
@@ -11,8 +12,9 @@ export interface NavTab {
   end?: boolean
 }
 
-// NavTabs 是页内子页面导航，各项等宽，当前项的深色背景滑到该项
+// NavTabs 是页内子页面导航，各项等宽，当前项的深色背景滑到该项，各项回到该子页面上次的查询参数
 export function NavTabs({ items, label }: { items: NavTab[]; label: string }) {
+  const location = useLocation()
   return (
     <nav aria-label={label} className="relative w-fit max-w-full overflow-x-auto">
       <Indicator active="[aria-current=page]" className="rounded-md bg-foreground" />
@@ -20,7 +22,7 @@ export function NavTabs({ items, label }: { items: NavTab[]; label: string }) {
         {items.map((item) => (
           <li key={item.to} className="flex">
             <NavLink
-              to={item.to}
+              to={lastLocation(item.to, item.end ?? false, location)}
               end={item.end ?? false}
               className="relative flex h-control-sm w-full items-center justify-center gap-2 rounded-md px-4 text-sm whitespace-nowrap text-foreground-muted transition-colors duration-200 ease-out hover:text-foreground not-aria-[current=page]:hover:bg-muted aria-[current=page]:text-surface pointer-coarse:h-touch"
             >

@@ -4,11 +4,12 @@ import {
   useMutationState,
   useQueryClient,
 } from '@tanstack/react-query'
-import { useCallback, useState } from 'react'
+import { useCallback, useState, useSyncExternalStore } from 'react'
 
 import { toast } from '@/components/ui/toast'
 import { accountMessages } from '@/features/accounts/messages'
 import { accountsKey } from '@/features/accounts/queries'
+import { errorReason } from '@/features/accounts/status'
 import type { Account, SwitchResult } from '@/features/accounts/types'
 import { useUsage } from '@/features/usage/queries'
 import type { UsageStats } from '@/features/usage/types'
@@ -212,10 +213,88 @@ export function useVerifyAccount() {
     onError: (error, account) => {
       toast({
         tone: 'error',
-        title: fill(m.verifyFailed, { email: account.id, message: error.message }),
+        title: fill(m.verifyFailed, { email: account.id }),
+        description: errorReason(error.message).message,
       })
     },
   })
+}
+
+// refreshWorkers 是刷新全部时同时读取额度的账户数
+const refreshWorkers = 4
+
+// QuotaRefresh 是逐账户读取额度的进度：刷新全部的完成数与总数、排队与正在读取的账户，以及读取失败的账户的原因与失败时的额度读取时间
+export interface QuotaRefresh {
+  done: number
+  total: number
+  queued: ReadonlySet<string>
+  running: ReadonlySet<string>
+  failed: ReadonlyMap<string, { message: string; quotaAt: string | undefined }>
+}
+
+// quotaRefresh 是当前进度，离开账户页后保留
+let quotaRefresh: QuotaRefresh = {
+  done: 0,
+  total: 0,
+  queued: new Set(),
+  running: new Set(),
+  failed: new Map(),
+}
+
+// refreshListeners 是订阅进度的组件
+const refreshListeners = new Set<() => void>()
+
+// updateRefresh 修改进度并通知订阅的组件
+function updateRefresh(change: (current: QuotaRefresh) => Partial<QuotaRefresh>) {
+  quotaRefresh = { ...quotaRefresh, ...change(quotaRefresh) }
+  for (const listener of refreshListeners) listener()
+}
+
+// without 返回去掉 id 的集合
+function without(items: ReadonlySet<string>, id: string): Set<string>
+function without<T>(items: ReadonlyMap<string, T>, id: string): Map<string, T>
+function without<T>(items: ReadonlySet<string> | ReadonlyMap<string, T>, id: string) {
+  const next = items instanceof Map ? new Map(items) : new Set(items as ReadonlySet<string>)
+  next.delete(id)
+  return next
+}
+
+// recordQuotaResult 记下一个账户读取额度的结果：成功时更新该行并清除失败原因，失败时记下原因
+function recordQuotaResult(
+  client: QueryClient,
+  account: Account,
+  result: { account: Account } | { error: string },
+) {
+  if ('account' in result) {
+    replaceAccount(client, result.account)
+    updateRefresh((current) => ({ failed: without(current.failed, account.id) }))
+    return
+  }
+  updateRefresh((current) => ({
+    failed: new Map(current.failed).set(account.id, {
+      message: result.error,
+      quotaAt: account.quota_at,
+    }),
+  }))
+}
+
+// useQuotaRefresh 返回逐账户读取额度的进度
+export function useQuotaRefresh() {
+  return useSyncExternalStore(
+    (listener) => {
+      refreshListeners.add(listener)
+      return () => {
+        refreshListeners.delete(listener)
+      }
+    },
+    () => quotaRefresh,
+  )
+}
+
+// quotaFailure 返回账户读取额度失败的原因，之后读到了额度时为 undefined
+export function quotaFailure(refresh: QuotaRefresh, account: Account) {
+  const failure = refresh.failed.get(account.id)
+  return failure && failure.quotaAt === account.quota_at ? failure.message : undefined
 }
 
 // useRefreshQuota 实时读取一个账户的额度
@@ -226,11 +305,12 @@ export function useRefreshQuota() {
     mutationKey: quotaKey,
     mutationFn: (account: Account) =>
       api<Account>(accountPath(account.id) + '/quota', { method: 'POST' }),
-    onSuccess: (result) => {
-      replaceAccount(client, result)
+    onSuccess: (result, account) => {
+      recordQuotaResult(client, account, { account: result })
       toast({ tone: 'success', title: fill(m.quotaRefreshed, { email: result.id }) })
     },
     onError: (error, account) => {
+      recordQuotaResult(client, account, { error: error.message })
       toast({
         tone: 'error',
         title: fill(m.quotaRefreshFailed, { email: account.id, message: error.message }),
@@ -246,6 +326,7 @@ export function useImportAccounts() {
   return useMutation({
     mutationFn: () => api<{ accounts: string[] }>('/api/accounts/import', { method: 'POST' }),
     onSuccess: (result) => {
+      keepAccounts(result.accounts)
       void client.invalidateQueries({ queryKey: accountsKey })
       toast({
         tone: 'success',
@@ -260,20 +341,45 @@ export function useImportAccounts() {
   })
 }
 
-// useRefreshAccounts 同步刷新账户池并读取全部账户的额度，failed 为读取额度失败的账户及原因；提示标题列出失败的账户，原因放在说明中
-export function useRefreshAccounts() {
+// useRefreshAll 逐个刷新账户，同时最多 refreshWorkers 个：异常账户先重新初始化，再读取额度；每个账户完成后立即更新该行，结束后提示失败的账户，提示标题列出失败的账户，原因放在说明中
+export function useRefreshAll() {
   const m = useMessages(accountMessages)
   const { locale } = useI18n()
   const client = useQueryClient()
-  return useMutation({
-    mutationFn: () =>
-      api<{ accounts: Account[]; failed: Record<string, string> }>('/api/accounts/refresh', {
-        method: 'POST',
-      }),
-    onSuccess: ({ accounts, failed }) => {
-      client.setQueryData(accountsKey, { accounts })
-      void client.invalidateQueries({ queryKey: ['models'] })
-      const failures = Object.entries(failed)
+  return useCallback(
+    async (accounts: Account[]) => {
+      const queue = [...accounts]
+      const failures: [string, string][] = []
+      updateRefresh(() => ({
+        done: 0,
+        total: accounts.length,
+        queued: new Set(accounts.map((account) => account.id)),
+      }))
+      const work = async () => {
+        for (let account = queue.shift(); account; account = queue.shift()) {
+          const id = account.id
+          updateRefresh((current) => ({
+            queued: without(current.queued, id),
+            running: new Set(current.running).add(id),
+          }))
+          try {
+            if (account.state === 'error')
+              await api(accountPath(id) + '/verify', { method: 'POST' })
+            const result = await api<Account>(accountPath(id) + '/quota', { method: 'POST' })
+            recordQuotaResult(client, account, { account: result })
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            failures.push([id, message])
+            recordQuotaResult(client, account, { error: message })
+          }
+          updateRefresh((current) => ({
+            done: current.done + 1,
+            running: without(current.running, id),
+          }))
+        }
+      }
+      await Promise.all(Array.from({ length: refreshWorkers }, work))
+      updateRefresh(() => ({ done: 0, total: 0 }))
       if (failures.length === 0) {
         toast({ tone: 'success', title: m.refreshDone })
         return
@@ -287,10 +393,8 @@ export function useRefreshAccounts() {
         description: failures.map(([id, message]) => id + ': ' + message).join('; '),
       })
     },
-    onError: (error) => {
-      toast({ tone: 'error', title: fill(m.refreshFailed, { message: error.message }) })
-    },
-  })
+    [client, locale, m],
+  )
 }
 
 // useSwitchAccount 把账户写入本机官方客户端并重新启动它
@@ -300,7 +404,15 @@ export function useSwitchAccount() {
   })
 }
 
-// useAccountRemoval 删除账户：立即隐藏并显示 5 秒撤销，期间撤销则不发送删除；多个账户共用一条撤销提示
+// pendingRemovals 是撤销期内尚未发出删除的账户及取消该删除的函数
+const pendingRemovals = new Map<string, () => void>()
+
+// keepAccounts 取消这些账户在撤销期内待发出的删除并恢复显示，账户被重新导入或登录时调用
+export function keepAccounts(ids: readonly string[]) {
+  for (const id of ids) pendingRemovals.get(id)?.()
+}
+
+// useAccountRemoval 删除账户：立即隐藏并显示 5 秒撤销，期间撤销、重新导入或登录同一账户则不发送删除，删除完成且列表刷新后不再隐藏；多个账户共用一条撤销提示
 export function useAccountRemoval() {
   const m = useMessages(accountMessages)
   const client = useQueryClient()
@@ -315,11 +427,27 @@ export function useAccountRemoval() {
           return next
         })
       }
+      const pending = new Set(ids)
+      const keep = (id: string) => {
+        pending.delete(id)
+        pendingRemovals.delete(id)
+        show([id])
+      }
+      for (const id of ids) {
+        pendingRemovals.set(id, () => {
+          keep(id)
+        })
+      }
       setHidden((current) => new Set([...current, ...ids]))
       const timer = setTimeout(() => {
         for (const account of accounts) {
+          if (!pending.has(account.id)) continue
+          pendingRemovals.delete(account.id)
           api(accountPath(account.id), { method: 'DELETE' })
             .then(() => client.invalidateQueries({ queryKey: accountsKey }))
+            .then(() => {
+              show([account.id])
+            })
             .catch((error: unknown) => {
               show([account.id])
               toast({
@@ -342,7 +470,7 @@ export function useAccountRemoval() {
           label: m.undo,
           onClick: () => {
             clearTimeout(timer)
-            show(ids)
+            for (const id of pending) keep(id)
           },
         },
       })

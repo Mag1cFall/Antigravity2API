@@ -4,8 +4,6 @@ import { defineMessages } from '@/lib/i18n'
 export const settingsMessages = defineMessages(
   {
     title: '设置',
-    description:
-      '全部配置保存到 .env。标有“重启后生效”的项在重启服务后生效，其余项保存后从下一个请求开始生效。',
     sections: '设置分区',
     service: '服务',
     serviceDescription: '服务在哪个地址监听，账户与运行数据存在哪里，客户端用什么 key 调用。',
@@ -186,8 +184,6 @@ export const settingsMessages = defineMessages(
   },
   {
     title: 'Settings',
-    description:
-      'Everything is saved to .env. Items marked "Restart required" apply after the service restarts; the rest apply to the next request.',
     sections: 'Setting sections',
     service: 'Service',
     serviceDescription:
@@ -384,8 +380,6 @@ export const settingsMessages = defineMessages(
   },
   {
     title: '設定',
-    description:
-      '所有設定都儲存在 .env。標示「重新啟動後生效」的項目會在服務重新啟動後生效，其餘項目儲存後從下一個請求開始生效。',
     sections: '設定分類',
     service: '服務',
     serviceDescription: '服務的監聽位址、帳號與執行資料的存放位置，以及用戶端呼叫時使用的 key。',

@@ -44,3 +44,23 @@ export function earliestCooldown(account: Account) {
     Date.parse(entry[1]) < Date.parse(first[1]) ? entry : first,
   )
 }
+
+// creditsShort 判断账户开启了 AI 积分超额使用但积分余额低于最低余额，此时超额使用不会生效
+export function creditsShort(account: Account) {
+  return (
+    account.ai_credits &&
+    account.credit_balance !== undefined &&
+    account.credit_minimum !== undefined &&
+    account.credit_balance < account.credit_minimum
+  )
+}
+
+// upstreamError 匹配服务记录的上游错误：可选的“邮箱: ”前缀、状态码、上游 status 与 reason，冒号后是上游给人看的说明
+const upstreamError = /^(?:[^\s:]+@[^\s:]+: )?upstream (\d{3})((?: [A-Z][A-Z0-9_]*)*): ([\s\S]+)$/
+
+// errorReason 把账户错误拆成给人看的说明与错误码，不是上游错误时说明为原文
+export function errorReason(text: string): { message: string; code: string } {
+  const match = upstreamError.exec(text)
+  if (!match) return { message: text, code: '' }
+  return { message: match[3] ?? text, code: ((match[1] ?? '') + (match[2] ?? '')).trim() }
+}

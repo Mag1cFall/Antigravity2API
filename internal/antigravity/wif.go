@@ -138,7 +138,7 @@ func (c *Client) BusinessAssist(ctx context.Context) (LoadCodeAssistResponse, er
 	return assist, nil
 }
 
-// BusinessInitialize 按企业 WIF 账户的登录后序列初始化：BusinessAssist 判定套餐，未开通时 onboardUser，随后目录走 businessaicode；businessaicode 请求携带 X-Goog-User-Project
+// BusinessInitialize 按企业 WIF 账户的登录后序列初始化：BusinessAssist 判定套餐，未开通时 onboardUser，随后 userinfo 与目录，目录走 businessaicode；userinfo 是伴随请求；businessaicode 请求携带 X-Goog-User-Project
 func (c *Client) BusinessInitialize(ctx context.Context) (Initialization, error) {
 	var result Initialization
 	assist, err := c.BusinessAssist(ctx)
@@ -158,9 +158,10 @@ func (c *Client) BusinessInitialize(ctx context.Context) (Initialization, error)
 		}
 	}
 	result.Assist = assist
-	if result.User, err = c.Userinfo(ctx); err != nil {
-		return Initialization{}, err
-	}
+	optional(func() (err error) {
+		result.User, err = c.Userinfo(ctx)
+		return err
+	})()
 	if result.Catalog, err = c.FetchAvailableModels(ctx); err != nil {
 		return Initialization{}, err
 	}

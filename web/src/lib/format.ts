@@ -49,9 +49,13 @@ export function formatTokens(value: number) {
   return String(value)
 }
 
-// formatPercent 把 0 到 1 的比例输出为百分比，非整数保留一位小数
+// formatPercent 把 0 到 1 的比例输出为保留一位小数的百分比
 export function formatPercent(fraction: number, locale: Locale) {
-  return numberFormat(locale, { style: 'percent', maximumFractionDigits: 1 }).format(fraction)
+  return numberFormat(locale, {
+    style: 'percent',
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(fraction)
 }
 
 // formatCost 以美元输出估算费用，不足 1 美元时固定 4 位小数，不足 0.0001 美元时输出 <$0.0001

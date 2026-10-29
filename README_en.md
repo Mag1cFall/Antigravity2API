@@ -32,7 +32,7 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 - **Token counting**: input tokens are counted locally per model family; GPT-OSS prompts are rendered with the official chat template before counting, and Gemini and Claude counts are calibrated with the upstream usage of the same conversation
 - **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings, in Simplified Chinese, Traditional Chinese (Taiwan) and English; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
 - **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores the account, model, tokens, cache hits and timing of every request and estimates cost with official API prices
-- **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing
+- **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing, account JSON export and import (accepts the account files of Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
 - **Proxy**: global and per-account HTTP, HTTPS and SOCKS5 proxies; the system proxy is used when none is set
 
 ## Supported Models
@@ -55,7 +55,7 @@ The service reads the Antigravity model catalog of every account at startup and 
 
 The thinking level is decided in this order:
 
-1. A level named in the model name: a catalog ID with a level such as `claude-opus-5-5-high`, a parenthesized suffix such as `claude-opus-5-5(low)` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or a thinking budget in tokens), or the `-thinking` suffix (High)
+1. A level named in the model name: a catalog ID with a level such as `claude-opus-5-5-high`, a parenthesized suffix such as `claude-opus-5-5(low)` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, a thinking budget in tokens, or `auto` for no level), or the `-thinking` suffix (High)
 2. The thinking parameters of the request: OpenAI `reasoning_effort` `none`, `minimal` and `low` map to Low, `medium` to Medium, `high`, `xhigh` and `max` to High; Anthropic `thinking.budget_tokens` and Gemini `thinkingConfig.thinkingBudget` up to 1024 map to Low, up to 8192 to Medium, larger to High, and `-1` or any negative value sets no level
 3. Medium, or the only level of the model
 
@@ -145,7 +145,7 @@ docker run -d --name antigravity2api -p 8017:8017 -v ./data:/data ghcr.io/mag1cf
 
 `PROXY` is a global HTTP, HTTPS or SOCKS5 proxy such as `socks5://127.0.0.1:1080` or `http://user:pass@127.0.0.1:7890`. Sign-in, token refresh, account initialization, generation and companion requests all go through it. The proxy exit must be in a region supported by Antigravity.
 
-- Proxy pool: the proxies in `PROXY` (comma separated; one per line in the admin UI; a single proxy as well) form a proxy pool, and each account sticks to the proxy with the fewest accounts; requests that belong to no account, such as sign-in and online update, use the first proxy
+- Proxy pool: the proxies in `PROXY` (comma separated; one per line in the admin UI; a single proxy as well) form a proxy pool, and each account is bound to the proxy with the fewest accounts; requests that belong to no account, such as sign-in and online update, use the first proxy
 - Checks: the proxies are checked at startup, every 5 minutes, when a public API request hits a connection error upstream (repeated errors merge into one check), when settings are saved and when you click "Check now" in Settings, and accounts on a proxy that is down move to the available proxy with the fewest accounts; Settings shows each proxy's status, latency and accounts
 - System proxy: when `PROXY` is empty the system proxy is used, that is the `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` environment variables, plus the system proxy settings on Windows
 - Account proxy: a single account can have its own proxy on the Accounts page of the admin UI; all requests of that account then use it, and `direct` connects without a proxy
@@ -301,7 +301,7 @@ docs/                 # protocol, development and logging docs
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `LISTEN` | Listen address of the public API, admin API and admin UI | `127.0.0.1:8017` |
+| `LISTEN` | Listen address of the public API, admin API and admin UI; when Windows reserves the port, the service listens on the next free port and the admin UI shows the actual address | `127.0.0.1:8017` |
 | `API_KEYS` | Public API keys, comma separated | empty |
 | `AUTH_DIR` | Account directory | `auth` |
 | `RUNTIME_DIR` | Runtime data directory: the request ledger `requests.db`, logs in `logs/`, uploaded `files/`, generated `media/`, conversation records, model catalogs and other runtime state | `runtime` |
@@ -322,7 +322,7 @@ docs/                 # protocol, development and logging docs
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `LOG_FORMAT` | Log format: `json` or `text` | `json` |
 | `LOG_FILE` | Also write logs to `RUNTIME_DIR/logs/`, rotating at 10 MB per file | `true` |
-| `LOG_MAX_TOTAL_MB` | Total size limit of the log files: `LOG_MAX_TOTAL_MB / 10 − 1` rotated files are kept and the oldest are removed beyond that; at least 20 | `500` |
+| `LOG_MAX_TOTAL_MB` | Total size limit of the log files, at least 20: `LOG_MAX_TOTAL_MB / 10 − 1` rotated files are kept and the oldest are removed beyond that | `500` |
 | `REQUEST_LOG_BODIES` | Store request and response bodies | `false` |
 | `ADMIN_AUTH_ENABLED` | Sign-in for remote access to the admin UI | `false` |
 | `ADMIN_USERNAME` | Admin user name | `admin` |
@@ -353,29 +353,8 @@ Process environment variables override the same keys in `.env`.
 
 Every command accepts `--listen`, `--auth`, `--runtime` and `--proxy`, overriding `LISTEN`, `AUTH_DIR`, `RUNTIME_DIR` and `PROXY`. On an error a command writes the reason to standard error and exits with code 1; for example `status` prints `服务未在 <LISTEN> 运行: <reason>` when the service is not running. The output of `accounts` and `status` is described in the [development guide](docs/development.md#子命令输出). The desktop executable accepts the same subcommands; without a subcommand it opens the desktop window, and `--hidden` starts with only the tray icon.
 
-## Troubleshooting
-
-### Windows Reserved Ports
-
-If startup reports that the `LISTEN` port is in use but Task Manager shows no process holding it, the NAT service of Hyper-V, WSL2 or Docker may have reserved the port range. Run the following commands in an elevated PowerShell or CMD.
-
-```powershell
-netsh interface ipv4 show excludedportrange protocol=tcp
-```
-
-If `8017` falls between `Start Port` and `End Port`, change `LISTEN`, or restart WinNAT and check again:
-
-```powershell
-net stop winnat
-net start winnat
-```
-
-### Account Verification
-
-When the upstream requires account verification, the Accounts page shows a verification link and the account stops receiving requests. Open the link in a browser signed in to that account, complete the verification, then click Retry on the account.
-
 ## Notes
 
-The internal Antigravity protocol changes with official client updates; model IDs follow the live catalog returned after startup. Issues and PRs are welcome.
+Issues and PRs are welcome.
 
 See [docs/development.md](docs/development.md) for development and contribution, [docs/protocol.md](docs/protocol.md) for sign-in, initialization, the request envelope and stream decoding, [docs/logging.md](docs/logging.md) for logs and the request ledger, and [docs/reverse-engineering.md](docs/reverse-engineering.md) for capturing and analyzing the official client.

@@ -126,7 +126,11 @@ func serveCommand(ctx context.Context, args []string, openDefault bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var updated atomic.Bool
-	err = serve(ctx, "web", cfg, o.overrides, *openUI, func() { updated.Store(true); cancel() })
+	ready := func(string) {}
+	if *openUI {
+		ready = func(address string) { go openAdmin("http://" + loopback(address) + "/") }
+	}
+	err = serve(ctx, "web", cfg, o.overrides, ready, func() { updated.Store(true); cancel() })
 	if !updated.Load() {
 		return err
 	}
@@ -148,8 +152,8 @@ func relaunch(args []string) error {
 	return syscall.Exec(executable, append([]string{executable}, args...), os.Environ())
 }
 
-// serve 装配日志、账本、账户库与服务，在 cfg.Listen 上运行到 ctx 结束，restart 在在线更新安装完成后调用
-func serve(ctx context.Context, host string, cfg config.Config, overrides config.Overrides, openUI bool, restart func()) error {
+// serve 装配日志、账本、账户库与服务，在 cfg.Listen 上运行到 ctx 结束，ready 在开始监听后以实际监听地址调用，restart 在在线更新安装完成后调用
+func serve(ctx context.Context, host string, cfg config.Config, overrides config.Overrides, ready func(address string), restart func()) error {
 	live := liveOf(cfg)
 	logger, err := logging.New(filepath.Join(cfg.RuntimeDir, "logs"), cfg.LogLevel, cfg.LogFormat, cfg.LogFile, cfg.LogMaxTotalMB)
 	if err != nil {
@@ -172,25 +176,13 @@ func serve(ctx context.Context, host string, cfg config.Config, overrides config
 	if err != nil {
 		return err
 	}
-	if openUI {
-		go openWhenReady(ctx, cfg.Listen)
-	}
-	return app.Serve(ctx, live, app.Deps{Service: svc, Store: store, Ledger: ledger, Logger: logger, Overrides: overrides, Host: host, UI: webui.Handler(), Restart: restart})
+	return app.Serve(ctx, live, app.Deps{Service: svc, Store: store, Ledger: ledger, Logger: logger, Overrides: overrides, Host: host, UI: webui.Handler(), Restart: restart, Ready: ready})
 }
 
-// openWhenReady 等管理 API 可访问后用系统浏览器打开管理端
-func openWhenReady(ctx context.Context, listen string) {
-	base := "http://" + loopback(listen)
-	for ctx.Err() == nil {
-		response, err := http.Get(base + "/api/status")
-		if err == nil {
-			response.Body.Close()
-			if err := openBrowser(base + "/"); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-			}
-			return
-		}
-		time.Sleep(300 * time.Millisecond)
+// openAdmin 用系统浏览器打开管理端
+func openAdmin(link string) {
+	if err := openBrowser(link); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 	}
 }
 

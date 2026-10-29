@@ -320,7 +320,7 @@ export function RequestsPage() {
                 ))}
               </tbody>
             </Table>
-            <div className="flex flex-wrap items-center justify-end gap-3 border-t border-border px-6 py-3 max-sm:px-4">
+            <div className="flex flex-wrap items-center justify-end gap-3 border-t border-border px-4 py-2">
               <p className="mr-auto text-sm text-foreground-muted tabular-nums">
                 {fill(m.pageCost, { cost: formatCost(pageCost, locale) })}
                 {pageUnpriced > 0 && ' · ' + fill(m.pageUnpriced, { count: pageUnpriced })}

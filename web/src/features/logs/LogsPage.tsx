@@ -28,18 +28,18 @@ const levelClass: Record<LogLevel, string> = {
   ERROR: 'text-error-text',
 }
 
-// LogLine 是一条日志：时间、级别、来源与消息
+// LogLine 是一条日志：时间、级别、来源与消息排成一行，宽度小于 640px 时消息换到第二行
 function LogLine({ entry, timeFormat }: { entry: LogEntry; timeFormat: Intl.DateTimeFormat }) {
   const m = useMessages(logMessages)
   return (
     <div
       className={
-        'grid grid-cols-1 gap-x-3 border-b border-border px-6 py-2 font-mono text-xs max-sm:px-4 sm:grid-cols-log ' +
+        'grid grid-cols-[auto_auto_minmax(0,1fr)] gap-x-3 border-b border-border px-4 py-[6px] font-mono text-xs sm:grid-cols-log ' +
         (entry.level === 'ERROR'
           ? 'bg-error-soft'
           : entry.level === 'WARN'
             ? 'bg-warning-soft'
-            : '')
+            : 'hover:bg-muted/60')
       }
     >
       <span className="text-foreground-subtle tabular-nums">
@@ -49,7 +49,7 @@ function LogLine({ entry, timeFormat }: { entry: LogEntry; timeFormat: Intl.Date
       <Tooltip label={entry.source}>
         <span className="truncate text-foreground-muted">{entry.source}</span>
       </Tooltip>
-      <span className="min-w-0 break-words whitespace-pre-wrap text-foreground select-text">
+      <span className="col-span-3 min-w-0 break-words whitespace-pre-wrap text-foreground select-text sm:col-span-1">
         {entry.message}
         {entry.request_id && (
           <>
@@ -201,7 +201,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
             <LogLine key={entry.seq ?? index} entry={entry} timeFormat={timeFormat} />
           ))}
           {logs.hasNextPage && (
-            <div className="px-6 py-3">
+            <div className="px-4 py-3">
               <Button
                 size="sm"
                 loading={logs.isFetchingNextPage}
@@ -241,7 +241,7 @@ export function LogsPage() {
   const virtualizer = useVirtualizer({
     count: visible.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 33,
+    estimateSize: () => 29,
     overscan: 16,
   })
   const timeFormat = new Intl.DateTimeFormat(locale, {
@@ -356,6 +356,19 @@ export function LogsPage() {
       <Card className={visible.length > 0 ? 'flex-1' : undefined}>
         <CardToolbar>
           {viewSwitch}
+          <Select
+            label={m.source}
+            size="sm"
+            className="max-w-field max-sm:flex-1"
+            value={filter.source || 'all'}
+            onValueChange={(value) => {
+              update('source', value)
+            }}
+            options={[
+              { value: 'all', label: m.allSources },
+              ...sources.map((source) => ({ value: source, label: source })),
+            ]}
+          />
           <Segmented
             label={m.filterLevel}
             value={filter.level}
@@ -366,19 +379,6 @@ export function LogsPage() {
               value,
               label: levelLabels[value],
             }))}
-          />
-          <Select
-            label={m.source}
-            size="sm"
-            className="max-w-field"
-            value={filter.source || 'all'}
-            onValueChange={(value) => {
-              update('source', value)
-            }}
-            options={[
-              { value: 'all', label: m.allSources },
-              ...sources.map((source) => ({ value: source, label: source })),
-            ]}
           />
           <SearchInput
             aria-label={m.search}

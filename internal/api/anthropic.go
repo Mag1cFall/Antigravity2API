@@ -543,7 +543,7 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 		case "tool_reference":
 			flushPendingSignature()
 			parts = append(parts, antigravity.Part{Text: "Tool reference: " + block.ToolName})
-		case "server_tool_use":
+		case "server_tool_use", "mcp_tool_use":
 			flushPendingSignature()
 			parts = append(parts, antigravity.Part{Text: "Server tool call " + block.Name + ": " + string(block.Input)})
 		case "web_fetch_tool_result":
@@ -566,9 +566,16 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 				parts = append(parts, antigravity.Part{Text: "Web fetch: " + result.URL})
 				parts = append(parts, document...)
 			}
-		case "web_search_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "tool_search_tool_result":
+		case "web_search_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "tool_search_tool_result", "advisor_tool_result", "mcp_tool_result":
 			flushPendingSignature()
 			parts = append(parts, antigravity.Part{Text: "Server tool result " + block.Type + ": " + string(block.Content)})
+		case "compaction":
+			flushPendingSignature()
+			var summary string
+			_ = json.Unmarshal(block.Content, &summary)
+			if summary != "" {
+				parts = append(parts, antigravity.Part{Text: summary})
+			}
 		default:
 			return nil, fmt.Errorf("unsupported content block type %q", block.Type)
 		}
@@ -582,7 +589,7 @@ func mapAnthropicTools(tools []anthropicTool, choice json.RawMessage) (antigravi
 	for _, tool := range tools {
 		typeName := strings.ToLower(tool.Type)
 		switch {
-		case strings.HasPrefix(typeName, "bash_"), strings.HasPrefix(typeName, "text_editor_"), strings.HasPrefix(typeName, "memory_"):
+		case strings.HasPrefix(typeName, "bash_"), strings.HasPrefix(typeName, "text_editor_"), strings.HasPrefix(typeName, "memory_"), strings.HasPrefix(typeName, "computer_"):
 			declaration, err := anthropicClientTool(tool, typeName)
 			if err != nil {
 				return antigravity.Tools{}, err
@@ -603,7 +610,7 @@ func mapAnthropicTools(tools []anthropicTool, choice json.RawMessage) (antigravi
 			}
 			mapped.GoogleSearch, mapped.Search = json.RawMessage(`{}`), search
 		case strings.HasPrefix(typeName, "web_fetch_"), strings.HasPrefix(typeName, "code_execution_"),
-			strings.HasPrefix(typeName, "tool_search_tool_"), strings.Contains(typeName, "toolset"):
+			strings.HasPrefix(typeName, "tool_search_tool_"), strings.HasPrefix(typeName, "advisor_"), strings.Contains(typeName, "toolset"):
 		case typeName == "", typeName == "custom":
 			if tool.Name == "" {
 				return antigravity.Tools{}, fmt.Errorf("tool name is required")
@@ -653,11 +660,45 @@ func anthropicClientTool(tool anthropicTool, typeName string) (antigravity.Funct
 		}
 		declaration.Description = "View, create and edit text files. view reads a file or lists a directory, create writes file_text, str_replace replaces old_str with new_str, insert adds insert_text after insert_line."
 		declaration.Parameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":[` + commands + `]},"path":{"type":"string"},"file_text":{"type":"string"},"old_str":{"type":"string"},"new_str":{"type":"string"},"insert_line":{"type":"integer"},"insert_text":{"type":"string"},"view_range":{"type":"array","items":{"type":"integer"}}},"required":["command","path"]}`)
+	case strings.HasPrefix(typeName, "computer_"):
+		var width, height int64
+		if json.Unmarshal(tool.Options["display_width_px"], &width) != nil || json.Unmarshal(tool.Options["display_height_px"], &height) != nil {
+			return antigravity.FunctionDeclaration{}, fmt.Errorf("tool type %q requires integer display_width_px and display_height_px", tool.Type)
+		}
+		var zoom bool
+		_ = json.Unmarshal(tool.Options["enable_zoom"], &zoom)
+		declaration.Description, declaration.Parameters = anthropicComputerTool(typeName, width, height, zoom)
 	default:
 		declaration.Description = "Read and write persistent memory files in the /memories directory. view reads a file or lists a directory, create writes file_text, str_replace replaces old_str with new_str, insert adds insert_text after insert_line, delete removes path, rename moves old_path to new_path."
 		declaration.Parameters = json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["view","create","str_replace","insert","delete","rename"]},"path":{"type":"string"},"file_text":{"type":"string"},"old_str":{"type":"string"},"new_str":{"type":"string"},"insert_line":{"type":"integer"},"insert_text":{"type":"string"},"view_range":{"type":"array","items":{"type":"integer"}},"old_path":{"type":"string"},"new_path":{"type":"string"}},"required":["command"]}`)
 	}
 	return declaration, nil
+}
+
+// anthropicComputerTool 返回 computer 工具的函数说明与参数 Schema：20241022 为十个基础动作，之后的版本加点击坐标与修饰键、滚动、按住与等待，enable_zoom 时加 zoom
+func anthropicComputerTool(typeName string, width, height int64, zoom bool) (string, json.RawMessage) {
+	actions := []string{"key", "type", "mouse_move", "left_click", "left_click_drag", "right_click", "middle_click", "double_click", "screenshot", "cursor_position"}
+	point := map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "minItems": 2, "maxItems": 2}
+	properties := map[string]any{"coordinate": point, "start_coordinate": point, "text": map[string]any{"type": "string"}}
+	description := fmt.Sprintf("Use a mouse and keyboard to interact with a computer and take screenshots. The screen is %dx%d pixels; coordinate and start_coordinate are [x, y] pixel positions from the top-left corner. screenshot captures the screen, cursor_position reports the cursor position, mouse_move moves the cursor to coordinate, left_click_drag drags from start_coordinate to coordinate, type types text, key presses the key or key combination in text such as Return or ctrl+s.", width, height)
+	if typeName == "computer_20241022" {
+		description += " left_click, right_click, middle_click and double_click click at the current cursor position."
+	} else {
+		actions = append(actions, "triple_click", "left_mouse_down", "left_mouse_up", "scroll", "hold_key", "wait")
+		properties["scroll_direction"] = map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}}
+		properties["scroll_amount"] = map[string]any{"type": "integer"}
+		properties["duration"] = map[string]any{"type": "number"}
+		properties["key"] = map[string]any{"type": "string"}
+		description += " left_click, right_click, middle_click, double_click and triple_click click at coordinate or at the current cursor position while holding the modifier keys in key, left_mouse_down and left_mouse_up press and release the left button at the cursor, scroll turns the wheel scroll_amount clicks in scroll_direction at coordinate while holding the modifier keys in text, hold_key holds the key in text for duration seconds, wait pauses for duration seconds."
+	}
+	if zoom {
+		actions = append(actions, "zoom")
+		properties["region"] = map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "minItems": 4, "maxItems": 4}
+		description += " zoom shows region [x0, y0, x1, y1] of the screen at full resolution."
+	}
+	properties["action"] = map[string]any{"type": "string", "enum": actions}
+	parameters, _ := json.Marshal(map[string]any{"type": "object", "properties": properties, "required": []string{"action"}})
+	return description, parameters
 }
 
 func anthropicToolChoice(raw json.RawMessage) (antigravity.ToolConfig, error) {

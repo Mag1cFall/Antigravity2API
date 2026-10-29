@@ -34,17 +34,21 @@ func marshalSchema(schema map[string]any) (json.RawMessage, error) {
 	return buffer.Bytes(), err
 }
 
-// writeSchema 写出一个 Schema 节点，声明顺序之外的字段按键名排序排在最后
+// writeSchema 写出一个 Schema 节点，声明顺序之外的字段按键名排序排在最后，空的映射字段与 protojson 一样不写出
 func writeSchema(buffer *bytes.Buffer, schema map[string]any) error {
+	present := func(key string) bool {
+		entries, isMap := schema[key].(map[string]any)
+		return !schemaMapFields[key] || !isMap || len(entries) > 0
+	}
 	keys := make([]string, 0, len(schema))
 	for _, key := range schemaFieldOrder {
-		if _, ok := schema[key]; ok {
+		if _, ok := schema[key]; ok && present(key) {
 			keys = append(keys, key)
 		}
 	}
 	var rest []string
 	for key := range schema {
-		if !slices.Contains(schemaFieldOrder, key) {
+		if !slices.Contains(schemaFieldOrder, key) && present(key) {
 			rest = append(rest, key)
 		}
 	}
