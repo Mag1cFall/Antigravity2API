@@ -30,7 +30,7 @@ export function CardHeader({
 }) {
   return (
     <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 pt-3 pb-3">
-      <div className="flex min-w-0 flex-[1_1_240px] items-start gap-2">
+      <div className="flex min-w-0 flex-[1_1_160px] items-start gap-2">
         {icon && (
           <span className="flex h-6 shrink-0 items-center text-foreground-muted">{icon}</span>
         )}

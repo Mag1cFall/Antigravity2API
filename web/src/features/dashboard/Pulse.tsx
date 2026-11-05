@@ -1,8 +1,9 @@
-import { TriangleAlert } from 'lucide-react'
+import { Info, TriangleAlert } from 'lucide-react'
 import { Link } from 'react-router'
 
 import { Meter } from '@/components/ui/meter'
 import { DotList } from '@/components/ui/stats'
+import { Tooltip } from '@/components/ui/tooltip'
 import { accountMessages } from '@/features/accounts/messages'
 import { type Status, statusOf } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
@@ -26,7 +27,7 @@ import { fill, useI18n, useMessages } from '@/lib/i18n'
 const statusOrder: { status: Status; fill: string }[] = [
   { status: 'ready', fill: 'bg-success' },
   { status: 'cooling', fill: 'bg-warning' },
-  { status: 'verify', fill: 'bg-warning' },
+  { status: 'verify', fill: 'bg-error' },
   { status: 'error', fill: 'bg-error' },
   { status: 'pending', fill: 'bg-info' },
   { status: 'disabled', fill: 'bg-foreground-subtle' },
@@ -166,7 +167,14 @@ function QuotaCellGroup({ accounts }: { accounts: Account[] }) {
   ).length
   return (
     <>
-      <dt className="text-xs text-foreground-muted">{m.quota}</dt>
+      <dt className="flex items-center gap-1 text-xs text-foreground-muted">
+        {m.quota}
+        <Tooltip label={m.quotaHint}>
+          <button type="button" aria-label={m.quotaHint} className="inline-flex rounded-sm">
+            <Info size={12} aria-hidden />
+          </button>
+        </Tooltip>
+      </dt>
       <dd className="flex flex-col gap-2">
         {groups.map((group) => (
           <QuotaRow key={group} accounts={accounts} group={group} />

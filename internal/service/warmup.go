@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/auth"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
@@ -88,8 +91,7 @@ func (s *Service) warmups() []warmup {
 				if bucket.Window != "weekly" || bucket.RemainingFraction < 0.999 || err != nil || reset.Sub(read.at) < weeklyWindow-time.Minute || now.Sub(s.warmed[id][bucket.BucketID]) < warmupInterval {
 					continue
 				}
-				prefix, _, _ := strings.Cut(bucket.BucketID, "-")
-				if model := cheapest(s.catalogs[id], prefix); model != "" {
+				if model := cheapest(s.catalogs[id], antigravity.BucketGroup(bucket.BucketID)); model != "" {
 					targets = append(targets, warmup{id: id, bucket: bucket.BucketID, model: model})
 				}
 			}
@@ -116,7 +118,41 @@ func cheapest(models []antigravity.CatalogModel, group string) string {
 	return best
 }
 
-// ping 以账户与模型经生成路径发送一条 Hi 并读完回答，返回上游错误
+// Prewarm 是管理端的手动预热：以账户与模型经生成路径发送一条 Hi 并读完回答，成功后重新读取该账户的额度，返回模型所属额度组；账户不存在、已停用、未就绪或模型目录中没有该模型时不发送并返回原因
+func (s *Service) Prewarm(ctx context.Context, id, name string) (string, error) {
+	records := s.store.Accounts()
+	index := slices.IndexFunc(records, func(record *auth.Account) bool { return record.ID == id })
+	switch {
+	case index < 0:
+		return "", &Error{Status: http.StatusNotFound, Message: "账户不存在: " + id}
+	case !records[index].Enabled:
+		return "", &Error{Status: http.StatusConflict, Message: "账户已停用"}
+	case s.account(id) == nil:
+		s.mu.Lock()
+		reason := s.failures[id]
+		s.mu.Unlock()
+		return "", &Error{Status: http.StatusServiceUnavailable, Message: strings.TrimSpace("账户未就绪 " + reason)}
+	}
+	model, err := s.resolve(name, antigravity.GenerationConfig{})
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	listed := slices.ContainsFunc(s.catalogs[id], func(entry antigravity.CatalogModel) bool { return entry.ID == model.ID })
+	s.mu.Unlock()
+	if !listed {
+		return model.QuotaGroup(), &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("账户的模型目录中没有 %s", model.ID)}
+	}
+	if err := s.ping(ctx, warmup{id: id, model: model.ID}); err != nil {
+		return model.QuotaGroup(), err
+	}
+	if err := s.RefreshQuota(ctx, id); err != nil {
+		slog.WarnContext(ctx, "读取额度摘要失败 | 错误="+err.Error(), "source", id)
+	}
+	return model.QuotaGroup(), nil
+}
+
+// ping 以账户与模型经生成路径发送一条 Hi 并读完回答，事件交给 context 中的请求 Trace，返回上游错误
 func (s *Service) ping(ctx context.Context, target warmup) error {
 	events, err := s.Generate(ctx, antigravity.GenerateRequest{
 		Model:     target.model,
@@ -126,8 +162,10 @@ func (s *Service) ping(ctx context.Context, target warmup) error {
 	if err != nil {
 		return err
 	}
+	trace := requestdb.TraceFrom(ctx)
 	var failure error
 	for event := range events {
+		trace.Observe(event)
 		if event.Kind == antigravity.EventError && failure == nil {
 			failure = event.Err
 		}

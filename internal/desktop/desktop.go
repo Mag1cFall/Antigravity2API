@@ -170,6 +170,7 @@ func Run(options Options) error {
 			MinWidth:         960,
 			MinHeight:        600,
 			BackgroundColour: application.NewRGB(0xe6, 0xe7, 0xed),
+			Linux:            application.LinuxWindow{WebviewGpuPolicy: application.WebviewGpuPolicyNever},
 		}
 		if bounds.Width > 0 {
 			windowOptions.InitialPosition = application.WindowXY

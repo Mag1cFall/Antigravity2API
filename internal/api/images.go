@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -120,6 +121,23 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	var stream *streamKeepalive
+	if request.Stream {
+		stream = keepStreamAlive(w, sseHeartbeat)
+		defer stream.stop()
+	} else {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
+	}
+	// streamed 在流式响应头已由心跳写出时以 SSE 错误事件写出 err 并返回 true
+	streamed := func(err error) bool {
+		if stream == nil || !stream.stop() {
+			return false
+		}
+		writeOpenAIStreamError(stream, r, err)
+		return true
+	}
 	results, err := s.generateImages(r.Context(), antigravity.GenerateRequest{
 		ID:       newID("img"),
 		Model:    request.Model,
@@ -128,7 +146,7 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		Config:   antigravity.GenerationConfig{ResponseModalities: []string{"IMAGE"}, ImageConfig: config},
 	}, request.N)
 	if err != nil {
-		if shouldWriteRequestError(r, err) {
+		if shouldWriteRequestError(r, err) && !streamed(err) {
 			writeOpenAIRequestError(w, err)
 		}
 		return
@@ -138,7 +156,10 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 	var data []map[string]any
 	for _, result := range results {
 		if len(result.media) == 0 {
-			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "the model returned no image: finish reason "+result.finishReason)
+			message := "the model returned no image: finish reason " + result.finishReason
+			if !streamed(errors.New(message)) {
+				writeOpenAIError(w, http.StatusBadGateway, "upstream_error", message)
+			}
 			return
 		}
 		for _, media := range result.media {
@@ -151,7 +172,9 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 				item["size"], item["quality"], item["background"] = cmp.Or(request.Size, "auto"), cmp.Or(request.Quality, "auto"), "auto"
 			case request.ResponseFormat == "url":
 				if err := output.save(media); err != nil {
-					writeOpenAIRequestError(w, err)
+					if !streamed(err) {
+						writeOpenAIRequestError(w, err)
+					}
 					return
 				}
 				item["url"] = output.link(media)
@@ -168,11 +191,11 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		writeJSON(w, http.StatusOK, map[string]any{"created": created, "data": data})
 		return
 	}
-	if err := streamHeaders(w); err != nil {
+	if err := stream.open(); err != nil {
 		return
 	}
 	for _, item := range data {
-		if err := writeSSE(w, item["type"].(string), item); err != nil {
+		if err := writeSSE(stream, item["type"].(string), item); err != nil {
 			return
 		}
 	}

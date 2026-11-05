@@ -39,7 +39,7 @@ export function AccountReason({
         title={full ? undefined : m.verifyReason}
         className="rounded-sm text-xs text-primary hover:underline"
       >
-        {m.openVerify}
+        {full ? m.openVerify : m.verifyShort}
         <span className="whitespace-nowrap">
           {'\u2060'}
           <ExternalLink size={12} aria-hidden className="ml-1 inline align-[-1px]" />

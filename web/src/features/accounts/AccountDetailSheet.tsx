@@ -1,4 +1,4 @@
-import { Network, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
+import { ExternalLink, Network, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 
 import { appMessages } from '@/app/messages'
@@ -14,6 +14,7 @@ import type { RowActions } from '@/features/accounts/AccountTable'
 import { QuotaCell } from '@/features/accounts/AccountTable'
 import {
   quotaFailure,
+  useClearCooldown,
   useQuotaRefresh,
   useSetCredits,
   useSetLabel,
@@ -186,6 +187,7 @@ export function AccountDetailSheet({
   const { locale } = useI18n()
   const status = account ? statusOf(account) : undefined
   const quotaRefresh = useQuotaRefresh()
+  const clearCooldown = useClearCooldown()
   const failure = account && quotaFailure(quotaRefresh, account)
   return (
     <Dialog
@@ -212,8 +214,8 @@ export function AccountDetailSheet({
         >
           <div className="flex flex-col gap-6">
             <div className="flex flex-wrap items-center gap-2">
-              <SwitchClientDialog email={account.id} variant="button" primary />
-              {account.state === 'error' && (
+              <SwitchClientDialog email={account.id} variant="button" />
+              {status === 'error' && (
                 <Button
                   size="sm"
                   loading={verifying}
@@ -232,7 +234,7 @@ export function AccountDetailSheet({
                 }}
               >
                 <Network size={16} aria-hidden />
-                {m.proxy}
+                {m.proxyMenu}
               </Button>
               <label className="ml-2 flex items-center gap-2 text-sm">
                 <Switch
@@ -257,10 +259,35 @@ export function AccountDetailSheet({
                 {m.delete}
               </Button>
             </div>
-            {(status === 'verify' || status === 'error') && (
-              <Callout tone={status === 'verify' ? 'warning' : 'error'} role="status">
+            {status === 'error' && (
+              <Callout tone="error" role="status">
                 <AccountReason account={account} now={now} full />
-                {status === 'verify' && <p className="text-xs">{m.verifyHint}</p>}
+              </Callout>
+            )}
+            {status === 'verify' && (
+              <Callout tone="error" role="status">
+                <div className="flex flex-col gap-1">
+                  <p className="font-medium">{m.verifyReason}</p>
+                  <p className="text-xs">{m.verifyHint}</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="primary" asChild>
+                    <a href={account.verify_url} target="_blank" rel="noopener noreferrer">
+                      <ExternalLink size={16} aria-hidden />
+                      {m.openVerify}
+                    </a>
+                  </Button>
+                  <Button
+                    size="sm"
+                    loading={verifying}
+                    onClick={() => {
+                      actions.onVerify(account)
+                    }}
+                  >
+                    <RotateCcw size={16} aria-hidden />
+                    {m.verifyAction}
+                  </Button>
+                </div>
               </Callout>
             )}
             <Block
@@ -306,11 +333,20 @@ export function AccountDetailSheet({
               {account.cooldown && (
                 <ul className="flex flex-col gap-1 text-sm text-warning-text">
                   {Object.entries(account.cooldown).map(([group, until]) => (
-                    <li key={group}>
+                    <li key={group} className="flex items-center justify-between gap-3">
                       {fill(m.detailCooldownUntil, {
                         group: nameOf(q, group),
                         time: formatFullDateTime(new Date(until), locale),
                       })}
+                      <Button
+                        size="sm"
+                        loading={clearCooldown.isPending && clearCooldown.variables.scope === group}
+                        onClick={() => {
+                          clearCooldown.mutate({ account, scope: group })
+                        }}
+                      >
+                        {m.cooldownClear}
+                      </Button>
                     </li>
                   ))}
                 </ul>

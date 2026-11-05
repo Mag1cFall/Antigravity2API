@@ -129,10 +129,20 @@ export const settingsMessages = defineMessages(
     fillFirstHint:
       '先用优先级最高的账户，按添加顺序一直用第一个，它忙、冷却或额度用完后再用下一个。',
     timeout: '请求超时',
-    timeoutHint: '等待首个上游事件与相邻两个上游事件之间的最长时间，例如 5m、30s。',
+    timeoutHint: '等待首个上游事件与相邻两个上游事件之间的最长时间。',
+    unitSeconds: '秒',
+    unitMinutes: '分钟',
+    unitHours: '小时',
+    unitOf: '{name}的单位',
+    keepalive: '非流式保活',
+    keepaliveHint:
+      '非流式请求等待结果超过 10 秒时先返回 200，之后每 10 秒写出一个换行，经 Cloudflare、nginx 等反向代理时连接不因长时间无数据断开。',
+    fakeStream: '假流式',
+    fakeStreamHint:
+      '流式请求先取得完整结果再按流式格式输出，中途失败时换账户重新生成，等待期间照常发送心跳。',
     quotaRefresh: '额度自动刷新间隔',
     quotaRefreshHint:
-      '后台每隔这段时间读取全部账户（含停用账户）的额度，例如 15m、1h；最短 1m，填 0 不自动刷新。',
+      '后台每隔这段时间读取全部账户（含停用账户）的额度；最短 1 分钟，填 0 不自动刷新。',
     quotaReserve: '额度保留比例（%）',
     quotaReserveHint:
       '账户某个额度组的 5 小时或每周剩余比例不高于此百分比时，调度跳过该组，直到该窗口重置。填 0 时只跳过已用尽的组，开启 AI 积分超额使用的账户在额度用尽后继续使用积分。',
@@ -166,12 +176,15 @@ export const settingsMessages = defineMessages(
     saved: '设置已保存',
     saveFailed: '保存失败：{message}',
     restartNotice: '以下设置已保存，重启服务后生效：{keys}',
+    invalidNotice: '.env 中以下配置项取值无效，正在按默认值运行，保存设置后改为默认值：',
+    environment: '环境变量',
+    environmentHint: '由进程环境变量 {key} 决定，修改环境变量并重启服务后生效。',
     loadFailed: '无法读取设置',
     errListen: '填写 host:port，端口为 1 到 65535，例如 127.0.0.1:8017。',
     errRequired: '不能为空。',
     errProxy: '每行填写一个 http://、https:// 或 socks5:// 开头且不带路径的地址，或留空。',
     errPositive: '填写正整数。',
-    errDuration: '填写 Go 时长，例如 30s、2m、1h30m。',
+    errDuration: '填写大于 0 的数值。',
     errLogTotal: '填写不小于 20 的整数。',
     errReserve: '填写 0 到 99 的整数。',
     errAdminUser: '开启远程登录需要用户名。',
@@ -321,11 +334,20 @@ export const settingsMessages = defineMessages(
     fillFirstHint:
       'Use the highest-priority accounts; keep using the first one in the order they were added until it is busy, cooling down or out of quota.',
     timeout: 'Request timeout',
-    timeoutHint:
-      'Longest wait for the first upstream event and between two upstream events, such as 5m or 30s.',
+    timeoutHint: 'Longest wait for the first upstream event and between two upstream events.',
+    unitSeconds: 'seconds',
+    unitMinutes: 'minutes',
+    unitHours: 'hours',
+    unitOf: '{name} unit',
+    keepalive: 'Non-streaming keepalive',
+    keepaliveHint:
+      'When a non-streaming request waits more than 10 seconds for its result, return 200 first and then write a newline every 10 seconds, so reverse proxies such as Cloudflare and nginx keep the connection open.',
+    fakeStream: 'Fake streaming',
+    fakeStreamHint:
+      'Streaming requests get the complete result first and then output it in streaming format; failures midway are regenerated on another account, and heartbeats are sent while waiting.',
     quotaRefresh: 'Quota refresh interval',
     quotaRefreshHint:
-      'Read the quota of every account, disabled ones included, in the background at this interval, such as 15m or 1h. The minimum is 1m; 0 turns automatic refresh off.',
+      'Read the quota of every account, disabled ones included, in the background at this interval. The minimum is 1 minute; 0 turns automatic refresh off.',
     quotaReserve: 'Quota reserve (%)',
     quotaReserveHint:
       'When the 5-hour or weekly remaining share of an account quota group is at or below this percentage, scheduling skips that group until the window resets. With 0, only used-up groups are skipped, and accounts with AI credit overages keep running on credits after their quota is used up.',
@@ -361,13 +383,18 @@ export const settingsMessages = defineMessages(
     saved: 'Settings saved',
     saveFailed: 'Save failed: {message}',
     restartNotice: 'These settings are saved and apply after the service restarts: {keys}',
+    invalidNotice:
+      'These settings in .env have invalid values. The service is using their defaults, and saving settings writes the defaults:',
+    environment: 'Environment variable',
+    environmentHint:
+      'Set by the environment variable {key}. Change the environment variable and restart the service to apply.',
     loadFailed: 'Could not load settings',
     errListen: 'Enter host:port with a port from 1 to 65535, for example 127.0.0.1:8017.',
     errRequired: 'Required.',
     errProxy:
       'Enter one address per line starting with http://, https:// or socks5:// without a path, or leave it empty.',
     errPositive: 'Enter a positive whole number.',
-    errDuration: 'Enter a Go duration such as 30s, 2m or 1h30m.',
+    errDuration: 'Enter a number greater than 0.',
     errLogTotal: 'Enter a whole number of at least 20.',
     errReserve: 'Enter a whole number from 0 to 99.',
     errAdminUser: 'Remote sign-in needs a username.',
@@ -506,10 +533,20 @@ export const settingsMessages = defineMessages(
     fillFirstHint:
       '先用優先順序最高的帳號，依新增順序一直用第一個，它忙碌、冷卻或額度用完後再用下一個。',
     timeout: '請求逾時',
-    timeoutHint: '等待第一個上游事件與相鄰兩個上游事件之間的最長時間，例如 5m、30s。',
+    timeoutHint: '等待第一個上游事件與相鄰兩個上游事件之間的最長時間。',
+    unitSeconds: '秒',
+    unitMinutes: '分鐘',
+    unitHours: '小時',
+    unitOf: '{name}的單位',
+    keepalive: '非串流保持連線',
+    keepaliveHint:
+      '非串流請求等待結果超過 10 秒時先回傳 200，之後每 10 秒寫出一個換行，經 Cloudflare、nginx 等反向代理時連線不會因長時間沒有資料而中斷。',
+    fakeStream: '模擬串流',
+    fakeStreamHint:
+      '串流請求先取得完整結果再以串流格式輸出，中途失敗時換帳號重新產生，等待期間照常傳送心跳。',
     quotaRefresh: '額度自動重新整理間隔',
     quotaRefreshHint:
-      '背景每隔這段時間讀取全部帳號（含已停用帳號）的額度，例如 15m、1h；最短 1m，填 0 不自動重新整理。',
+      '背景每隔這段時間讀取全部帳號（含已停用帳號）的額度；最短 1 分鐘，填 0 不自動重新整理。',
     quotaReserve: '額度保留比例（%）',
     quotaReserveHint:
       '帳號某個額度群組的 5 小時或每週剩餘比例不高於此百分比時，排程會略過該群組，直到該時段重設。填 0 時只略過已用完的群組，開啟 AI 點數超額使用的帳號在額度用完後繼續使用點數。',
@@ -544,12 +581,15 @@ export const settingsMessages = defineMessages(
     saved: '設定已儲存',
     saveFailed: '儲存失敗：{message}',
     restartNotice: '下列設定已儲存，重新啟動服務後生效：{keys}',
+    invalidNotice: '.env 中下列設定項的值無效，目前以預設值執行，儲存設定後改為預設值：',
+    environment: '環境變數',
+    environmentHint: '由處理程序環境變數 {key} 決定，修改環境變數並重新啟動服務後生效。',
     loadFailed: '無法讀取設定',
     errListen: '填寫 host:port，連接埠為 1 到 65535，例如 127.0.0.1:8017。',
     errRequired: '不可空白。',
     errProxy: '每行填寫一個以 http://、https:// 或 socks5:// 開頭且不含路徑的位址，或留空。',
     errPositive: '填寫正整數。',
-    errDuration: '填寫 Go 時間長度，例如 30s、2m、1h30m。',
+    errDuration: '填寫大於 0 的數值。',
     errLogTotal: '填寫不小於 20 的整數。',
     errReserve: '填寫 0 到 99 的整數。',
     errAdminUser: '啟用遠端登入需要使用者名稱。',

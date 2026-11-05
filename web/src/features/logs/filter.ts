@@ -26,6 +26,24 @@ export function parseLogFilter(params: URLSearchParams): LogFilter {
   }
 }
 
+// requestStages 返回各进行中请求的当前阶段：该请求最近一条 request.progress 日志的首行去掉模型一项，各项以中点相连，键为请求 ID
+export function requestStages(logs: LogEntry[]) {
+  const stages = new Map<string, string>()
+  for (const entry of logs) {
+    if (entry.request_id && entry.event === 'request.progress') {
+      const line = entry.message.split('\n')[0] ?? ''
+      stages.set(
+        entry.request_id,
+        line
+          .split(' | ')
+          .filter((part) => !part.startsWith('模型='))
+          .join(' · '),
+      )
+    }
+  }
+  return stages
+}
+
 // matchLog 判断日志是否达到最低级别、来源相同并包含搜索词
 export function matchLog(entry: LogEntry, filter: LogFilter) {
   if (filter.level !== 'all' && levelRank[entry.level] < levelRank[filter.level]) return false

@@ -14,11 +14,9 @@ import { fill, useMessages } from '@/lib/i18n'
 export function SwitchClientDialog({
   email,
   variant,
-  primary = false,
 }: {
   email: string
   variant: 'icon' | 'button'
-  primary?: boolean
 }) {
   const m = useMessages(accountMessages)
   const app = useMessages(appMessages)
@@ -49,7 +47,7 @@ export function SwitchClientDialog({
         </Tooltip>
       ) : (
         <DialogTrigger asChild>
-          <Button variant={primary ? 'primary' : 'secondary'} size="sm">
+          <Button size="sm">
             <ArrowRightLeft size={16} aria-hidden />
             {m.switchClient}
           </Button>

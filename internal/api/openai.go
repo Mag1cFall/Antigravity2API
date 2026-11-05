@@ -112,6 +112,7 @@ func openAIModelObject(model antigravity.Model) map[string]any {
 		"name": model.Name, "description": model.Description,
 		"supported_generation_methods": model.Methods,
 		"input_token_limit":            model.InputTokenLimit, "output_token_limit": model.OutputTokenLimit,
+		"context_length": model.InputTokenLimit, "max_completion_tokens": model.OutputTokenLimit,
 	}
 	if len(model.Capabilities) > 0 {
 		item["capabilities"] = model.Capabilities
@@ -221,6 +222,11 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	count := 1
 	if request.N != nil {
 		count = int(*request.N)
+	}
+	if !request.Stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
 	}
 	choices := s.startChatChoices(r.Context(), generateRequest, count, request.Stream)
 	defer choices.cancel()
@@ -846,9 +852,12 @@ func chatCompletionChoice(index int, result generationResult, tools []openAITool
 }
 
 func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, request chatRequest, id string, created int64, choices *chatChoices) {
-	if err := streamHeaders(w); err != nil {
+	stream, err := openStream(w, sseHeartbeat)
+	defer stream.stop()
+	if err != nil {
 		return
 	}
+	w = stream
 	var writing sync.Mutex
 	write := func(index int, delta map[string]any, finish *string) error {
 		writing.Lock()
@@ -860,15 +869,10 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 	}
-	heartbeat := func() error {
-		writing.Lock()
-		defer writing.Unlock()
-		return writeSSEHeartbeat(w)
-	}
 	media := s.mediaOutputFor(r)
 	results, err := choices.run(func(index int, events <-chan antigravity.Event) (generationResult, error) {
 		choice := &chatStreamChoice{tools: request.Tools, index: index, write: write, media: media}
-		result, err := consumeStreamEvents(choices.ctx, events, choice.emit, heartbeat)
+		result, err := consumeEvents(choices.ctx, events, choice.emit)
 		if err != nil {
 			return result, err
 		}

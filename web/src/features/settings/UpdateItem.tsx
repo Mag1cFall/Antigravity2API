@@ -15,8 +15,8 @@ const updateMessages = defineMessages(
     checking: '正在读取最新版本',
     upToDate: '已是最新版本',
     available: '新版本 {version}',
-    published: '{time}发布',
-    checkedAt: '{time}检查',
+    published: '发布于 {time}',
+    checkedAt: '检查于 {time}',
     updateTo: '更新到 {version}',
     confirmHint:
       '下载 {version} 的发行包并校验 SHA-256，替换程序后重启，页面在新版本就绪后自动刷新。',
@@ -52,8 +52,8 @@ const updateMessages = defineMessages(
     checking: '正在讀取最新版本',
     upToDate: '已是最新版本',
     available: '有新版本 {version}',
-    published: '{time}發布',
-    checkedAt: '{time}檢查',
+    published: '發布於 {time}',
+    checkedAt: '檢查於 {time}',
     updateTo: '更新至 {version}',
     confirmHint:
       '下載 {version} 的發行套件並驗證 SHA-256，替換程式後重新啟動，新版本就緒後頁面會自動重新整理。',

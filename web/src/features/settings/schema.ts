@@ -81,6 +81,8 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
       ROUTING_STRATEGY: z.enum(['round-robin', 'fill-first']),
       PREFER_LOWER_TIER_MODELS: z.array(z.string()),
       REQUEST_TIMEOUT: z.string().trim().regex(goDuration, m.errDuration),
+      NONSTREAM_KEEPALIVE: z.boolean(),
+      FAKE_STREAM: z.boolean(),
       QUOTA_REFRESH_INTERVAL: z
         .string()
         .trim()
@@ -151,6 +153,8 @@ export function toForm(settings: Settings): SettingsForm {
     ROUTING_STRATEGY: v('ROUTING_STRATEGY', 'round-robin') as SettingsForm['ROUTING_STRATEGY'],
     PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS', ''),
     REQUEST_TIMEOUT: v('REQUEST_TIMEOUT', '5m'),
+    NONSTREAM_KEEPALIVE: bool('NONSTREAM_KEEPALIVE', 'true'),
+    FAKE_STREAM: bool('FAKE_STREAM', 'false'),
     QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL', '15m'),
     QUOTA_RESERVE_PERCENT: num('QUOTA_RESERVE_PERCENT', '0'),
     WEEKLY_QUOTA_WARMUP: bool('WEEKLY_QUOTA_WARMUP', 'false'),

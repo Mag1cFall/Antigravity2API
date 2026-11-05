@@ -53,11 +53,15 @@ func (uploads *geminiUploads) end(id string) {
 // geminiFileObject 构造 Files API 的 File 资源，uri 为 Files API 前缀加文件 ID
 func geminiFileObject(file storedFile) map[string]any {
 	created := file.CreatedAt.Format(time.RFC3339Nano)
-	return map[string]any{
+	object := map[string]any{
 		"name": "files/" + file.ID, "displayName": file.Name, "mimeType": file.MIME,
 		"sizeBytes": strconv.FormatInt(file.Size, 10), "createTime": created, "updateTime": created,
 		"uri": geminiFilesURIPrefix + file.ID, "state": "ACTIVE", "source": "UPLOADED",
 	}
+	if file.ExpiresAt != nil {
+		object["expirationTime"] = file.ExpiresAt.Format(time.RFC3339Nano)
+	}
+	return object
 }
 
 // writeGeminiFileError 写入 Files API 错误，文件不存在时为 404，超过大小上限时为 413
@@ -176,7 +180,7 @@ func (s *server) handleGeminiUploadChunk(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.uploads.end(id)
-	file, err := s.files.save(upload.name, upload.mime, defaultFilePurpose, &upload.data)
+	file, err := s.files.save(upload.name, upload.mime, defaultFilePurpose, geminiFileRetention, &upload.data)
 	w.Header().Set("X-Goog-Upload-Status", "final")
 	if err != nil {
 		writeGeminiFileError(w, r, err)
@@ -217,7 +221,7 @@ func (s *server) uploadGeminiMultipart(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		file, err := s.files.save(geminiUploadName(metadata, part.FileName(), r),
-			firstMediaType(part.Header.Get("Content-Type"), r.Header.Get("X-Goog-Upload-Header-Content-Type"), metadata.File.MIMEType), defaultFilePurpose, part)
+			firstMediaType(part.Header.Get("Content-Type"), r.Header.Get("X-Goog-Upload-Header-Content-Type"), metadata.File.MIMEType), defaultFilePurpose, geminiFileRetention, part)
 		part.Close()
 		w.Header().Set("X-Goog-Upload-Status", "final")
 		if err != nil {

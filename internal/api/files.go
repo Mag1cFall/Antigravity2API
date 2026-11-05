@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -27,6 +28,12 @@ const (
 	defaultFilePurpose = "user_data"
 	// anthropicFilePagePrefix 为 Anthropic Files API next_page 游标的前缀，其余部分为上一页最后一个文件的 ID
 	anthropicFilePagePrefix = "page_"
+	// geminiFileRetention 为 Gemini Files API 上传文件的保留时长
+	geminiFileRetention = 48 * time.Hour
+	// openAIBatchFileRetention 为 purpose 为 batch 且没有 expires_after 的 OpenAI 文件的保留时长
+	openAIBatchFileRetention = 30 * 24 * time.Hour
+	// fileReclaimInterval 为删除到期文件的间隔
+	fileReclaimInterval = 10 * time.Minute
 )
 
 // errFileNotFound 表示文件 ID 不存在
@@ -43,6 +50,13 @@ type storedFile struct {
 	Purpose   string    `json:"purpose"`
 	Size      int64     `json:"bytes"`
 	CreatedAt time.Time `json:"created_at"`
+	// ExpiresAt 为到期时间，为空时不到期
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// expired 判断文件在 now 是否已到期
+func (file storedFile) expired(now time.Time) bool {
+	return file.ExpiresAt != nil && !file.ExpiresAt.After(now)
 }
 
 // fileStore 在目录中保存上传文件：内容文件名为文件 ID，元数据为同名 .json
@@ -66,8 +80,8 @@ func filesFrom(ctx context.Context) *fileStore {
 	return store
 }
 
-// save 保存文件内容与元数据，未声明具体 MIME 时按内容与文件名判断
-func (store *fileStore) save(name, mimeType, purpose string, content io.Reader) (storedFile, error) {
+// save 保存文件内容与元数据，未声明具体 MIME 时按内容与文件名判断，lifetime 大于 0 时文件在上传后该时长到期
+func (store *fileStore) save(name, mimeType, purpose string, lifetime time.Duration, content io.Reader) (storedFile, error) {
 	if err := os.MkdirAll(store.dir, 0o755); err != nil {
 		return storedFile{}, err
 	}
@@ -83,6 +97,10 @@ func (store *fileStore) save(name, mimeType, purpose string, content io.Reader) 
 		mimeType = detectMediaType(name, probe[:count])
 	}
 	file := storedFile{ID: "file-" + strings.ToLower(rand.Text()), Name: name, MIME: mimeType, Purpose: purpose, CreatedAt: time.Now().UTC()}
+	if lifetime > 0 {
+		expires := file.CreatedAt.Add(lifetime)
+		file.ExpiresAt = &expires
+	}
 	target, err := os.Create(filepath.Join(store.dir, file.ID))
 	if err != nil {
 		return storedFile{}, err
@@ -104,7 +122,7 @@ func (store *fileStore) save(name, mimeType, purpose string, content io.Reader) 
 	return file, nil
 }
 
-// get 返回文件元数据
+// get 返回文件元数据，已到期的文件删除后返回不存在
 func (store *fileStore) get(id string) (storedFile, error) {
 	if !fileIDPattern.MatchString(id) {
 		return storedFile{}, errFileNotFound
@@ -117,7 +135,13 @@ func (store *fileStore) get(id string) (storedFile, error) {
 		return storedFile{}, err
 	}
 	var file storedFile
-	return file, json.Unmarshal(raw, &file)
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return file, err
+	}
+	if file.expired(time.Now()) {
+		return storedFile{}, errors.Join(errFileNotFound, store.delete(id))
+	}
+	return file, nil
 }
 
 // read 返回文件元数据与内容
@@ -130,7 +154,7 @@ func (store *fileStore) read(id string) (storedFile, []byte, error) {
 	return file, data, err
 }
 
-// list 按创建时间从新到旧返回全部文件
+// list 按创建时间从新到旧返回全部未到期的文件，到期的文件随之删除
 func (store *fileStore) list() ([]storedFile, error) {
 	entries, err := os.ReadDir(store.dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -143,6 +167,9 @@ func (store *fileStore) list() ([]storedFile, error) {
 	for _, entry := range entries {
 		if id, ok := strings.CutSuffix(entry.Name(), ".json"); ok {
 			file, err := store.get(id)
+			if errors.Is(err, errFileNotFound) {
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -158,7 +185,22 @@ func (store *fileStore) remove(id string) error {
 	if _, err := store.get(id); err != nil {
 		return err
 	}
+	return store.delete(id)
+}
+
+// delete 删除文件内容与元数据文件
+func (store *fileStore) delete(id string) error {
 	return errors.Join(os.Remove(filepath.Join(store.dir, id+".json")), os.Remove(filepath.Join(store.dir, id)))
+}
+
+// reclaim 立即并在之后每隔 fileReclaimInterval 删除到期的文件
+func (store *fileStore) reclaim() {
+	for {
+		if _, err := store.list(); err != nil {
+			slog.Warn("删除到期文件失败", "dir", store.dir, "error", err)
+		}
+		time.Sleep(fileReclaimInterval)
+	}
 }
 
 // declaredMediaType 返回声明的具体媒体类型，缺失、不含子类型或为通用二进制时返回空
@@ -183,9 +225,13 @@ func fileResponse(r *http.Request, file storedFile) map[string]any {
 			"size_bytes": file.Size, "created_at": file.CreatedAt.Format(time.RFC3339), "downloadable": true,
 		}
 	}
+	var expires any
+	if file.ExpiresAt != nil {
+		expires = file.ExpiresAt.Unix()
+	}
 	return map[string]any{
 		"id": file.ID, "object": "file", "bytes": file.Size, "created_at": file.CreatedAt.Unix(),
-		"filename": file.Name, "purpose": file.Purpose, "status": "processed", "expires_at": nil, "status_details": nil,
+		"filename": file.Name, "purpose": file.Purpose, "status": "processed", "expires_at": expires, "status_details": nil,
 	}
 }
 
@@ -225,12 +271,35 @@ func (s *server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	if purpose == "" {
 		purpose = defaultFilePurpose
 	}
-	file, err := s.files.save(header.Filename, header.Header.Get("Content-Type"), purpose, content)
+	lifetime, err := fileLifetime(purpose, strings.TrimSpace(r.FormValue("expires_after[anchor]")), strings.TrimSpace(r.FormValue("expires_after[seconds]")))
+	if err != nil {
+		writeFileError(w, r, err)
+		return
+	}
+	file, err := s.files.save(header.Filename, header.Header.Get("Content-Type"), purpose, lifetime, content)
 	if err != nil {
 		writeFileError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, fileResponse(r, file))
+}
+
+// fileLifetime 返回 OpenAI 上传文件的保留时长：expires_after 的秒数在 3600 至 2592000 之间，purpose 为 batch 且没有 expires_after 时保留 30 天，其余文件不到期
+func fileLifetime(purpose, anchor, seconds string) (time.Duration, error) {
+	if anchor == "" && seconds == "" {
+		if purpose == "batch" {
+			return openAIBatchFileRetention, nil
+		}
+		return 0, nil
+	}
+	if anchor != "created_at" {
+		return 0, errors.New("expires_after[anchor] must be created_at")
+	}
+	value, err := strconv.ParseInt(seconds, 10, 64)
+	if err != nil || value < 3600 || value > 2592000 {
+		return 0, errors.New("expires_after[seconds] must be an integer between 3600 and 2592000")
+	}
+	return time.Duration(value) * time.Second, nil
 }
 
 // handleFileGet 返回文件元数据

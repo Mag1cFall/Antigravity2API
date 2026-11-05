@@ -34,7 +34,7 @@ import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { FamilyBadge, TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
 import { quotaMessages } from '@/features/quota/messages'
-import { groupBuckets, groups, nameOf } from '@/features/quota/quota'
+import { cellBuckets, groups, nameOf } from '@/features/quota/quota'
 import { QuotaLine } from '@/features/quota/QuotaLine'
 import { formatFullDateTime, formatNumber, formatRelative, type Locale } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
@@ -65,7 +65,7 @@ export function QuotaCell({
 }) {
   const m = useMessages(accountMessages)
   const q = useMessages(quotaMessages)
-  const buckets = groupBuckets(account.quota, group)
+  const buckets = cellBuckets(account.quota, group)
   if (buckets.length === 0) {
     return (
       <span className="text-xs text-foreground-subtle">
@@ -82,7 +82,7 @@ export function QuotaCell({
       {buckets.map((bucket) => (
         <QuotaLine
           key={bucket.bucket_id}
-          label={nameOf(q, bucket.window)}
+          label={bucket.group === group ? nameOf(q, bucket.window) : q.argon}
           fraction={bucket.remaining_fraction}
           reset={bucket.reset_time}
           now={now}
@@ -301,11 +301,11 @@ const AccountRow = memo(function AccountRow({
                 {account.id}
               </button>
             </Tooltip>
-            <div className="relative mt-1 flex h-[72px] min-w-0 flex-col justify-center gap-1 overflow-hidden text-xs text-foreground-muted max-sm:hidden xl:h-6 xl:flex-row xl:items-center xl:justify-start xl:gap-2">
-              <div className="flex h-6 min-w-0 shrink-0 items-center gap-2 *:shrink-0">
+            <div className="relative mt-1 flex h-[72px] min-w-0 flex-col gap-1 overflow-hidden text-xs text-foreground-muted max-sm:hidden xl:h-6 xl:flex-row xl:items-center xl:gap-1">
+              <div className="flex h-6 min-w-0 items-center gap-2 xl:gap-1">
                 {account.label && (
                   <span
-                    className="max-w-[120px] min-w-0 truncate font-medium text-foreground"
+                    className="max-w-[120px] min-w-8 truncate font-medium text-foreground"
                     title={account.label}
                   >
                     {account.label}
@@ -313,7 +313,7 @@ const AccountRow = memo(function AccountRow({
                 )}
                 {!phone && <TierBadge tier={account.tier} />}
               </div>
-              <div className="flex h-6 shrink-0 items-center gap-2 empty:hidden">
+              <div className="flex h-6 shrink-0 items-center gap-2 empty:hidden xl:gap-1">
                 <FamilyBadge account={account} compact />
                 {account.priority !== 0 && (
                   <IconTag
@@ -331,7 +331,7 @@ const AccountRow = memo(function AccountRow({
                   />
                 )}
               </div>
-              <div className="flex h-4 min-w-0 items-center">
+              <div className="flex h-4 min-w-0 items-center xl:shrink-0">
                 {lastUsed ? (
                   <Tooltip
                     label={
@@ -361,7 +361,7 @@ const AccountRow = memo(function AccountRow({
         <div className="flex h-[72px] flex-col items-start justify-center gap-1 max-sm:h-6 max-sm:flex-row max-sm:items-center max-sm:justify-start max-sm:gap-2 max-sm:overflow-hidden xl:h-[60px]">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 max-sm:shrink-0 max-sm:flex-nowrap">
             <AccountStatusBadge account={account} />
-            {account.state === 'error' && (
+            {(statusOf(account) === 'error' || (phone && statusOf(account) === 'verify')) && (
               <Tooltip label={m.verifyAction}>
                 <Button
                   size="sm"
@@ -425,6 +425,22 @@ const AccountRow = memo(function AccountRow({
                 <AccountReason account={account} now={now} />
               </button>
             </Tooltip>
+          ) : statusOf(account) === 'verify' && !phone ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <AccountReason account={account} now={now} />
+              <button
+                type="button"
+                aria-label={fill(m.verifyActionOf, { email: account.id })}
+                disabled={verifying}
+                className="inline-flex items-center gap-1 rounded-sm font-medium text-primary hover:underline disabled:opacity-60"
+                onClick={() => {
+                  actions.onVerify(account)
+                }}
+              >
+                {verifying && <LoaderCircle size={12} aria-hidden className="animate-spin" />}
+                {m.batchVerify}
+              </button>
+            </div>
           ) : (
             <div className="line-clamp-2 max-w-full min-w-0 text-xs max-sm:line-clamp-1 max-sm:flex-1">
               <AccountReason account={account} now={now} />
@@ -506,7 +522,7 @@ export function AccountTable({
     <Table label={m.title} fixed stack minWidth={880}>
       <colgroup>
         <col />
-        <col className="w-[156px] xl:w-[192px]" />
+        <col className="w-[156px] xl:w-[180px]" />
         <col className="w-[164px] xl:w-[224px]" />
         <col className="w-[164px] xl:w-[224px]" />
         <col className="w-[188px] xl:w-[192px]" />

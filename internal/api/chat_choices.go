@@ -21,7 +21,7 @@ type chatChoices struct {
 
 // startChatChoices 在各自 goroutine 中启动每个 choice 并立即读取其事件；非流式请求返回前等待各 Generate 返回，流式请求等待首个就绪的 choice，其余 choice 的启动错误作为该 choice 的流内错误
 func (s *server) startChatChoices(ctx context.Context, request antigravity.GenerateRequest, count int, stream bool) *chatChoices {
-	request.Unary = !stream
+	request.Unary = !stream || s.fakeStream()
 	choices := &chatChoices{events: make([]<-chan antigravity.Event, count)}
 	choices.ctx, choices.cancel = context.WithCancel(ctx)
 	started := make(chan error, count)

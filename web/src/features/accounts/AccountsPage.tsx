@@ -1,4 +1,4 @@
-import { Download, Trash2, Upload, Users } from 'lucide-react'
+import { Download, Trash2, Users } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
@@ -32,12 +32,9 @@ import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { useAccounts } from '@/features/accounts/queries'
 import { RefreshAllButton } from '@/features/accounts/RefreshAllButton'
 import { type Status, statuses, statusOf } from '@/features/accounts/status'
-import {
-  exportURL,
-  ImportAccountsDialog,
-  transferMessages,
-} from '@/features/accounts/TransferDialog'
+import { exportURL, transferMessages } from '@/features/accounts/TransferDialog'
 import type { Account } from '@/features/accounts/types'
+import { WarmupDialog } from '@/features/warmup/WarmupDialog'
 import { fill, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
@@ -186,12 +183,7 @@ export function AccountsPage() {
         actions={
           <>
             <RefreshAllButton accounts={list} />
-            <ImportAccountsDialog>
-              <Button>
-                <Upload size={16} aria-hidden />
-                {transfer.import}
-              </Button>
-            </ImportAccountsDialog>
+            <WarmupDialog accounts={list} selected={picked.map((account) => account.id)} />
             {list.length > 0 && (
               <Button asChild>
                 <a href={exportURL([])} download>

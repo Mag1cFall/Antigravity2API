@@ -16,6 +16,10 @@ type settings struct {
 	AdminPasswordSet bool              `json:"admin_password_set"`
 	// RestartRequired 是保存值与运行值不同、重启服务后才生效的配置项
 	RestartRequired []string `json:"restart_required"`
+	// Invalid 是取值无效、按默认值运行的配置项
+	Invalid []config.InvalidValue `json:"invalid"`
+	// Environment 是由进程环境变量决定、设置页不能修改的配置项
+	Environment []string `json:"environment"`
 }
 
 // getSettings 返回 .env 中保存的配置
@@ -28,7 +32,7 @@ func (s *server) getSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.settings(saved))
 }
 
-// updateSettings 按 .env 的解析与校验规则合并提交的配置项，原子写回 .env；除监听地址与目录外的项替换运行配置，命令行覆盖的代理保持，下一次请求生效
+// updateSettings 按 .env 的解析与校验规则合并提交的配置项，进程环境变量决定的项不变，只把非默认项原子写回 .env；除监听地址与目录外的项替换运行配置，命令行覆盖的代理保持，下一次请求生效
 func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Values map[string]string `json:"values"`
@@ -45,6 +49,9 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved := cfg
+	for _, key := range cfg.Environment {
+		delete(input.Values, key)
+	}
 	if err := cfg.Set(input.Values); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_settings", err.Error())
 		return
@@ -55,6 +62,10 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := cfg.Save(config.File); err != nil {
 		writeError(w, http.StatusInternalServerError, "settings_save_failed", err.Error())
+		return
+	}
+	if cfg, err = config.Load(config.File); err != nil {
+		writeError(w, http.StatusInternalServerError, "settings_unreadable", err.Error())
 		return
 	}
 	running := cfg
@@ -86,5 +97,5 @@ func (s *server) settings(saved config.Config) settings {
 			restart = append(restart, key)
 		}
 	}
-	return settings{Values: values, AdminPasswordSet: saved.AdminPassword != "", RestartRequired: restart}
+	return settings{Values: values, AdminPasswordSet: saved.AdminPassword != "", RestartRequired: restart, Invalid: append([]config.InvalidValue{}, saved.Invalid...), Environment: append([]string{}, saved.Environment...)}
 }

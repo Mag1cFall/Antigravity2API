@@ -120,6 +120,28 @@ export function useSetLabel() {
   })
 }
 
+// useClearCooldown 清除账户在一个额度组或模型上的冷却
+export function useClearCooldown() {
+  const m = useMessages(accountMessages)
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: ({ account, scope }: { account: Account; scope: string }) =>
+      api<Account>(accountPath(account.id) + '/cooldowns/' + encodeURIComponent(scope), {
+        method: 'DELETE',
+      }),
+    onSuccess: (result) => {
+      replaceAccount(client, result)
+      toast({ tone: 'success', title: fill(m.cooldownCleared, { email: result.id }) })
+    },
+    onError: (error, { account }) => {
+      toast({
+        tone: 'error',
+        title: fill(m.cooldownClearFailed, { email: account.id, message: error.message }),
+      })
+    },
+  })
+}
+
 // useSetCredits 开启或关闭账户的 AI 积分超额使用
 export function useSetCredits() {
   const m = useMessages(accountMessages)

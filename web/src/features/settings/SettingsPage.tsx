@@ -20,6 +20,7 @@ import { Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Card } from '@/components/ui/card'
+import { DurationInput } from '@/components/ui/duration-input'
 import { FormRow } from '@/components/ui/form-row'
 import { Indicator } from '@/components/ui/indicator'
 import { Input, Textarea } from '@/components/ui/input'
@@ -85,6 +86,8 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   ROUTING_STRATEGY: 'scheduling',
   PREFER_LOWER_TIER_MODELS: 'scheduling',
   REQUEST_TIMEOUT: 'scheduling',
+  NONSTREAM_KEEPALIVE: 'scheduling',
+  FAKE_STREAM: 'scheduling',
   QUOTA_REFRESH_INTERVAL: 'scheduling',
   QUOTA_RESERVE_PERCENT: 'scheduling',
   WEEKLY_QUOTA_WARMUP: 'scheduling',
@@ -218,7 +221,7 @@ function SectionNav({ section, invalid }: { section: Section; invalid: Set<Secti
     >
       <div className="relative">
         <Indicator active="[aria-current=page]" className="rounded-md bg-muted" />
-        <ul className="flex flex-wrap gap-1 md:flex-col">
+        <ul className="flex flex-wrap gap-1 max-sm:grid max-sm:grid-cols-2 md:flex-col">
           {sections.map((item) => {
             const Icon = sectionIcons[item]
             return (
@@ -335,59 +338,115 @@ function SettingsEditor({
     }
   }, [submit])
 
-  const restartTag = (key: string) => (restartKeys.has(key) ? <Tag>{m.restart}</Tag> : undefined)
+  const environment = new Set(settings.environment)
+  const restartTag = (key: string) =>
+    environment.has(key) ? (
+      <Tooltip label={fill(m.environmentHint, { key })}>
+        <Tag>{m.environment}</Tag>
+      </Tooltip>
+    ) : restartKeys.has(key) ? (
+      <Tag>{m.restart}</Tag>
+    ) : undefined
+  // lock 在配置项由进程环境变量决定时禁用该行的控件
+  const lock = (key: string, row: ReactNode) =>
+    environment.has(key) ? (
+      <fieldset disabled className="contents">
+        {row}
+      </fieldset>
+    ) : (
+      row
+    )
   const describe = (key: keyof SettingsForm) => ({
     id: key,
     'aria-invalid': errors[key] ? true : undefined,
     'aria-describedby': errors[key] ? key + '-error' : key + '-hint',
   })
   const text = (
-    key:
-      | 'LISTEN'
-      | 'AUTH_DIR'
-      | 'RUNTIME_DIR'
-      | 'MEDIA_BASE_URL'
-      | 'ADMIN_USERNAME'
-      | 'REQUEST_TIMEOUT'
-      | 'QUOTA_REFRESH_INTERVAL',
+    key: 'LISTEN' | 'AUTH_DIR' | 'RUNTIME_DIR' | 'MEDIA_BASE_URL' | 'ADMIN_USERNAME',
     label: string,
     hint: string,
     extra?: { placeholder?: string; disabledReason?: string | false; autoComplete?: string },
-  ) => (
-    <FormRow id={key} label={label} hint={hint} tag={restartTag(key)} error={errors[key]?.message}>
-      <Tooltip disabledReason={extra?.disabledReason}>
-        <Input
-          {...describe(key)}
-          {...form.register(key)}
-          spellCheck={false}
-          autoComplete={extra?.autoComplete ?? 'off'}
-          placeholder={extra?.placeholder}
-          disabled={Boolean(extra?.disabledReason)}
-          className="font-mono"
-        />
-      </Tooltip>
-    </FormRow>
-  )
-  const toggle = (
-    key: 'LOG_FILE' | 'REQUEST_LOG_BODIES' | 'ADMIN_AUTH_ENABLED' | 'WEEKLY_QUOTA_WARMUP',
+  ) =>
+    lock(
+      key,
+      <FormRow
+        id={key}
+        label={label}
+        hint={hint}
+        tag={restartTag(key)}
+        error={errors[key]?.message}
+      >
+        <Tooltip disabledReason={extra?.disabledReason}>
+          <Input
+            {...describe(key)}
+            {...form.register(key)}
+            spellCheck={false}
+            autoComplete={extra?.autoComplete ?? 'off'}
+            placeholder={extra?.placeholder}
+            disabled={Boolean(extra?.disabledReason)}
+            className="font-mono"
+          />
+        </Tooltip>
+      </FormRow>,
+    )
+  const duration = (
+    key: 'REQUEST_TIMEOUT' | 'QUOTA_REFRESH_INTERVAL',
     label: string,
     hint: string,
-  ) => (
-    <FormRow id={key} label={label} hint={hint}>
-      <Controller
-        control={form.control}
-        name={key}
-        render={({ field }) => (
-          <Switch
-            id={key}
-            aria-describedby={key + '-hint'}
-            checked={field.value}
-            onCheckedChange={field.onChange}
-          />
-        )}
-      />
-    </FormRow>
-  )
+  ) =>
+    lock(
+      key,
+      <FormRow
+        id={key}
+        label={label}
+        hint={hint}
+        tag={restartTag(key)}
+        error={errors[key]?.message}
+      >
+        <Controller
+          control={form.control}
+          name={key}
+          render={({ field }) => (
+            <DurationInput
+              {...describe(key)}
+              value={field.value}
+              onChange={field.onChange}
+              onBlur={field.onBlur}
+              units={{ s: m.unitSeconds, m: m.unitMinutes, h: m.unitHours }}
+              unitLabel={fill(m.unitOf, { name: label })}
+            />
+          )}
+        />
+      </FormRow>,
+    )
+  const toggle = (
+    key:
+      | 'LOG_FILE'
+      | 'REQUEST_LOG_BODIES'
+      | 'ADMIN_AUTH_ENABLED'
+      | 'WEEKLY_QUOTA_WARMUP'
+      | 'NONSTREAM_KEEPALIVE'
+      | 'FAKE_STREAM',
+    label: string,
+    hint: string,
+  ) =>
+    lock(
+      key,
+      <FormRow id={key} label={label} hint={hint} tag={restartTag(key)}>
+        <Controller
+          control={form.control}
+          name={key}
+          render={({ field }) => (
+            <Switch
+              id={key}
+              aria-describedby={key + '-hint'}
+              checked={field.value}
+              onCheckedChange={field.onChange}
+            />
+          )}
+        />
+      </FormRow>,
+    )
   const number = (
     key: 'ACCOUNT_CONCURRENCY' | 'LOG_MAX_TOTAL_MB' | 'QUOTA_RESERVE_PERCENT',
     label: string,
@@ -395,31 +454,39 @@ function SettingsEditor({
     min: number,
     max: number,
     disabledReason?: string | false,
-  ) => (
-    <FormRow id={key} label={label} hint={hint} error={errors[key]?.message}>
-      <Controller
-        control={form.control}
-        name={key}
-        render={({ field }) => (
-          <Tooltip disabledReason={disabledReason}>
-            <NumberInput
-              {...describe(key)}
-              value={field.value}
-              onChange={field.onChange}
-              onBlur={field.onBlur}
-              min={min}
-              max={max}
-              disabled={Boolean(disabledReason)}
-              decreaseLabel={m.decrease}
-              increaseLabel={m.increase}
-              minReason={fill(m.minReason, { min })}
-              maxReason={fill(m.maxReason, { max })}
-            />
-          </Tooltip>
-        )}
-      />
-    </FormRow>
-  )
+  ) =>
+    lock(
+      key,
+      <FormRow
+        id={key}
+        label={label}
+        hint={hint}
+        tag={restartTag(key)}
+        error={errors[key]?.message}
+      >
+        <Controller
+          control={form.control}
+          name={key}
+          render={({ field }) => (
+            <Tooltip disabledReason={disabledReason}>
+              <NumberInput
+                {...describe(key)}
+                value={field.value}
+                onChange={field.onChange}
+                onBlur={field.onBlur}
+                min={min}
+                max={max}
+                disabled={Boolean(disabledReason)}
+                decreaseLabel={m.decrease}
+                increaseLabel={m.increase}
+                minReason={fill(m.minReason, { min })}
+                maxReason={fill(m.maxReason, { max })}
+              />
+            </Tooltip>
+          )}
+        />
+      </FormRow>,
+    )
   const keyCount = splitList(settings.values.API_KEYS).length
   const mappingCount = splitList(settings.values.MODEL_MAPPING).length
 
@@ -437,23 +504,26 @@ function SettingsEditor({
           to="/connect"
           action={m.apiKeysManage}
         />
-        <FormRow id="MEDIA_OUTPUT" label={m.mediaOutput} hint={m.mediaOutputHint}>
-          <Controller
-            control={form.control}
-            name="MEDIA_OUTPUT"
-            render={({ field }) => (
-              <RadioGroup
-                label={m.mediaOutput}
-                value={field.value}
-                onValueChange={field.onChange}
-                options={[
-                  { value: 'inline', label: m.mediaInline, description: m.mediaInlineHint },
-                  { value: 'url', label: m.mediaURL, description: codeText(m.mediaURLHint) },
-                ]}
-              />
-            )}
-          />
-        </FormRow>
+        {lock(
+          'MEDIA_OUTPUT',
+          <FormRow id="MEDIA_OUTPUT" label={m.mediaOutput} hint={m.mediaOutputHint}>
+            <Controller
+              control={form.control}
+              name="MEDIA_OUTPUT"
+              render={({ field }) => (
+                <RadioGroup
+                  label={m.mediaOutput}
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  options={[
+                    { value: 'inline', label: m.mediaInline, description: m.mediaInlineHint },
+                    { value: 'url', label: m.mediaURL, description: codeText(m.mediaURLHint) },
+                  ]}
+                />
+              )}
+            />
+          </FormRow>,
+        )}
         {text('MEDIA_BASE_URL', m.mediaBase, m.mediaBaseHint, {
           placeholder: 'https://ai.example.com',
           disabledReason: values.MEDIA_OUTPUT !== 'url' && m.mediaBaseDisabled,
@@ -462,68 +532,81 @@ function SettingsEditor({
     ),
     network: (
       <>
-        <FormRow id="PROXY" label={m.proxy} hint={m.proxyHint} error={errors.PROXY?.message}>
-          <Textarea
-            {...describe('PROXY')}
-            {...form.register('PROXY')}
-            rows={3}
-            spellCheck={false}
-            autoComplete="off"
-            placeholder="socks5://127.0.0.1:1080"
-            className="font-mono"
-          />
-        </FormRow>
+        {lock(
+          'PROXY',
+          <FormRow id="PROXY" label={m.proxy} hint={m.proxyHint} error={errors.PROXY?.message}>
+            <Textarea
+              {...describe('PROXY')}
+              {...form.register('PROXY')}
+              rows={3}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="socks5://127.0.0.1:1080"
+              className="font-mono"
+            />
+          </FormRow>,
+        )}
         <ProxyPool />
       </>
     ),
     prompt: (
       <>
         <div className="flex flex-col gap-3 py-4">
-          <span id="SYSTEM_PROMPT-label" className="text-base font-medium">
+          <span id="SYSTEM_PROMPT-label" className="flex items-center gap-2 text-base font-medium">
             {m.tier}
+            {restartTag('SYSTEM_PROMPT')}
           </span>
-          <Controller
-            control={form.control}
-            name="SYSTEM_PROMPT"
-            render={({ field }) => (
-              <RadioGroup
-                label={m.tier}
-                value={field.value}
-                onValueChange={field.onChange}
-                options={[
-                  { value: 'full', label: m.promptFull, description: m.promptFullHint },
-                  { value: 'medium', label: m.promptMedium, description: m.promptMediumHint },
-                  {
-                    value: 'aggressive',
-                    label: m.promptAggressive,
-                    description: m.promptAggressiveHint,
-                  },
-                  { value: 'custom', label: m.promptCustom, description: m.promptCustomHint },
-                ]}
-              />
-            )}
-          />
+          {lock(
+            'SYSTEM_PROMPT',
+            <Controller
+              control={form.control}
+              name="SYSTEM_PROMPT"
+              render={({ field }) => (
+                <RadioGroup
+                  label={m.tier}
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  options={[
+                    { value: 'full', label: m.promptFull, description: m.promptFullHint },
+                    { value: 'medium', label: m.promptMedium, description: m.promptMediumHint },
+                    {
+                      value: 'aggressive',
+                      label: m.promptAggressive,
+                      description: m.promptAggressiveHint,
+                    },
+                    { value: 'custom', label: m.promptCustom, description: m.promptCustomHint },
+                  ]}
+                />
+              )}
+            />,
+          )}
           <PromptPreviewDialog tier={tier} sections={promptSections} wrap={wrap} />
         </div>
         {tier === 'custom' && (
           <>
             <div className="border-t border-border py-4">
-              <Controller
-                control={form.control}
-                name="SYSTEM_PROMPT_SECTIONS"
-                render={({ field }) => (
-                  <PromptSectionsField value={field.value} onChange={field.onChange} />
-                )}
-              />
+              {lock(
+                'SYSTEM_PROMPT_SECTIONS',
+                <Controller
+                  control={form.control}
+                  name="SYSTEM_PROMPT_SECTIONS"
+                  render={({ field }) => (
+                    <PromptSectionsField value={field.value} onChange={field.onChange} />
+                  )}
+                />,
+              )}
             </div>
             <div className="border-t border-border py-4">
-              <Controller
-                control={form.control}
-                name="SYSTEM_PROMPT_WRAP"
-                render={({ field }) => (
-                  <PromptWrapField value={field.value} onChange={field.onChange} />
-                )}
-              />
+              {lock(
+                'SYSTEM_PROMPT_WRAP',
+                <Controller
+                  control={form.control}
+                  name="SYSTEM_PROMPT_WRAP"
+                  render={({ field }) => (
+                    <PromptWrapField value={field.value} onChange={field.onChange} />
+                  )}
+                />,
+              )}
             </div>
           </>
         )}
@@ -531,33 +614,43 @@ function SettingsEditor({
     ),
     scheduling: (
       <>
-        <FormRow id="ROUTING_STRATEGY" label={m.routing} hint={m.routingHint}>
-          <Controller
-            control={form.control}
-            name="ROUTING_STRATEGY"
-            render={({ field }) => (
-              <RadioGroup
-                label={m.routing}
-                value={field.value}
-                onValueChange={field.onChange}
-                options={[
-                  { value: 'round-robin', label: m.roundRobin, description: m.roundRobinHint },
-                  { value: 'fill-first', label: m.fillFirst, description: m.fillFirstHint },
-                ]}
-              />
-            )}
-          />
-        </FormRow>
-        <FormRow id="PREFER_LOWER_TIER_MODELS" label={m.lowerTier} hint={m.lowerTierHint}>
-          <Controller
-            control={form.control}
-            name="PREFER_LOWER_TIER_MODELS"
-            render={({ field }) => <LowerTierField value={field.value} onChange={field.onChange} />}
-          />
-        </FormRow>
+        {lock(
+          'ROUTING_STRATEGY',
+          <FormRow id="ROUTING_STRATEGY" label={m.routing} hint={m.routingHint}>
+            <Controller
+              control={form.control}
+              name="ROUTING_STRATEGY"
+              render={({ field }) => (
+                <RadioGroup
+                  label={m.routing}
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  options={[
+                    { value: 'round-robin', label: m.roundRobin, description: m.roundRobinHint },
+                    { value: 'fill-first', label: m.fillFirst, description: m.fillFirstHint },
+                  ]}
+                />
+              )}
+            />
+          </FormRow>,
+        )}
+        {lock(
+          'PREFER_LOWER_TIER_MODELS',
+          <FormRow id="PREFER_LOWER_TIER_MODELS" label={m.lowerTier} hint={m.lowerTierHint}>
+            <Controller
+              control={form.control}
+              name="PREFER_LOWER_TIER_MODELS"
+              render={({ field }) => (
+                <LowerTierField value={field.value} onChange={field.onChange} />
+              )}
+            />
+          </FormRow>,
+        )}
         {number('ACCOUNT_CONCURRENCY', m.concurrency, m.concurrencyHint, 1, 64)}
-        {text('REQUEST_TIMEOUT', m.timeout, m.timeoutHint, { placeholder: '5m' })}
-        {text('QUOTA_REFRESH_INTERVAL', m.quotaRefresh, m.quotaRefreshHint, { placeholder: '15m' })}
+        {duration('REQUEST_TIMEOUT', m.timeout, m.timeoutHint)}
+        {toggle('NONSTREAM_KEEPALIVE', m.keepalive, m.keepaliveHint)}
+        {toggle('FAKE_STREAM', m.fakeStream, m.fakeStreamHint)}
+        {duration('QUOTA_REFRESH_INTERVAL', m.quotaRefresh, m.quotaRefreshHint)}
         {number('QUOTA_RESERVE_PERCENT', m.quotaReserve, m.quotaReserveHint, 0, 99)}
         {toggle('WEEKLY_QUOTA_WARMUP', m.warmup, m.warmupHint)}
         <LinkRow
@@ -571,42 +664,48 @@ function SettingsEditor({
     ),
     logging: (
       <>
-        <FormRow id="LOG_LEVEL" label={m.logLevel} hint={m.logLevelHint}>
-          <Controller
-            control={form.control}
-            name="LOG_LEVEL"
-            render={({ field }) => (
-              <Select
-                id="LOG_LEVEL"
-                label={m.logLevel}
-                value={field.value}
-                onValueChange={field.onChange}
-                options={(['debug', 'info', 'warn', 'error'] as const).map((value) => ({
-                  value,
-                  label: value.toUpperCase(),
-                }))}
-              />
-            )}
-          />
-        </FormRow>
-        <FormRow id="LOG_FORMAT" label={m.logFormat} hint={m.logFormatHint}>
-          <Controller
-            control={form.control}
-            name="LOG_FORMAT"
-            render={({ field }) => (
-              <Select
-                id="LOG_FORMAT"
-                label={m.logFormat}
-                value={field.value}
-                onValueChange={field.onChange}
-                options={[
-                  { value: 'json', label: 'JSON' },
-                  { value: 'text', label: m.logFormatText },
-                ]}
-              />
-            )}
-          />
-        </FormRow>
+        {lock(
+          'LOG_LEVEL',
+          <FormRow id="LOG_LEVEL" label={m.logLevel} hint={m.logLevelHint}>
+            <Controller
+              control={form.control}
+              name="LOG_LEVEL"
+              render={({ field }) => (
+                <Select
+                  id="LOG_LEVEL"
+                  label={m.logLevel}
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  options={(['debug', 'info', 'warn', 'error'] as const).map((value) => ({
+                    value,
+                    label: value.toUpperCase(),
+                  }))}
+                />
+              )}
+            />
+          </FormRow>,
+        )}
+        {lock(
+          'LOG_FORMAT',
+          <FormRow id="LOG_FORMAT" label={m.logFormat} hint={m.logFormatHint}>
+            <Controller
+              control={form.control}
+              name="LOG_FORMAT"
+              render={({ field }) => (
+                <Select
+                  id="LOG_FORMAT"
+                  label={m.logFormat}
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  options={[
+                    { value: 'json', label: 'JSON' },
+                    { value: 'text', label: m.logFormatText },
+                  ]}
+                />
+              )}
+            />
+          </FormRow>,
+        )}
         {toggle('LOG_FILE', m.logFile, m.logFileHint)}
         {number(
           'LOG_MAX_TOTAL_MB',
@@ -640,23 +739,26 @@ function SettingsEditor({
             autoComplete: 'username',
             disabledReason: !values.ADMIN_AUTH_ENABLED && m.adminDisabled,
           })}
-          <FormRow
-            id="ADMIN_PASSWORD"
-            label={m.adminPassword}
-            hint={m.adminPasswordHint}
-            error={errors.ADMIN_PASSWORD?.message}
-          >
-            <Tooltip disabledReason={!values.ADMIN_AUTH_ENABLED && m.adminDisabled}>
-              <Input
-                {...describe('ADMIN_PASSWORD')}
-                {...form.register('ADMIN_PASSWORD')}
-                type="password"
-                autoComplete="new-password"
-                disabled={!values.ADMIN_AUTH_ENABLED}
-                placeholder={settings.admin_password_set ? m.adminPasswordSet : ''}
-              />
-            </Tooltip>
-          </FormRow>
+          {lock(
+            'ADMIN_PASSWORD',
+            <FormRow
+              id="ADMIN_PASSWORD"
+              label={m.adminPassword}
+              hint={m.adminPasswordHint}
+              error={errors.ADMIN_PASSWORD?.message}
+            >
+              <Tooltip disabledReason={!values.ADMIN_AUTH_ENABLED && m.adminDisabled}>
+                <Input
+                  {...describe('ADMIN_PASSWORD')}
+                  {...form.register('ADMIN_PASSWORD')}
+                  type="password"
+                  autoComplete="new-password"
+                  disabled={!values.ADMIN_AUTH_ENABLED}
+                  placeholder={settings.admin_password_set ? m.adminPasswordSet : ''}
+                />
+              </Tooltip>
+            </FormRow>,
+          )}
         </>
       ),
   }
@@ -706,6 +808,22 @@ export function SettingsPage() {
   return (
     <>
       <PageHeader title={m.title} />
+      {settings.data && settings.data.invalid.length > 0 && (
+        <Callout tone="warning" role="status">
+          {m.invalidNotice}
+          <ul className="pl-5 mt-1 list-disc">
+            {settings.data.invalid.map((item) => (
+              <li key={item.key}>
+                <code className="font-mono">
+                  {item.key}
+                  {item.value && '=' + item.value}
+                </code>{' '}
+                {item.reason}
+              </li>
+            ))}
+          </ul>
+        </Callout>
+      )}
       {settings.data && settings.data.restart_required.length > 0 && (
         <Callout tone="warning" role="status">
           {fill(m.restartNotice, {

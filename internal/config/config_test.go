@@ -166,3 +166,97 @@ func TestSystemProxy(t *testing.T) {
 		}
 	}
 }
+
+// TestSaveWritesOnlyChangedKeys 验证保存只写出与默认值不同的配置项
+func TestSaveWritesOnlyChangedKeys(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), ".env")
+	cfg := Default()
+	cfg.LogLevel = "warn"
+	cfg.NonstreamKeepalive = false
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "NONSTREAM_KEEPALIVE=false\nLOG_LEVEL=warn\n" {
+		t.Fatalf(".env = %q, %v", data, err)
+	}
+}
+
+// TestLoadInvalidValueUsesDefault 验证取值无效的项按默认值加载并记录原因，凭据项不记原值
+func TestLoadInvalidValueUsesDefault(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), ".env")
+	content := "ACCOUNT_CONCURRENCY=abc\nREQUEST_TIMEOUT=-1s\nPROXY=ftp://user:secret@127.0.0.1:21\nADMIN_AUTH_ENABLED=true\nLOG_LEVEL=warn\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaults := Default()
+	if cfg.AccountConcurrency != defaults.AccountConcurrency || cfg.RequestTimeout != defaults.RequestTimeout || cfg.Proxy != "" || cfg.AdminAuthEnabled || cfg.LogLevel != "warn" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	keys := make([]string, len(cfg.Invalid))
+	for index, item := range cfg.Invalid {
+		keys[index] = item.Key
+		if item.Reason == "" || item.Key == "PROXY" && item.Value != "" || item.Key == "ACCOUNT_CONCURRENCY" && item.Value != "abc" {
+			t.Errorf("invalid = %+v", item)
+		}
+	}
+	if !slices.Equal(keys, []string{"ACCOUNT_CONCURRENCY", "PROXY", "REQUEST_TIMEOUT", "ADMIN_AUTH_ENABLED"}) {
+		t.Fatalf("invalid keys = %v", keys)
+	}
+}
+
+// TestEnvironmentKeepsSavedFile 验证进程环境变量决定的项记入 Environment，保存时保留文件中原有的值
+func TestEnvironmentKeepsSavedFile(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("REQUEST_TIMEOUT=3m\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REQUEST_TIMEOUT", "7m")
+	t.Setenv("LOG_LEVEL", "debug")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RequestTimeout != 7*time.Minute || !slices.Equal(cfg.Environment, []string{"REQUEST_TIMEOUT", "LOG_LEVEL"}) {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	cfg.AccountConcurrency = 4
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "ACCOUNT_CONCURRENCY=4\nREQUEST_TIMEOUT=3m\n" {
+		t.Fatalf(".env = %q, %v", data, err)
+	}
+}
+
+// TestAPIKeyAccounts 验证 API_KEY_ACCOUNTS 按最后一个冒号分隔 key 与账户、账户去重，保存后读回同一绑定，缺账户时拒绝
+func TestAPIKeyAccounts(t *testing.T) {
+	isolateEnv(t)
+	cfg := Default()
+	if err := cfg.Set(map[string]string{"API_KEY_ACCOUNTS": " sk:a:b : x@gmail.com | y@gmail.com|x@gmail.com , sk-2:z@gmail.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cfg.APIKeyAccounts["sk:a:b"], []string{"x@gmail.com", "y@gmail.com"}) || !slices.Equal(cfg.APIKeyAccounts["sk-2"], []string{"z@gmail.com"}) {
+		t.Fatalf("bindings = %v", cfg.APIKeyAccounts)
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil || len(loaded.Changed(cfg)) != 0 {
+		t.Fatalf("loaded %v, %v", loaded.APIKeyAccounts, err)
+	}
+	empty := Default()
+	if err := empty.Set(map[string]string{"API_KEY_ACCOUNTS": "sk-1:"}); err == nil {
+		t.Fatal("empty accounts accepted")
+	}
+}

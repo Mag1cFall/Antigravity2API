@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { twMerge } from 'tailwind-merge'
 
-// Indicator 是分段控件、标签页与导航中滑到选中项下方的背景块，放在定位的列表内，active 是选中项的选择器
+// Indicator 是分段控件、标签页与导航中滑到选中项下方的背景块，放在定位的列表内，active 是选中项的选择器；挂载后由尺寸观察的首次回调定位，不在提交阶段读布局
 export function Indicator({ active, className }: { active: string; className?: string }) {
   const ref = useRef<HTMLSpanElement>(null)
   useLayoutEffect(() => {
@@ -23,7 +23,6 @@ export function Indicator({ active, className }: { active: string; className?: s
       indicator.style.transform = `translate(${String(item.offsetLeft)}px, ${String(item.offsetTop)}px)`
       placed = true
     }
-    place()
     const resize = new ResizeObserver(place)
     resize.observe(list)
     for (const child of list.children) if (child !== indicator) resize.observe(child)

@@ -17,7 +17,7 @@ export function statusOf(account: Account): Status {
 export const statusTone: Record<Status, BadgeTone> = {
   ready: 'success',
   cooling: 'warning',
-  verify: 'warning',
+  verify: 'error',
   error: 'error',
   disabled: 'neutral',
   pending: 'info',

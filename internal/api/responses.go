@@ -119,7 +119,7 @@ type responseRecord struct {
 	Output     []storedItem
 	Background bool
 	// Stream 为后台流式响应写出的事件，续传请求从中回放
-	Stream *streamLog
+	Stream *streamLog `json:"-"`
 }
 
 // storedItem 是带 ID 的 Responses 输入或输出项
@@ -139,14 +139,66 @@ type responseHistory struct {
 	Items              []storedItem
 }
 
-type responseStateStore struct {
-	mu     sync.Mutex
-	states map[string]responseState
-	order  []string
+// StateStore 持久保存续接节点，服务重启后由 Load 按保存顺序读回
+type StateStore interface {
+	Load() []SavedState
+	Save(saved []SavedState, removed []string)
 }
 
-func newResponseStateStore() *responseStateStore {
-	return &responseStateStore{states: make(map[string]responseState, responseStateCapacity)}
+// SavedState 是写入 StateStore 的一个续接节点
+type SavedState struct {
+	ID   string
+	Data []byte
+}
+
+type responseStateStore struct {
+	mu      sync.Mutex
+	states  map[string]responseState
+	order   []string
+	persist StateStore
+}
+
+// newResponseStateStore 创建续接节点存储，persist 非空时读回其中保存的节点并把之后的变化写入它
+func newResponseStateStore(persist StateStore) *responseStateStore {
+	store := &responseStateStore{states: make(map[string]responseState, responseStateCapacity), persist: persist}
+	if persist == nil {
+		return store
+	}
+	for _, saved := range persist.Load() {
+		var state responseState
+		if json.Unmarshal(saved.Data, &state) == nil {
+			store.states[saved.ID] = state
+			store.order = append(store.order, saved.ID)
+		}
+	}
+	return store
+}
+
+// persistLocked 把仍存在且已结束的节点写入 persist，并删除已移除的节点；进行中的后台响应在服务重启后不能继续，只保存终态
+func (store *responseStateStore) persistLocked(saved, removed []string) {
+	if store.persist == nil {
+		return
+	}
+	states := make([]SavedState, 0, len(saved))
+	for _, id := range saved {
+		if state, exists := store.states[id]; exists && state.finished() {
+			data, _ := json.Marshal(state)
+			states = append(states, SavedState{ID: id, Data: data})
+		}
+	}
+	store.persist.Save(states, removed)
+}
+
+// finished 返回节点的响应是否已不在进行中
+func (state responseState) finished() bool {
+	if state.Record == nil {
+		return true
+	}
+	var status struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(state.Record.Shell, &status)
+	return status.Status != "queued" && status.Status != "in_progress"
 }
 
 func (store *responseStateStore) Load(id string) (responseHistory, bool) {
@@ -197,16 +249,20 @@ func (store *responseStateStore) Store(id string, previous responseHistory, resu
 		store.order = append(store.order, id)
 	}
 	store.states[id] = state
+	saved, removed := []string{id}, []string(nil)
 	for len(store.order) > responseStateCapacity {
-		id := store.order[0]
+		evicted := store.order[0]
 		store.order = store.order[1:]
-		store.removeLocked(id)
+		saved = append(saved, store.removeLocked(evicted)...)
+		removed = append(removed, evicted)
 	}
+	store.persistLocked(saved, removed)
 }
 
-// removeLocked 删除一个节点，并把它的上下文并入以它为续接起点的子节点
-func (store *responseStateStore) removeLocked(id string) {
+// removeLocked 删除一个节点，并把它的上下文并入以它为续接起点的子节点，返回这些子节点的 ID
+func (store *responseStateStore) removeLocked(id string) []string {
 	parent := store.states[id]
+	var children []string
 	for childID, child := range store.states {
 		if child.ParentID != id {
 			continue
@@ -220,8 +276,10 @@ func (store *responseStateStore) removeLocked(id string) {
 			child.Record = &merged
 		}
 		store.states[childID] = child
+		children = append(children, childID)
 	}
 	delete(store.states, id)
+	return children
 }
 
 // Stream 返回后台流式响应的事件记录
@@ -283,8 +341,9 @@ func (store *responseStateStore) Delete(id string) bool {
 	if _, exists := store.states[id]; !exists {
 		return false
 	}
-	store.removeLocked(id)
+	children := store.removeLocked(id)
 	store.order = slices.DeleteFunc(store.order, func(value string) bool { return value == id })
+	store.persistLocked(children, []string{id})
 	return true
 }
 
@@ -379,6 +438,11 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if !request.Stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
+	}
 	events, err := s.generateResponses(r.Context(), request, &prepared)
 	if err == nil {
 		events = s.hostedImages(r.Context(), request.Tools, prepared.generate.Session, prepared.generate.Contents, events)
@@ -413,7 +477,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 // generateResponses 发起生成；truncation 为 auto 且上游报告上下文超限时，按完整轮次从最早处删除历史后重试，删除量按本地计数与上游给出的上限估算
 func (s *server) generateResponses(ctx context.Context, request responsesRequest, prepared *responsesPreparation) (<-chan antigravity.Event, error) {
-	prepared.generate.Unary = !request.Stream
+	prepared.generate.Unary = !request.Stream || s.fakeStream()
 	for {
 		events, err := s.service.Generate(ctx, prepared.generate)
 		var upstream *antigravity.UpstreamError
@@ -1357,10 +1421,12 @@ type responsesStreamWriter struct {
 }
 
 func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request responsesRequest, prepared responsesPreparation, id string, created int64, events <-chan antigravity.Event, compaction map[string]any) {
-	if err := streamHeaders(w); err != nil {
+	stream, err := openStream(w, sseHeartbeat)
+	defer stream.stop()
+	if err != nil {
 		return
 	}
-	writer := &responsesStreamWriter{w: w, id: id, created: created, request: request, output: &responsesOutput{id: id, request: request}}
+	writer := &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: &responsesOutput{id: id, request: request}}
 	if err := writer.emit("response.created", map[string]any{"response": responseShell(id, created, "in_progress", request)}); err != nil {
 		return
 	}
@@ -1372,7 +1438,7 @@ func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request
 
 // streamOutput 写出输出项事件与终止事件并保存最终响应，report 决定生成出错时是否写出 response.failed；返回生成或写出的错误
 func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter, prepared responsesPreparation, events <-chan antigravity.Event, compaction map[string]any, report func(error) bool) error {
-	id, created, request, w := writer.id, writer.created, writer.request, writer.w
+	id, created, request := writer.id, writer.created, writer.request
 	if compaction != nil {
 		writer.base = 1
 		if err := writer.emit("response.output_item.added", map[string]any{"output_index": 0, "item": compaction}); err != nil {
@@ -1386,7 +1452,7 @@ func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter
 	if searchOnly(prepared.generate.Tools) {
 		emit, release = holdUntilGrounding(writer.live)
 	}
-	result, err := consumeStreamEvents(ctx, events, emit, func() error { return writeSSEHeartbeat(w) })
+	result, err := consumeEvents(ctx, events, emit)
 	if err != nil {
 		if report(err) && release() == nil {
 			_ = writer.failed(err)

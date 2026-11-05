@@ -142,7 +142,7 @@ function ModelRow({
   )
 }
 
-// ModelsPage 是模型目录：按额度组筛选与搜索，列出上下文、输出上限、思考档位与可用账户，宽度小于 640px 时每个模型一张卡片，下方编辑模型映射
+// ModelsPage 是模型目录：按额度组筛选（带模型数）与搜索，列出上下文、输出上限、思考档位与可用账户，宽度小于 640px 时每个模型一张卡片，目录读到后下方编辑模型映射
 export function ModelsPage() {
   const m = useMessages(modelMessages)
   const q = useMessages(quotaMessages)
@@ -230,8 +230,14 @@ export function ModelsPage() {
                   update('group', value)
                 }}
                 options={[
-                  { value: 'all', label: m.all },
-                  ...groups.map((value) => ({ value, label: q[value] })),
+                  { value: 'all', label: m.all + ' ' + String(list.length) },
+                  ...groups.map((value) => ({
+                    value,
+                    label:
+                      q[value] +
+                      ' ' +
+                      String(list.filter((model) => model.quota_group === value).length),
+                  })),
                 ]}
               />
               <SearchInput
@@ -298,7 +304,7 @@ export function ModelsPage() {
           </>
         )}
       </Card>
-      <ModelMapping targets={targets} />
+      {!models.isPending && <ModelMapping targets={targets} />}
     </>
   )
 }

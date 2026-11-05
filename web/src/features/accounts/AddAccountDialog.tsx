@@ -3,6 +3,7 @@ import {
   CircleCheck,
   Download,
   ExternalLink,
+  FileUp,
   Globe,
   KeyRound,
   LoaderCircle,
@@ -22,6 +23,7 @@ import { Input } from '@/components/ui/input'
 import { keepAccounts, useImportAccounts } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
 import { accountsKey } from '@/features/accounts/queries'
+import { ImportAccountFiles } from '@/features/accounts/TransferDialog'
 import type { Login, Pairing } from '@/features/accounts/types'
 import { api } from '@/lib/api'
 import { isDesktop } from '@/lib/desktop'
@@ -207,28 +209,34 @@ function RemotePairing() {
 }
 
 // Method 是添加账户的方式
-export type Method = 'browser' | 'code' | 'import' | 'remote'
+export type Method = 'browser' | 'code' | 'remote' | 'import' | 'json'
 
 // methodIcons 是各添加方式的图标
 export const methodIcons: Record<Method, LucideIcon> = {
   browser: Globe,
   code: KeyRound,
-  import: Download,
   remote: Server,
+  import: Download,
+  json: FileUp,
 }
 
-// methods 是添加方式的显示顺序
-export const methods: Method[] = ['browser', 'code', 'import', 'remote']
+// methodGroups 是添加方式的分组与显示顺序：登录新的 Google 账户，导入已在其他地方登录的账户
+export const methodGroups: { key: 'login' | 'import'; methods: Method[] }[] = [
+  { key: 'login', methods: ['browser', 'code', 'remote'] },
+  { key: 'import', methods: ['import', 'json'] },
+]
 
-// useMethodText 返回各添加方式的名称与说明
-export function useMethodText(): Record<Method, [string, string]> {
+// useMethodText 返回各添加方式与分组的名称与说明
+export function useMethodText() {
   const m = useMessages(accountMessages)
-  return {
+  const methods: Record<Method, [string, string]> = {
     browser: [m.methodBrowser, m.methodBrowserHint],
     code: [m.methodCode, m.methodCodeHint],
-    import: [m.methodImport, m.methodImportHint],
     remote: [m.methodRemote, m.methodRemoteHint],
+    import: [m.methodImport, m.methodImportHint],
+    json: [m.methodJson, m.methodJsonHint],
   }
+  return { methods, groups: { login: m.methodGroupLogin, import: m.methodGroupImport } }
 }
 
 // preferredMethod 是默认的添加方式：本机访问与桌面窗口用浏览器登录，远程访问用授权码
@@ -270,7 +278,7 @@ function ImportOfficial() {
   )
 }
 
-// AddAccountDialog 是添加账户的四种方式：浏览器登录、粘贴授权码、导入本机官方客户端与远程配对；trigger 是打开对话框的按钮，method 是打开时选中的方式
+// AddAccountDialog 是添加账户的五种方式：登录 Google（浏览器登录、粘贴授权码、远程配对）与导入已登录的账户（本机官方客户端、账户文件）；trigger 是打开对话框的按钮，method 是打开时选中的方式
 export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; method?: Method }) {
   const m = useMessages(accountMessages)
   const app = useMessages(appMessages)
@@ -339,30 +347,47 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
                 reset()
               }}
               aria-label={m.methodLabel}
-              className="grid grid-cols-2 gap-2"
+              className="flex flex-col gap-3"
             >
-              {methods.map((item) => {
-                const Icon = methodIcons[item]
-                return (
-                  <ToggleGroup.Item
-                    key={item}
-                    value={item}
-                    aria-label={text[item][0]}
-                    className="flex min-w-0 items-start gap-3 rounded-md border border-border p-3 text-left hover:border-primary-border data-[state=on]:border-primary data-[state=on]:bg-primary-soft"
+              {methodGroups.map((group) => (
+                <div key={group.key} className="flex flex-col gap-2">
+                  <span className="text-xs font-medium text-foreground-muted">
+                    {text.groups[group.key]}
+                  </span>
+                  <div
+                    className={
+                      'grid gap-2 ' + (group.methods.length === 3 ? 'grid-cols-3' : 'grid-cols-2')
+                    }
                   >
-                    <Icon size={20} aria-hidden className="shrink-0 text-primary" />
-                    <span className="min-w-0">
-                      <span className="block text-sm font-semibold">{text[item][0]}</span>
-                      <span className="mt-1 block text-xs text-foreground-muted max-sm:hidden">
-                        {text[item][1]}
-                      </span>
-                    </span>
-                  </ToggleGroup.Item>
-                )
-              })}
+                    {group.methods.map((item) => {
+                      const Icon = methodIcons[item]
+                      return (
+                        <ToggleGroup.Item
+                          key={item}
+                          value={item}
+                          aria-label={text.methods[item][0]}
+                          className="flex min-w-0 items-start gap-2 rounded-md border border-border p-3 text-left hover:border-primary-border data-[state=on]:border-primary data-[state=on]:bg-primary-soft max-sm:flex-col"
+                        >
+                          <Icon size={18} aria-hidden className="shrink-0 text-primary" />
+                          <span className="min-w-0">
+                            <span className="block text-sm font-semibold">
+                              {text.methods[item][0]}
+                            </span>
+                            <span className="mt-1 block text-xs text-foreground-muted max-sm:hidden">
+                              {text.methods[item][1]}
+                            </span>
+                          </span>
+                        </ToggleGroup.Item>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
             </ToggleGroup.Root>
           )}
-          {current === 'import' ? (
+          {current === 'json' ? (
+            <ImportAccountFiles />
+          ) : current === 'import' ? (
             <ImportOfficial />
           ) : current === 'remote' ? (
             <div className="flex flex-col gap-3">
@@ -373,7 +398,7 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
             <LoginProgress login={login.data} onRestart={reset} />
           ) : (
             <div className="flex flex-col items-start gap-3">
-              <p className="text-sm text-foreground-muted sm:hidden">{text[current][1]}</p>
+              <p className="text-sm text-foreground-muted sm:hidden">{text.methods[current][1]}</p>
               <Button
                 variant="primary"
                 loading={create.isPending}

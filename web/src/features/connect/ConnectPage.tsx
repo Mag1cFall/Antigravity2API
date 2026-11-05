@@ -8,17 +8,17 @@ import { EndpointList } from '@/features/connect/EndpointList'
 import { connectMessages } from '@/features/connect/messages'
 import { codeText, useMessages } from '@/lib/i18n'
 
-// KeysCard 是 API key 的生成与管理
+// KeysCard 是 API key 的生成与管理，标题行的添加按钮在读到设置前已占位并禁用，没有 key 时改由列表中的按钮添加
 function KeysCard() {
   const m = useMessages(connectMessages)
-  const { keys } = useApiKeys()
+  const { settings, keys } = useApiKeys()
   return (
     <Card>
       <CardHeader
         icon={<KeyRound size={16} aria-hidden />}
         title={m.keys}
         description={codeText(m.keysHint)}
-        actions={keys.length > 0 && <AddKeyButton />}
+        actions={(!settings.data || keys.length > 0) && <AddKeyButton />}
       />
       <CardBody>
         <ApiKeyList />

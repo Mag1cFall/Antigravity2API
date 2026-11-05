@@ -146,6 +146,8 @@ type GenerateRequest struct {
 	Config    GenerationConfig `json:"config,omitempty"`
 	Tools     Tools            `json:"tools,omitempty"`
 	AccountID string           `json:"account_id,omitempty"`
+	// Accounts 非空时只用其中的账户，为请求 API key 绑定的账户
+	Accounts []string `json:"-"`
 	// Suffix 为补全请求中光标之后的文字
 	Suffix string `json:"suffix,omitempty"`
 	// Unary 标记非流式请求，生成结束后才输出

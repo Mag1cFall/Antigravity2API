@@ -24,6 +24,19 @@ export const states: RequestState[] = [
 // protocols 是可筛选的公开协议
 export const protocols = ['openai-chat', 'openai-responses', 'anthropic', 'gemini'] as const
 
+// protocolNames 是公开协议在界面上的名称
+const protocolNames: Record<string, string> = {
+  'openai-chat': 'OpenAI Chat',
+  'openai-responses': 'OpenAI Responses',
+  anthropic: 'Anthropic Messages',
+  gemini: 'Gemini',
+}
+
+// protocolName 返回公开协议在界面上的名称，未知取值原样返回
+export function protocolName(protocol: string) {
+  return protocolNames[protocol] ?? protocol
+}
+
 // RequestFilter 是请求记录页的筛选条件，全部来自 URL
 export interface RequestFilter {
   range: RangeKey

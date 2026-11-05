@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -34,6 +35,8 @@ const (
 	licenseCooldown = time.Hour
 	// maxRetryWait 为 429 限速的恢复时间不超过该时长时，在请求内等到恢复时间后再次使用该账户
 	maxRetryWait = 5 * time.Second
+	// regenerations 为客户端尚未收到正文、函数调用与媒体时重新生成的次数上限
+	regenerations = 3
 )
 
 // tierSuffixes 为目录中同族模型 ID 的档位后缀
@@ -162,18 +165,15 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 	deadline := watch(ctx, cfg.RequestTimeout)
 	tried := make(map[string]bool)
 	waited := make(map[string]bool)
-	if request.AccountID != "" {
-		s.mu.Lock()
-		for id := range s.accounts {
-			tried[id] = id != request.AccountID
-		}
-		s.mu.Unlock()
-	}
 	var last error
 	attempts := 0
 	turns := make(map[string]*antigravity.SessionTurn)
-	// open 在尚未尝试的账户上发出生成请求，每个账户只在第一次尝试前发出会话开头的伴随请求与会话事件，返回已开始的上游尝试；broken 为上一次尝试的流中断原因，此时换新的输出处理，已尝试 maxAccounts 个账户或超时后返回它
-	open := func(broken error) (*upstreamStream, error) {
+	// open 在尚未尝试的账户上发出生成请求，每个账户只在第一次尝试前发出会话开头的伴随请求与会话事件，返回已开始的上游尝试；broken 为上一次尝试的流中断原因，此时换新的输出处理，已尝试 maxAccounts 个账户或超时后返回它；again 不为空时该账户可再次使用且不计入尝试数
+	open := func(broken error, again string) (*upstreamStream, error) {
+		if again != "" {
+			delete(tried, again)
+			attempts--
+		}
 		if broken != nil {
 			if attempts >= maxAccounts || deadline.Err() != nil {
 				return nil, deadline.failure(broken)
@@ -183,7 +183,7 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 		}
 		for {
 			attempts++
-			lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, tried, s.lowerTier(model))
+			lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, skip(request, tried), s.lowerTier(model))
 			if err != nil {
 				var cooldown *balancer.CooldownError
 				if last != nil && errors.As(err, &cooldown) {
@@ -250,7 +250,7 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 			last = err
 		}
 	}
-	stream, err := open(nil)
+	stream, err := open(nil, "")
 	if err != nil {
 		deadline.stop()
 		return nil, err
@@ -327,7 +327,7 @@ func attempt(account string, exchange *antigravity.Exchange, started time.Time, 
 	return record
 }
 
-// fail 按上游错误原因处理账户并写日志：输入过滤与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 与 AI 积分不足把该账户与同额度池账户的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
+// fail 按上游错误原因处理账户并写日志：输入过滤与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
 func (s *Service) fail(ctx context.Context, current *account, model antigravity.CatalogModel, err error, tier prompt.Tier) bool {
 	var blocked *antigravity.PromptBlockedError
 	var local *Error
@@ -374,15 +374,18 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 			until = reset
 		}
 		until = cmp.Or(until, now.Add(shortCooldown))
+		scope := model.ID
+		if reason == "INSUFFICIENT_G1_CREDITS_BALANCE" {
+			scope = model.QuotaGroup()
+		}
+		limit(scope, until)
 		if model.Kind == antigravity.KindImage {
-			limit(model.ID, until)
 			break
 		}
-		limit(model.QuotaGroup(), until)
 		for _, peer := range s.pool.Peers(current.id, model.QuotaGroup()) {
-			s.pool.Limit(peer, model.QuotaGroup(), until)
+			s.pool.Limit(peer, scope, until)
 			s.saveCooldowns()
-			slog.WarnContext(ctx, fmt.Sprintf("同额度池账户冷却 | 范围=%s | 时长=%s | 耗尽账户=%s", model.QuotaGroup(), until.Sub(now).Round(time.Second), current.id), "source", peer)
+			slog.WarnContext(ctx, fmt.Sprintf("同额度池账户冷却 | 范围=%s | 时长=%s | 耗尽账户=%s", scope, until.Sub(now).Round(time.Second), current.id), "source", peer)
 		}
 		go func() {
 			if err := s.RefreshQuota(context.WithoutCancel(ctx), current.id); err != nil {
@@ -498,28 +501,57 @@ func localTimes(times []int64, device antigravity.Device) []string {
 	return formatted
 }
 
-// relay 按尝试的 out 处理并转发上游事件，结束后按原因处理流中的错误、写入本次上游尝试；unary 时事件在生成结束后才写出；上游流以错误结束、客户端尚未收到事件且 fail 判定换账户时，经 open 在下一个账户上重新生成，open 为 nil 时不重新生成；正常结束时记下本次的上游输入用量、回答指纹与函数调用签名，再归还槽位并关闭输出，客户端收到结束时下一轮请求已能匹配会话；尝试带会话轮次时正常结束后记录会话回复事件；账户初始化后首次成功生成后读取额度摘要
-func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstreamStream, open func(error) (*upstreamStream, error), unary bool, digests []string, cascade string, tier prompt.Tier) <-chan antigravity.Event {
+// skip 返回请求不能使用的账户判断：已尝试的账户，指定 AccountID 时其余账户，Accounts 非空时不在其中的账户
+func skip(request antigravity.GenerateRequest, tried map[string]bool) func(string) bool {
+	return func(id string) bool {
+		return tried[id] || request.AccountID != "" && id != request.AccountID || len(request.Accounts) > 0 && !slices.Contains(request.Accounts, id)
+	}
+}
+
+// relay 转发一次上游尝试的事件：客户端尚未收到正文、函数调用与媒体时按失败原因经 open 在同一账户重新生成或换账户，正常结束时记下会话状态、归还槽位并关闭输出
+func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstreamStream, open func(error, string) (*upstreamStream, error), unary bool, digests []string, cascade string, tier prompt.Tier) <-chan antigravity.Event {
 	events := make(chan antigravity.Event)
 	go func() {
 		defer deadline.stop()
+		regenerated := 0
 		for {
 			var held []antigravity.Event
-			delivered := false
+			delivered, committed := false, false
 			emit := func(event antigravity.Event) {
-				if unary || !delivered && event.Kind == antigravity.EventError {
+				committed = committed || content(event)
+				if unary || event.Kind == antigravity.EventError || !committed && (event.Kind == antigravity.EventUsage || event.Kind == antigravity.EventFinish) {
 					held = append(held, event)
 					return
 				}
+				for _, pending := range held {
+					deliver(ctx, events, pending)
+				}
+				held = nil
 				delivered = true
 				deliver(ctx, events, event)
 			}
 			reported, final, err := forward(stream.events, emit, stream.out, deadline)
-			switched := err != nil && s.fail(ctx, stream.current, stream.lease.Model, err, tier)
 			requestdb.TraceFrom(ctx).AddAttempt(attempt(stream.lease.ID, stream.exchange, stream.started, err, final))
+			if retry := regenerable(ctx, err, final, committed); retry != nil && open != nil && regenerated < regenerations {
+				regenerated++
+				if err != nil && status(err) == 0 {
+					s.fail(ctx, stream.current, stream.lease.Model, err, tier)
+				}
+				stream.lease.Release()
+				next, err := open(retry, stream.lease.ID)
+				if err != nil {
+					deliver(ctx, events, antigravity.Event{Kind: antigravity.EventError, Err: err})
+					close(events)
+					return
+				}
+				slog.WarnContext(ctx, fmt.Sprintf("客户端尚未收到内容，重新生成 | 第 %d 次 | 原因=%v", regenerated, retry), "source", next.lease.ID)
+				stream = next
+				continue
+			}
+			switched := err != nil && s.fail(ctx, stream.current, stream.lease.Model, err, tier)
 			if switched && open != nil && !delivered && ctx.Err() == nil {
 				stream.lease.Release()
-				next, err := open(err)
+				next, err := open(err, "")
 				if err != nil {
 					deliver(ctx, events, antigravity.Event{Kind: antigravity.EventError, Err: err})
 					close(events)
@@ -550,6 +582,38 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 		}
 	}()
 	return events
+}
+
+// content 判断事件是否为客户端收到后不能随重新生成丢弃的正文、函数调用或媒体
+func content(event antigravity.Event) bool {
+	switch event.Kind {
+	case antigravity.EventText:
+		return event.Text != ""
+	case antigravity.EventToolCall, antigravity.EventMedia:
+		return true
+	}
+	return false
+}
+
+// regenerable 返回尝试可在客户端尚未收到内容时重新生成的原因：流中断、流尾 5xx，或以函数调用格式错误、意外的工具调用或没有内容的 STOP 结束；其余情形返回 nil
+func regenerable(ctx context.Context, err error, final antigravity.Event, committed bool) error {
+	if committed || ctx.Err() != nil {
+		return nil
+	}
+	if err != nil {
+		var upstream *antigravity.UpstreamError
+		if errors.As(err, &upstream) && upstream.Status >= http.StatusInternalServerError || errors.Is(err, antigravity.ErrIncompleteStream) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return err
+		}
+		return nil
+	}
+	if final.Kind == antigravity.EventFinish {
+		switch strings.ToUpper(final.FinishReason) {
+		case "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "STOP":
+			return fmt.Errorf("上游以 %s 结束且没有内容", final.FinishReason)
+		}
+	}
+	return nil
 }
 
 // forward 把上游事件经 out 处理后交给 emit，返回最后一次转发的用量、上游最后一个事件与流中的错误；正文、思考、签名或函数调用事件使累计输出超过 out 的上限时丢弃它及其后的上游事件，以已转发部分的用量和 MAX_TOKENS 结束，Claude 与 GPT-OSS 的块不带逐块累计的输出用量，累计输出按已转发正文、思考与函数调用的本地计数，输入取块上的上游用量，没有时按信封的本地计数；out 发出结束事件或核对失败后关闭上游并丢弃其后的事件；首个事件为下线提示且其后流未完成时改发 404 错误事件；每个上游事件为 deadline 重新计时，上游因超时中断时错误改为 REQUEST_TIMEOUT；客户端取消后 emit 丢弃事件，上游照常排空

@@ -43,6 +43,7 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/verify", s.verifyAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/quota", s.refreshQuota)
+	mux.HandleFunc("DELETE /api/accounts/{id}/cooldowns/{scope}", s.clearCooldown)
 	mux.HandleFunc("POST /api/accounts/{id}/switch", s.switchAccount)
 	mux.HandleFunc("POST /api/accounts/import", s.importAccounts)
 	mux.HandleFunc("POST /api/accounts/import/json", s.importAccountFile)
@@ -52,6 +53,7 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("POST /api/logins/{id}/code", s.submitLoginCode)
 	mux.HandleFunc("DELETE /api/logins/{id}", s.cancelLogin)
 	mux.HandleFunc("POST /api/pairing", s.createPairing)
+	mux.HandleFunc("POST /api/warmup", s.postWarmup)
 	mux.HandleFunc("GET /api/models", s.listModels)
 	mux.HandleFunc("GET /api/quota/snapshots", s.listQuotaSnapshots)
 	mux.HandleFunc("GET /api/usage", s.getUsage)
@@ -228,6 +230,17 @@ func (s *server) refreshQuota(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.Service.RefreshQuota(context.WithoutCancel(r.Context()), id); err != nil {
 		slog.WarnContext(r.Context(), "读取额度摘要失败 | 错误="+err.Error(), "source", id)
 		writeError(w, http.StatusBadGateway, "quota_refresh_failed", err.Error())
+		return
+	}
+	item, _ := s.findAccount(id)
+	writeJSON(w, http.StatusOK, item)
+}
+
+// clearCooldown 清除账户在一个额度组或模型上的冷却，返回清除后的账户
+func (s *server) clearCooldown(w http.ResponseWriter, r *http.Request) {
+	id, scope := r.PathValue("id"), r.PathValue("scope")
+	if !s.deps.Service.ClearCooldown(r.Context(), id, scope) {
+		writeError(w, http.StatusNotFound, "cooldown_not_found", "账户没有该项冷却: "+id+" "+scope)
 		return
 	}
 	item, _ := s.findAccount(id)

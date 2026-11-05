@@ -19,8 +19,11 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
-// stallThreshold 是生成事件流无进展多久后写停顿诊断
+// stallThreshold 是排队、准备、首事件与事件流无进展多久后写第一条进度日志
 const stallThreshold = 15 * time.Second
+
+// progressInterval 是等待超过 stallThreshold 后重复写进度日志的间隔
+const progressInterval = 30 * time.Second
 
 // activeKey 是 activeRequest 在 context 中的键
 type activeKey struct{}
@@ -31,9 +34,10 @@ type recordingService struct {
 	server *server
 }
 
-// Generate 记录首次生成，记下本次生成未能开始的错误或清除先前的错误，并经 relay 转发事件
+// Generate 记录首次生成，等待生成开始期间写进度日志，记下本次生成未能开始的错误或清除先前的错误，并经 relay 转发事件
 func (service recordingService) Generate(ctx context.Context, request antigravity.GenerateRequest) (<-chan antigravity.Event, error) {
 	trace := requestdb.TraceFrom(ctx)
+	request.Accounts = ctx.Value(activeKey{}).(*activeRequest).accounts
 	if trace.Begin(request.ID, request.Model) {
 		row := trace.Snapshot()
 		service.server.events.begin(row)
@@ -41,7 +45,9 @@ func (service recordingService) Generate(ctx context.Context, request antigravit
 			row.Model, row.Protocol, row.Stream, row.PromptTier, parameters(request.Config)),
 			"event", "request.started", "source", "request", "request", row)
 	}
-	events, err := service.Service.Generate(ctx, request)
+	events, err := waitGenerate(ctx, trace, request.Model, func() (<-chan antigravity.Event, error) {
+		return service.Service.Generate(ctx, request)
+	})
 	trace.Fail(err)
 	if err != nil {
 		return nil, err
@@ -55,13 +61,47 @@ func (service recordingService) Generate(ctx context.Context, request antigravit
 	return observed, nil
 }
 
-// relay 记录并转发生成事件，15 秒无事件时写停顿诊断，恢复后写恢复日志；客户端断开后继续排空上游事件以记下已知用量
+// waitGenerate 调用 generate，等待达到 stallThreshold 时与之后每隔 progressInterval 写一条进度日志：尚未选定账户时为排队等待，已选定时为请求准备等待；写过进度日志且生成已开始时再写请求准备结束
+func waitGenerate(ctx context.Context, trace *requestdb.Trace, model string, generate func() (<-chan antigravity.Event, error)) (<-chan antigravity.Event, error) {
+	started := time.Now()
+	done := make(chan struct{})
+	reported := make(chan bool, 1)
+	go func() {
+		timer := time.NewTimer(stallThreshold)
+		defer timer.Stop()
+		logged := false
+		for {
+			select {
+			case <-done:
+				reported <- logged
+				return
+			case <-timer.C:
+				logged = true
+				waited := time.Since(started).Round(time.Second)
+				if account := trace.Snapshot().Account; account == "" {
+					progress(ctx, trace, slog.LevelWarn, fmt.Sprintf("排队等待 | 已等待=%s | 模型=%s", waited, model))
+				} else {
+					progress(ctx, trace, slog.LevelWarn, fmt.Sprintf("请求准备等待 | 已等待=%s | 账户=%s | 模型=%s", waited, account, model))
+				}
+				timer.Reset(progressInterval)
+			}
+		}
+	}()
+	events, err := generate()
+	close(done)
+	if <-reported && err == nil {
+		progress(ctx, trace, slog.LevelInfo, fmt.Sprintf("请求准备结束 | 等待=%s | 模型=%s", time.Since(started).Round(time.Millisecond), model))
+	}
+	return events, err
+}
+
+// relay 记录并转发生成事件，首个事件前与相邻两个事件之间无事件达到 stallThreshold 时写进度日志，之后每隔 progressInterval 再写一条，恢复后写恢复日志；客户端断开后继续排空上游事件以记下已知用量
 func relay(ctx context.Context, trace *requestdb.Trace, model string, events <-chan antigravity.Event, observed chan<- antigravity.Event) {
 	started := time.Now()
 	timer := time.NewTimer(stallThreshold)
 	defer timer.Stop()
-	first, forward, last := true, true, "-"
-	var stalled time.Time
+	first, forward, stalled, last := true, true, false, "-"
+	lastAt := started
 	for {
 		select {
 		case event, ok := <-events:
@@ -70,13 +110,13 @@ func relay(ctx context.Context, trace *requestdb.Trace, model string, events <-c
 			}
 			trace.Observe(event)
 			now := time.Now()
-			if !stalled.IsZero() {
-				progress(ctx, trace, slog.LevelInfo, fmt.Sprintf("事件流恢复 | 模型=%s | 停顿=%s | 当前事件=%s", model, now.Sub(stalled).Round(time.Millisecond)+stallThreshold, event.Kind))
-				stalled = time.Time{}
+			if stalled {
+				progress(ctx, trace, slog.LevelInfo, fmt.Sprintf("事件流恢复 | 模型=%s | 停顿=%s | 当前事件=%s", model, now.Sub(lastAt).Round(time.Millisecond), event.Kind))
+				stalled = false
 			} else if first {
 				progress(ctx, trace, slog.LevelDebug, fmt.Sprintf("上游首事件到达 | 模型=%s | 等待=%s | 事件=%s", model, now.Sub(started).Round(time.Millisecond), event.Kind))
 			}
-			first, last = false, string(event.Kind)
+			first, last, lastAt = false, string(event.Kind), now
 			timer.Reset(stallThreshold)
 			if forward {
 				select {
@@ -89,12 +129,14 @@ func relay(ctx context.Context, trace *requestdb.Trace, model string, events <-c
 			if ctx.Err() != nil {
 				continue
 			}
-			stalled = time.Now()
-			message := fmt.Sprintf("事件流停顿 | 模型=%s | 已等待=%s | 最近事件=%s", model, stallThreshold, last)
+			stalled = true
+			waited := time.Since(lastAt).Round(time.Second)
+			message := fmt.Sprintf("事件流停顿 | 模型=%s | 已等待=%s | 最近事件=%s", model, waited, last)
 			if first {
-				message = fmt.Sprintf("上游首事件等待 | 模型=%s | 已等待=%s", model, stallThreshold)
+				message = fmt.Sprintf("上游首事件等待 | 模型=%s | 已等待=%s", model, waited)
 			}
 			progress(ctx, trace, slog.LevelWarn, message)
+			timer.Reset(progressInterval)
 		}
 	}
 }
@@ -135,7 +177,7 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		id := logging.RequestID(r.Context())
 		trace := requestdb.NewTrace(started, requestdb.Row{
 			ID: id, ClientRequestID: r.Header.Get("X-Request-ID"), Protocol: protocolOf(r.URL.Path), Path: r.URL.Path,
-			APIKey: key, ClientIP: clientIP(r), UserAgent: r.UserAgent(), PromptTier: cfg.SystemPrompt,
+			APIKey: maskKey(key), ClientIP: clientIP(r), UserAgent: r.UserAgent(), PromptTier: cfg.SystemPrompt,
 		})
 		trace.Watch(s.events.begin)
 		body, _ := io.ReadAll(r.Body)
@@ -147,7 +189,7 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		}
 		ctx, cancel := context.WithCancelCause(base)
 		defer cancel(nil)
-		active := &activeRequest{trace: trace, cancel: cancel}
+		active := &activeRequest{trace: trace, cancel: cancel, accounts: cfg.APIKeyAccounts[key]}
 		s.events.track(id, active)
 		capture := s.ledger.BodyCapture()
 		writer := &recordWriter{ResponseWriter: w, keep: capture}
@@ -180,7 +222,7 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 	})
 }
 
-// apiKey 返回请求所带 API key 的掩码与是否通过校验，keys 为空时全部通过且掩码为空
+// apiKey 返回请求所带的 API key 与是否通过校验，keys 为空时全部通过且 key 为空
 func apiKey(r *http.Request, keys []string) (string, bool) {
 	if len(keys) == 0 {
 		return "", true
@@ -193,7 +235,7 @@ func apiKey(r *http.Request, keys []string) (string, bool) {
 		candidate = strings.TrimSpace(candidate)
 		for _, key := range keys {
 			if candidate != "" && subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
-				return maskKey(key), true
+				return key, true
 			}
 		}
 	}
@@ -202,6 +244,9 @@ func apiKey(r *http.Request, keys []string) (string, bool) {
 
 // maskKey 保留 key 的前后各不超过四分之一，前缀最多 3 个字符、后缀最多 4 个字符
 func maskKey(key string) string {
+	if key == "" {
+		return ""
+	}
 	head, tail := min(3, len(key)/4), min(4, len(key)/4)
 	return key[:head] + "…" + key[len(key)-tail:]
 }

@@ -52,7 +52,7 @@ func quota(reset time.Time, gemini5h, geminiWeekly, thirdParty5h, thirdPartyWeek
 // acquire 立即获取租约并在失败时终止测试
 func acquire(t *testing.T, pool *Pool, model, session string, exclude map[string]bool) *Lease {
 	t.Helper()
-	lease, err := pool.Acquire(context.Background(), model, session, exclude, false)
+	lease, err := pool.Acquire(context.Background(), model, session, func(id string) bool { return exclude[id] }, false)
 	if err != nil {
 		t.Fatalf("Acquire(%s) 失败: %v", model, err)
 	}
@@ -177,7 +177,7 @@ func TestAcquireSkipsExcludedAccounts(t *testing.T) {
 		t.Fatalf("排除 a 后选中 %s，期望 b", lease.ID)
 	}
 	var cooldown *CooldownError
-	if _, err := pool.Acquire(context.Background(), "claude-opus-5-5-high", "", map[string]bool{"a": true, "b": true}, false); !errors.As(err, &cooldown) {
+	if _, err := pool.Acquire(context.Background(), "claude-opus-5-5-high", "", func(string) bool { return true }, false); !errors.As(err, &cooldown) {
 		t.Fatalf("全部排除时返回 %v，期望 CooldownError", err)
 	}
 }

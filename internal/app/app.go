@@ -24,6 +24,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/logging"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
+	"github.com/Mag1cFall/Antigravity2API/internal/statedb"
 )
 
 // Deps 是 Serve 使用的运行时组件，由 cmd 装配
@@ -49,6 +50,9 @@ type Deps struct {
 // shutdownTimeout 是退出时等待进行中请求的上限
 const shutdownTimeout = 10 * time.Second
 
+// mediaLimit 是 runtime/media 的总字节上限
+const mediaLimit = 1 << 30
+
 // server 持有一次 Serve 的运行状态
 type server struct {
 	ctx  context.Context
@@ -57,6 +61,7 @@ type server struct {
 	boot    config.Config
 	deps    Deps
 	ledger  *requestdb.Store
+	states  *statedb.DB
 	events  *hub
 	auth    *adminAuth
 	logins  *logins
@@ -89,7 +94,16 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewMultiHandler(deps.Logger.Handler(), s.events.handler(deps.Logger.Leveler(), s.ledger))))
 	defer slog.SetDefault(previous)
+	for _, invalid := range boot.Invalid {
+		slog.Warn(fmt.Sprintf("配置项取值无效，按默认值运行 | 配置项=%s | 原因=%s", invalid.Key, invalid.Reason), "source", "service")
+	}
 	s.ledger.SetBodyCapture(boot.RequestLogBodies)
+	states, err := statedb.Open(filepath.Join(boot.RuntimeDir, "states.db"))
+	if err != nil {
+		return err
+	}
+	defer states.Close()
+	s.states = states
 	listener, err := net.Listen("tcp", boot.Listen)
 	if errors.Is(err, portReserved) {
 		if listener, err = listenAfter(boot.Listen); err == nil {
@@ -143,7 +157,12 @@ func (s *server) routes() http.Handler {
 		return cfg.MediaOutput == "url", cfg.MediaBaseURL
 	}
 	public := s.recordPublic(api.NewHandler(recordingService{Service: s.deps.Service, server: s}, api.Options{
-		APIKeys: keys, FilesDir: filepath.Join(s.boot.RuntimeDir, "files"), MediaDir: filepath.Join(s.boot.RuntimeDir, "media"), MediaLinks: media,
+		APIKeys: keys, FilesDir: filepath.Join(s.boot.RuntimeDir, "files"), MediaDir: filepath.Join(s.boot.RuntimeDir, "media"), MediaLimit: mediaLimit, MediaLinks: media, WaitLaunch: s.deps.Service.WaitLaunch,
+		ResponseModes: func() api.ResponseModes {
+			cfg := s.live.Load()
+			return api.ResponseModes{NonstreamKeepalive: cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream}
+		},
+		ResponseStates: s.states.Scope("responses"), InteractionStates: s.states.Scope("interactions"),
 	}))
 	root.Handle("/v1/", public)
 	root.Handle("/v1beta/", public)

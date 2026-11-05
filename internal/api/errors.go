@@ -43,6 +43,7 @@ func streamHeaders(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	return http.NewResponseController(w).Flush()
 }
@@ -74,23 +75,10 @@ func writeSSEText(w http.ResponseWriter, data string) error {
 
 // writeSSEHeartbeat 发送 SSE 注释行心跳并传播连接错误
 func writeSSEHeartbeat(w http.ResponseWriter) error {
-	if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+	if _, err := io.WriteString(w, sseHeartbeat); err != nil {
 		return err
 	}
 	return http.NewResponseController(w).Flush()
-}
-
-// writeGeminiHeartbeat 发送不构成事件的空行并传播连接错误
-func writeGeminiHeartbeat(w http.ResponseWriter) error {
-	if _, err := io.WriteString(w, "\n"); err != nil {
-		return err
-	}
-	return http.NewResponseController(w).Flush()
-}
-
-// writeAnthropicPing 发送 Anthropic 流的 ping 事件
-func writeAnthropicPing(w http.ResponseWriter) error {
-	return writeSSE(w, "ping", map[string]string{"type": "ping"})
 }
 
 func statusFromError(err error) int {

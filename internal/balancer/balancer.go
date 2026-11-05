@@ -7,7 +7,6 @@ import (
 	"maps"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -194,6 +193,18 @@ func (p *Pool) Limit(id, scope string, until time.Time) {
 	p.notify()
 }
 
+// Clear 清除账户在一个额度组或模型上的冷却，返回清除前是否有该项冷却
+func (p *Pool) Clear(id, scope string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.cooldowns[id][scope]; !ok {
+		return false
+	}
+	delete(p.cooldowns[id], scope)
+	p.notify()
+	return true
+}
+
 // Cooldowns 返回各账户尚未到期的冷却
 func (p *Pool) Cooldowns() map[string]map[string]time.Time {
 	p.mu.Lock()
@@ -319,11 +330,11 @@ func (p *Pool) Status(id string) (Status, bool) {
 	return status, true
 }
 
-// Acquire 为模型选择账户并占用一个并发槽位，session 非空时优先沿用该会话上次的账户，exclude 中的账户不参与选择，lowerTier 时同优先级内先用套餐低的账户；候选账户并发已满时等待槽位
-func (p *Pool) Acquire(ctx context.Context, model, session string, exclude map[string]bool, lowerTier bool) (*Lease, error) {
+// Acquire 为模型选择账户并占用一个并发槽位，session 非空时优先沿用该会话上次的账户，skip 不为 nil 时每次选择都跳过它返回 true 的账户，lowerTier 时同优先级内先用套餐低的账户；候选账户并发已满时等待槽位
+func (p *Pool) Acquire(ctx context.Context, model, session string, skip func(string) bool, lowerTier bool) (*Lease, error) {
 	for {
 		p.mu.Lock()
-		lease, err := p.pick(model, session, exclude, lowerTier)
+		lease, err := p.pick(model, session, skip, lowerTier)
 		if lease != nil || err != nil {
 			p.mu.Unlock()
 			return lease, err
@@ -361,14 +372,14 @@ func (p *Pool) Until(id string) time.Time {
 }
 
 // pick 选出账户并占用槽位，有候选但并发全满时返回两个 nil
-func (p *Pool) pick(id, session string, exclude map[string]bool, lowerTier bool) (*Lease, error) {
+func (p *Pool) pick(id, session string, skip func(string) bool, lowerTier bool) (*Lease, error) {
 	now := p.now()
 	p.sweep(now)
 	var candidates []*entry
 	var earliest time.Time
 	for _, e := range p.entries {
 		model, ok := e.model(id)
-		if !ok || exclude[e.id] {
+		if !ok || skip != nil && skip(e.id) {
 			continue
 		}
 		if until := e.until(model, p.reserve); now.Before(until) {
@@ -514,7 +525,7 @@ func (e *entry) buckets(group string) []antigravity.QuotaBucket {
 	var buckets []antigravity.QuotaBucket
 	for _, quotaGroup := range e.quota.Groups {
 		for _, bucket := range quotaGroup.Buckets {
-			if prefix, _, _ := strings.Cut(bucket.BucketID, "-"); prefix == group {
+			if antigravity.BucketGroup(bucket.BucketID) == group {
 				buckets = append(buckets, bucket)
 			}
 		}

@@ -15,6 +15,7 @@ import { Table, Td, Th } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { quotaMessages } from '@/features/quota/messages'
 import { nameOf } from '@/features/quota/quota'
+import { protocolName } from '@/features/requests/filters'
 import { requestMessages } from '@/features/requests/messages'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import type { Body, RequestDetail } from '@/features/requests/types'
@@ -100,6 +101,13 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
     aggressive: s.promptAggressive,
     custom: s.promptCustom,
   }
+  const phaseNames: Record<string, string> = {
+    request: m.phaseRequest,
+    internal: m.phaseInternal,
+    routing: m.phaseRouting,
+    network: m.phaseNetwork,
+    upstream: m.phaseUpstream,
+  }
   const attempts = detail.upstream ?? []
   const bodies: { key: string; label: string; body: Body | null; side: 'request' | 'response' }[] =
     [
@@ -152,7 +160,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
       <dl className="border-b border-border">
         {record.error_phase && (
           <Row label={m.errorPhase}>
-            {record.error_phase}
+            {phaseNames[record.error_phase] ?? record.error_phase}
             {record.upstream_status > 0 && (
               <span className="text-foreground-muted">
                 {' '}
@@ -165,7 +173,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
           </Row>
         )}
         <Row label={m.path}>
-          {record.protocol} · <span className="font-mono">{record.path}</span>
+          {protocolName(record.protocol)} · <span className="font-mono">{record.path}</span>
         </Row>
         <Row label={m.publicModel}>
           <span className="font-mono">{record.model}</span>
@@ -191,9 +199,13 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
           />
         </Row>
         <Row label={m.timing}>
-          {[record.queue_ms, record.first_event_ms, record.duration_ms]
-            .map((value) => formatDuration(value, locale))
-            .join(' · ')}
+          <DotList
+            items={[
+              m.queue + ' ' + formatDuration(record.queue_ms, locale),
+              m.firstEvent + ' ' + formatDuration(record.first_event_ms, locale),
+              m.totalDuration + ' ' + formatDuration(record.duration_ms, locale),
+            ]}
+          />
         </Row>
         <Row label={m.tokenUsage}>
           <DotList
@@ -213,20 +225,18 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
         </Row>
         {record.tool_calls > 0 && <Row label={m.toolCalls}>{n(record.tool_calls)}</Row>}
         <Row label={m.stream}>{record.stream ? m.yes : m.no}</Row>
-        {(record.request_type || record.prompt_tier) && (
-          <Row label={m.requestType}>
-            {[
-              typeNames[record.request_type] ?? record.request_type,
-              tierNames[record.prompt_tier] ?? record.prompt_tier,
-            ]
-              .filter(Boolean)
-              .join(' · ')}
-          </Row>
+        {record.request_type && (
+          <Row label={m.requestType}>{typeNames[record.request_type] ?? record.request_type}</Row>
+        )}
+        {record.prompt_tier && (
+          <Row label={m.promptTier}>{tierNames[record.prompt_tier] ?? record.prompt_tier}</Row>
         )}
         {record.cascade_id && (
           <Row label={m.cascade}>
             <span className="font-mono">{record.cascade_id}</span>
-            <span className="text-foreground-muted"> · {record.step_index}</span>
+            <span className="text-foreground-muted">
+              {' · ' + fill(m.stepOf, { step: record.step_index })}
+            </span>
           </Row>
         )}
         <Row label={m.apiKey}>

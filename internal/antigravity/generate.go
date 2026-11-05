@@ -488,7 +488,7 @@ func identifyCalls(content Content, index int) Content {
 	return content
 }
 
-// linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按唯一待返回调用补齐；不含函数结果的 user 轮清空待返回调用，无法关联时返回错误
+// linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按调用顺序取第一个同名（结果无名称时取第一个）待返回调用补齐；不含函数结果的 user 轮清空待返回调用，无法关联时返回错误
 func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content, error) {
 	if content.Role == RoleUser && !slices.ContainsFunc(content.Parts, func(part Part) bool { return part.FunctionResult != nil }) {
 		*pendingCalls = nil
@@ -503,8 +503,8 @@ func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content
 			continue
 		}
 		matched := slices.IndexFunc(*pendingCalls, func(call FunctionCall) bool { return result.ID != "" && call.ID == result.ID })
-		if matched < 0 && len(*pendingCalls) == 1 && (result.Name == "" || result.Name == (*pendingCalls)[0].Name) {
-			matched = 0
+		if matched < 0 {
+			matched = slices.IndexFunc(*pendingCalls, func(call FunctionCall) bool { return result.Name == "" || call.Name == result.Name })
 		}
 		if matched < 0 {
 			if result.Name == "" {

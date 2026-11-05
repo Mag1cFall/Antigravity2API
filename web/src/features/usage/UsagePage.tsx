@@ -1,5 +1,5 @@
 import { BarChart3, ChevronDown, Download, X } from 'lucide-react'
-import { type RefObject, useLayoutEffect, useRef, useState } from 'react'
+import { type RefObject, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
 import { appMessages } from '@/app/messages'
@@ -64,7 +64,9 @@ const usageMessages = defineMessages(
     costDetail: '按各模型官方 API 单价估算',
     unpriced: '另有 {count} 个请求的模型没有单价',
     unpricedShort: '未定价 {count}',
-    trend: '每 {bucket}的请求数',
+    trend: '请求趋势',
+    trendBar: '{time} 起 {bucket}：{requests} 个请求',
+    trendNow: '现在',
     trendLabel: '请求趋势，峰值 {peak} 个请求',
     recent: '近 {minutes} 分钟 {requests} 个请求、{tokens} token',
     share: '请求占比',
@@ -114,7 +116,9 @@ const usageMessages = defineMessages(
     costDetail: 'Estimated from official API prices per model',
     unpriced: 'Unpriced requests: {count}',
     unpricedShort: '{count} unpriced',
-    trend: 'Requests per {bucket}',
+    trend: 'Request trend',
+    trendBar: '{bucket} from {time}: {requests} requests',
+    trendNow: 'Now',
     trendLabel: 'Request trend, peak {peak} requests',
     recent: '{requests} requests and {tokens} tokens in the last {minutes} minutes',
     share: 'Share of requests',
@@ -165,7 +169,9 @@ const usageMessages = defineMessages(
     costDetail: '依各模型官方 API 單價估算',
     unpriced: '另有 {count} 個請求的模型沒有單價',
     unpricedShort: '未定價 {count}',
-    trend: '每 {bucket}的請求數',
+    trend: '請求趨勢',
+    trendBar: '{time} 起 {bucket}：{requests} 個請求',
+    trendNow: '現在',
     trendLabel: '請求趨勢，峰值 {peak} 個請求',
     recent: '近 {minutes} 分鐘 {requests} 個請求、{tokens} token',
     share: '請求佔比',
@@ -199,15 +205,14 @@ function cacheRate(stats: UsageStats) {
 // barWidth 是趋势图每根柱子连同间隔的最小宽度
 const barWidth = 6
 
-// useWidth 返回元素的内容宽度并随尺寸变化更新
+// useWidth 返回元素的内容宽度并随尺寸变化更新，宽度来自尺寸观察的回调，挂载时不读布局
 function useWidth(ref: RefObject<HTMLElement | null>) {
   const [width, setWidth] = useState(0)
-  useLayoutEffect(() => {
+  useEffect(() => {
     const element = ref.current
     if (!element) return undefined
-    setWidth(element.clientWidth)
-    const observer = new ResizeObserver(() => {
-      setWidth(element.clientWidth)
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setWidth(entry.contentRect.width)
     })
     observer.observe(element)
     return () => {
@@ -217,7 +222,7 @@ function useWidth(ref: RefObject<HTMLElement | null>) {
   return width
 }
 
-// TrendCard 是逐桶请求数的柱状图，宽度放不下每桶一根柱子时把相邻的桶合并，副标题随合并后的间隔变化
+// TrendCard 是逐桶请求数的柱状图，下方标出起止时间，悬停柱子显示该段的起始时间、时长与请求数，宽度放不下每桶一根柱子时把相邻的桶合并
 function TrendCard({ data }: { data: UsageReport }) {
   const m = useMessages(usageMessages)
   const { locale } = useI18n()
@@ -233,12 +238,18 @@ function TrendCard({ data }: { data: UsageReport }) {
     })
   }
   const peak = Math.max(1, ...bars.map((bar) => bar.requests))
+  const axisFormat = new Intl.DateTimeFormat(locale, {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+  const interval = formatDuration(data.bucket_seconds * 1000 * per, locale)
   return (
     <Card>
       <CardHeader
-        title={fill(m.trend, {
-          bucket: formatDuration(data.bucket_seconds * 1000 * per, locale),
-        })}
+        title={m.trend}
         actions={
           <span className="text-sm text-foreground-muted">
             {fill(m.recent, {
@@ -259,12 +270,21 @@ function TrendCard({ data }: { data: UsageReport }) {
           {bars.map((bar) => (
             <div
               key={bar.at}
+              title={fill(m.trendBar, {
+                time: axisFormat.format(new Date(bar.at)),
+                bucket: interval,
+                requests: formatNumber(bar.requests, locale),
+              })}
               className="min-w-px flex-1 rounded-t-sm bg-primary"
               style={{
                 height: `${String(Math.max(bar.requests ? 2 : 0, (bar.requests / peak) * 100))}%`,
               }}
             />
           ))}
+        </div>
+        <div className="mt-2 flex justify-between text-xs text-foreground-muted tabular-nums">
+          <span>{axisFormat.format(new Date(data.from))}</span>
+          <span>{m.trendNow}</span>
         </div>
       </CardBody>
     </Card>

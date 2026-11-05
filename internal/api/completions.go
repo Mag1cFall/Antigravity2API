@@ -55,7 +55,7 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		Model:    request.Model,
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: []antigravity.Part{{Text: prompt}}}},
 		Suffix:   request.Suffix,
-		Unary:    !request.Stream,
+		Unary:    !request.Stream || s.fakeStream(),
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
@@ -83,15 +83,18 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, body)
 		return
 	}
-	if err := streamHeaders(w); err != nil {
+	stream, err := openStream(w, sseHeartbeat)
+	defer stream.stop()
+	if err != nil {
 		return
 	}
-	result, err := consumeStreamEvents(r.Context(), events, func(event antigravity.Event) error {
+	w = stream
+	result, err := consumeEvents(r.Context(), events, func(event antigravity.Event) error {
 		if event.Kind != antigravity.EventText {
 			return nil
 		}
 		return writeSSE(w, "", chunk(event.Text, nil))
-	}, func() error { return writeSSEHeartbeat(w) })
+	})
 	if err != nil {
 		writeOpenAIStreamError(w, r, err)
 		return

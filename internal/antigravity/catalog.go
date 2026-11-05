@@ -20,6 +20,8 @@ const (
 	QuotaGroupGemini = "gemini"
 	// QuotaGroupThirdParty 为 Claude 与 GPT 模型共享的额度桶组
 	QuotaGroupThirdParty = "3p"
+	// QuotaGroupArgon 为 Gemini Argon 模型独占的周额度桶组，只在带 Argon 授权的账户上出现
+	QuotaGroupArgon = "gemini-argon-wtu"
 	// KindImage 为 imageGenerationModelIds 中的图像生成模型
 	KindImage = "image"
 	// KindTranscription 为 audioTranscriptionModelIds 中的语音转写模型
@@ -156,12 +158,23 @@ func (catalog Catalog) PublicModels() []CatalogModel {
 	return append(models, others...)
 }
 
-// QuotaGroup 返回模型所属的额度桶组
+// QuotaGroup 返回模型所属的额度桶组，Argon 模型只计入自己的周额度桶
 func (m CatalogModel) QuotaGroup() string {
-	if m.ModelProvider == ProviderGoogle {
+	switch {
+	case m.ModelProvider == ProviderGoogle && strings.Contains(m.ID, "argon"):
+		return QuotaGroupArgon
+	case m.ModelProvider == ProviderGoogle:
 		return QuotaGroupGemini
 	}
 	return QuotaGroupThirdParty
+}
+
+// BucketGroup 返回额度桶所属的额度组，即 bucketId 最后一个 - 之前的部分，如 gemini-argon-wtu-weekly 属于 gemini-argon-wtu
+func BucketGroup(bucketID string) string {
+	if index := strings.LastIndexByte(bucketID, '-'); index > 0 {
+		return bucketID[:index]
+	}
+	return bucketID
 }
 
 // Public 返回公开目录中的模型条目，用途列表中的条目以用途标注能力，没有显示名时以 ID 为名称

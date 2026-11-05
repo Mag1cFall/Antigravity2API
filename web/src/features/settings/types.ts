@@ -3,4 +3,13 @@ export interface Settings {
   values: Record<string, string>
   admin_password_set: boolean
   restart_required: string[]
+  invalid: InvalidValue[]
+  environment: string[]
+}
+
+// InvalidValue 对应 internal/config 的 InvalidValue，是取值无效、按默认值运行的配置项
+export interface InvalidValue {
+  key: string
+  value: string
+  reason: string
 }

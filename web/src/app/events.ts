@@ -15,7 +15,7 @@ export const logsKey = ['logs'] as const
 // runningKey 保存事件流推送的进行中请求
 export const runningKey = ['requests-running'] as const
 
-// connectionKey 保存事件流的连接状态：connecting 为尚未连通，open 为已连通，closed 为已断开
+// connectionKey 保存事件流的连接状态：connecting 为尚未收完初始快照，open 为已收完初始快照，closed 为已断开
 export const connectionKey = ['events', 'connection'] as const
 
 // Connection 是事件流的连接状态
@@ -32,6 +32,7 @@ type AdminEvent =
   | { type: 'log'; data: LogEntry }
   | { type: 'request'; data: RequestRecord }
   | { type: 'login'; data: Login }
+  | { type: 'ready' }
 
 // apply 把一条管理事件写入对应的查询缓存
 function apply(client: QueryClient, event: AdminEvent) {
@@ -58,10 +59,13 @@ function apply(client: QueryClient, event: AdminEvent) {
     case 'login':
       client.setQueryData(['login', event.data.id], event.data)
       break
+    case 'ready':
+      client.setQueryData<Connection>(connectionKey, 'open')
+      break
   }
 }
 
-// useAdminEvents 订阅管理事件流，断开后由浏览器自动重连并重新收到初始快照，服务以错误状态拒绝时 3 秒后重新连接；重连后服务版本变化时（在线更新重启）刷新页面
+// useAdminEvents 订阅管理事件流，收到 ready 时初始快照已全部写入缓存，断开后由浏览器自动重连并重新收到初始快照，服务以错误状态拒绝时 3 秒后重新连接；重连后服务版本变化时（在线更新重启）刷新页面
 export function useAdminEvents(enabled: boolean) {
   const client = useQueryClient()
   useEffect(() => {
@@ -74,7 +78,6 @@ export function useAdminEvents(enabled: boolean) {
       source.onopen = () => {
         client.setQueryData(logsKey, [])
         client.setQueryData(runningKey, [])
-        client.setQueryData<Connection>(connectionKey, 'open')
         void api<Status>('/api/status').then((status) => {
           if (version && status.version !== version) window.location.reload()
           version = status.version

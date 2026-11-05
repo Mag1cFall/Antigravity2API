@@ -58,6 +58,16 @@ export function groupBuckets(quota: QuotaBucket[], group: string) {
     .sort(compareBuckets)
 }
 
+// cellBuckets 返回账户在一个额度组显示的额度桶：该组的桶，其后是 gemini-argon-wtu 这类以该组名加 - 开头的独立额度组的桶
+export function cellBuckets(quota: QuotaBucket[], group: string) {
+  const own = groupBuckets(quota, group)
+  const nested = quota
+    .map((bucket) => ({ ...bucket, ...bucketParts(bucket.bucket_id) }))
+    .filter((bucket) => bucket.group.startsWith(group + '-'))
+    .sort(compareBuckets)
+  return [...own, ...nested]
+}
+
 // available 返回账户在一个额度组的可用比例，即 5 小时与每周中较低的一项，没有额度时为 null
 export function available(quota: QuotaBucket[], group: string): number | null {
   const buckets = groupBuckets(quota, group)

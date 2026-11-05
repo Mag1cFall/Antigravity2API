@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,8 @@ const streamHeartbeatInterval = 10 * time.Second
 
 type generationResult struct {
 	events        []antigravity.Event
-	text          strings.Builder
-	reasoning     strings.Builder
+	text          bytes.Buffer
+	reasoning     bytes.Buffer
 	toolCalls     []antigravity.FunctionCall
 	media         []antigravity.Blob
 	usage         *antigravity.Usage
@@ -113,53 +114,12 @@ func awaitStreamStart(ctx context.Context, events <-chan antigravity.Event) (<-c
 	return replay, first, nil
 }
 
+// consumeEvents 收集全部事件，emit 不为空时逐个交给 emit
 func consumeEvents(ctx context.Context, events <-chan antigravity.Event, emit func(antigravity.Event) error) (result generationResult, resultErr error) {
-	return consumeEventsWithHeartbeat(ctx, events, emit, nil)
-}
-
-func consumeStreamEvents(
-	ctx context.Context,
-	events <-chan antigravity.Event,
-	emit func(antigravity.Event) error,
-	heartbeat func() error,
-) (generationResult, error) {
-	return consumeEventsWithHeartbeat(ctx, events, emit, heartbeat)
-}
-
-func consumeEventsWithHeartbeat(
-	ctx context.Context,
-	events <-chan antigravity.Event,
-	emit func(antigravity.Event) error,
-	heartbeat func() error,
-) (result generationResult, resultErr error) {
-	var heartbeatTimer *time.Timer
-	var heartbeatTick <-chan time.Time
-	if heartbeat != nil {
-		heartbeatTimer = time.NewTimer(streamHeartbeatInterval)
-		heartbeatTick = heartbeatTimer.C
-		defer heartbeatTimer.Stop()
-	}
-	resetHeartbeat := func() {
-		if heartbeatTimer == nil {
-			return
-		}
-		if !heartbeatTimer.Stop() {
-			select {
-			case <-heartbeatTimer.C:
-			default:
-			}
-		}
-		heartbeatTimer.Reset(streamHeartbeatInterval)
-	}
 	for {
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()
-		case <-heartbeatTick:
-			if err := heartbeat(); err != nil {
-				return result, err
-			}
-			resetHeartbeat()
 		case event, ok := <-events:
 			if !ok {
 				if !result.finished {
@@ -175,7 +135,6 @@ func consumeEventsWithHeartbeat(
 					return result, err
 				}
 			}
-			resetHeartbeat()
 		}
 	}
 }

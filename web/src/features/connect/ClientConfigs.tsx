@@ -1,3 +1,8 @@
+import cherryStudioIcon from '@lobehub/icons-static-svg/icons/cherrystudio-color.svg'
+import claudeCodeIcon from '@lobehub/icons-static-svg/icons/claudecode-color.svg'
+import codexIcon from '@lobehub/icons-static-svg/icons/codex-color.svg'
+import opencodeIcon from '@lobehub/icons-static-svg/icons/opencode.svg'
+import { Terminal } from 'lucide-react'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 
@@ -40,6 +45,25 @@ const clientNames: Record<Client, string> = {
   opencode: 'OpenCode',
   'cherry-studio': 'Cherry Studio',
   curl: 'curl',
+}
+
+// ClientIcon 是客户端标签前的图标，单色图标以遮罩跟随文字颜色
+function ClientIcon({ client }: { client: Client }) {
+  if (client === 'curl') return <Terminal size={16} aria-hidden />
+  if (client === 'opencode')
+    return (
+      <span
+        aria-hidden
+        className="size-4 bg-current"
+        style={{ mask: `url("${opencodeIcon}") center / contain no-repeat` }}
+      />
+    )
+  const src = {
+    'claude-code': claudeCodeIcon,
+    codex: codexIcon,
+    'cherry-studio': cherryStudioIcon,
+  }[client]
+  return <img src={src} alt="" className="size-4" />
 }
 
 // pick 返回满足条件的第一个模型 ID，没有时取第一个模型
@@ -201,9 +225,10 @@ export function ClientConfigs() {
         )
       }}
     >
-      <TabsList aria-label={m.clientLabel}>
+      <TabsList aria-label={m.clientLabel} className="max-sm:grid max-sm:w-full max-sm:grid-cols-2">
         {clients.map((item) => (
-          <TabsTrigger key={item} value={item}>
+          <TabsTrigger key={item} value={item} className="gap-2 max-sm:justify-start">
+            <ClientIcon client={item} />
             {clientNames[item]}
           </TabsTrigger>
         ))}

@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { Download, History } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 
+import { useConnection } from '@/app/events'
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
@@ -16,6 +17,7 @@ import { useModels } from '@/features/models/queries'
 import {
   apiQuery,
   parseFilter,
+  protocolName,
   protocols,
   type RangeKey,
   ranges,
@@ -31,7 +33,7 @@ import { formatCompact, formatCost, formatDateTime, formatDuration } from '@/lib
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
-// RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL；宽度小于 640px 时每个请求一张卡片
+// RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL；事件流的初始快照到达后进行中的请求与记录一起显示；宽度小于 640px 时每个请求一张卡片
 export function RequestsPage() {
   const m = useMessages(requestMessages)
   const app = useMessages(appMessages)
@@ -47,6 +49,7 @@ export function RequestsPage() {
       api<RequestPage>('/api/usage/records?' + apiQuery(filter, new Date()).toString()),
     placeholderData: keepPreviousData,
   })
+  const connection = useConnection()
   const filtered =
     filter.range !== '24h' ||
     Boolean(filter.state || filter.protocol || filter.model || filter.account || filter.q)
@@ -79,6 +82,7 @@ export function RequestsPage() {
   const csv = '/api/usage/records.csv?' + csvQuery.toString()
   const base = window.location.origin + '/v1'
 
+  if (connection === 'connecting') return <Loading label={app.loading} />
   return (
     <>
       <RunningRequests />
@@ -117,7 +121,10 @@ export function RequestsPage() {
               }}
               options={[
                 { value: 'all', label: m.allProtocols },
-                ...protocols.map((protocol) => ({ value: protocol, label: protocol })),
+                ...protocols.map((protocol) => ({
+                  value: protocol,
+                  label: protocolName(protocol),
+                })),
               ]}
             />
             <Select
@@ -258,7 +265,9 @@ export function RequestsPage() {
                       >
                         {formatDateTime(new Date(record.time), now, locale)}
                       </button>
-                      <div className="mt-1 text-xs text-foreground-muted">{record.protocol}</div>
+                      <div className="mt-1 text-xs text-foreground-muted">
+                        {protocolName(record.protocol)}
+                      </div>
                     </Td>
                     <Td>
                       <RequestStateBadge state={record.state} />

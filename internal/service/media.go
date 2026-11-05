@@ -109,16 +109,9 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 	deadline := watch(ctx, s.live.Load().RequestTimeout)
 	tried := make(map[string]bool)
 	waited := make(map[string]bool)
-	if request.AccountID != "" {
-		s.mu.Lock()
-		for id := range s.accounts {
-			tried[id] = id != request.AccountID
-		}
-		s.mu.Unlock()
-	}
 	var last error
 	for attempts := 1; ; attempts++ {
-		lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, tried, s.lowerTier(model))
+		lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, skip(request, tried), s.lowerTier(model))
 		if err != nil {
 			deadline.stop()
 			var cooldown *balancer.CooldownError

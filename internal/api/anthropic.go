@@ -129,7 +129,12 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	generateRequest.Unary = !request.Stream
+	generateRequest.Unary = !request.Stream || s.fakeStream()
+	if !request.Stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
+	}
 	events, err := s.service.Generate(r.Context(), generateRequest)
 	var first antigravity.Event
 	if err == nil && request.Stream {
@@ -142,7 +147,9 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if request.Stream {
-		if err := streamHeaders(w); err != nil {
+		stream, err := openStream(w, anthropicHeartbeat)
+		defer stream.stop()
+		if err != nil {
 			return
 		}
 		usage := first.Usage
@@ -152,7 +159,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		}
 		thinking, omitted := request.thinkingBlocks()
 		writer := &anthropicStreamWriter{
-			w: w, id: messageID, model: request.Model, usage: usage,
+			w: stream, id: messageID, model: request.Model, usage: usage,
 			thinking: thinking, omitted: omitted,
 			search: searchOnly(generateRequest.Tools), media: s.mediaOutputFor(r),
 		}
@@ -930,7 +937,7 @@ func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter,
 	if writer.search {
 		emit, release = holdUntilGrounding(writer.live)
 	}
-	result, err := consumeStreamEvents(r.Context(), events, emit, func() error { return writeAnthropicPing(writer.w) })
+	result, err := consumeEvents(r.Context(), events, emit)
 	if err != nil {
 		if shouldWriteRequestError(r, err) && release() == nil {
 			_ = writer.error(err)

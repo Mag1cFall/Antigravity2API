@@ -26,6 +26,9 @@ export const connectMessages = defineMessages(
     editKeyHint:
       '可以填写自己的 key，也可以使用随机生成的值。修改后，使用旧值的客户端需要改用新值。',
     keyValue: 'Key',
+    keyAccounts: '可用账户',
+    keyAccountsHint: '只勾选的账户处理带这个 key 的请求，都不勾选时可用全部账户。',
+    keyBound: '{count} 个账户',
     regenerate: '随机生成',
     save: '保存',
     cancel: '取消',
@@ -110,6 +113,10 @@ export const connectMessages = defineMessages(
     editKeyHint:
       'Enter your own key or use the random one. After you change a key, clients that use the old value need the new one.',
     keyValue: 'Key',
+    keyAccounts: 'Accounts',
+    keyAccountsHint:
+      'Only the checked accounts serve requests with this key. Leave all unchecked to use every account.',
+    keyBound: '{count} accounts',
     regenerate: 'Generate random key',
     save: 'Save',
     cancel: 'Cancel',
@@ -201,6 +208,9 @@ export const connectMessages = defineMessages(
     editKeyHint:
       '可以填入自己的 key，也可以使用隨機產生的值。修改後，使用舊值的用戶端需要改用新值。',
     keyValue: 'Key',
+    keyAccounts: '可用帳號',
+    keyAccountsHint: '只有勾選的帳號處理帶這個 key 的請求，都不勾選時可用全部帳號。',
+    keyBound: '{count} 個帳號',
     regenerate: '隨機產生',
     save: '儲存',
     cancel: '取消',

@@ -82,6 +82,27 @@ type interactionRecord struct {
 	input  []json.RawMessage
 }
 
+// savedInteraction 是 interactionRecord 写入续接状态库的形式
+type savedInteraction struct {
+	Object json.RawMessage   `json:"object"`
+	Input  []json.RawMessage `json:"input,omitempty"`
+}
+
+// MarshalJSON 把交互资源编码为 savedInteraction
+func (record *interactionRecord) MarshalJSON() ([]byte, error) {
+	return json.Marshal(savedInteraction{Object: record.object, Input: record.input})
+}
+
+// UnmarshalJSON 从 savedInteraction 读回交互资源
+func (record *interactionRecord) UnmarshalJSON(data []byte) error {
+	var saved savedInteraction
+	if err := json.Unmarshal(data, &saved); err != nil {
+		return err
+	}
+	record.object, record.input = saved.Object, saved.Input
+	return nil
+}
+
 // handleInteraction 把 Interactions 请求接入规范生成链路，previous_interaction_id 续接已保存的交互
 func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	var request interactionRequest
@@ -115,7 +136,12 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	r = r.WithContext(ctx)
-	generate.Unary = !request.Stream
+	generate.Unary = !request.Stream || s.fakeStream()
+	if !request.Stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
+	}
 	events, err := s.service.Generate(ctx, generate)
 	if err == nil && request.Stream {
 		events, _, err = awaitStreamStart(ctx, events)
@@ -585,9 +611,12 @@ func interactionSteps(result generationResult, summaries bool) []map[string]any 
 
 // streamInteraction 输出 interaction.created、各步骤的 step.start、step.delta、step.stop 与 interaction.completed；正文之后的独立签名暂存到下一个事件，使搜索来源先以 text_annotation_delta 写在正文步骤内
 func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, request interactionRequest, generate antigravity.GenerateRequest, previous responseHistory, current []antigravity.Content, created string, events <-chan antigravity.Event) {
-	if err := streamHeaders(w); err != nil {
+	stream, err := openStream(w, sseHeartbeat)
+	defer stream.stop()
+	if err != nil {
 		return
 	}
+	w = stream
 	send := func(kind string, value map[string]any) error {
 		value["event_type"] = kind
 		return writeSSE(w, kind, value)
@@ -647,7 +676,7 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 		}
 		return nil
 	}
-	result, err := consumeStreamEvents(r.Context(), events, func(event antigravity.Event) error {
+	result, err := consumeEvents(r.Context(), events, func(event antigravity.Event) error {
 		switch {
 		case event.Kind == antigravity.EventGrounding && text.Len() > 0:
 			if annotations := interactionAnnotations(text.String(), event.Grounding); len(annotations) > 0 {
@@ -665,7 +694,7 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 		}
 		held = nil
 		return write(event)
-	}, func() error { return writeSSEHeartbeat(w) })
+	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			send("error", map[string]any{"error": map[string]any{"code": geminiErrorStatus(err), "message": err.Error()}})

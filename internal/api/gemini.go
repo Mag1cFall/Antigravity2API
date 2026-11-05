@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -203,11 +205,46 @@ func (s *server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	data := make([]map[string]any, 0, len(models))
-	for _, model := range models {
+	page, next, err := geminiPage(r.URL.Query(), models, 50, 1000)
+	if err != nil {
+		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	data := make([]map[string]any, 0, len(page))
+	for _, model := range page {
 		data = append(data, geminiModelObject(model))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"models": data})
+	response := map[string]any{"models": data}
+	if next != "" {
+		response["nextPageToken"] = next
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// geminiPage 按 pageSize 与 pageToken 返回列表的一页与下一页令牌，pageSize 为 0 时取 defaultSize、最多 maxSize，pageToken 为下一页的起始位置
+func geminiPage[T any](query url.Values, items []T, defaultSize int, maxSize int) ([]T, string, error) {
+	size, offset := defaultSize, 0
+	if value := firstQueryValue(query, "pageSize", "page_size"); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return nil, "", fmt.Errorf("invalid pageSize %q", value)
+		}
+		if parsed > 0 {
+			size = min(parsed, maxSize)
+		}
+	}
+	if token := firstQueryValue(query, "pageToken", "page_token"); token != "" {
+		parsed, err := strconv.Atoi(token)
+		if err != nil || parsed < 0 || parsed > len(items) {
+			return nil, "", fmt.Errorf("invalid pageToken %q", token)
+		}
+		offset = parsed
+	}
+	end := min(offset+size, len(items))
+	if end < len(items) {
+		return items[offset:end], strconv.Itoa(end), nil
+	}
+	return items[offset:end], "", nil
 }
 
 func (s *server) handleGeminiModel(w http.ResponseWriter, r *http.Request) {
@@ -229,6 +266,7 @@ func (s *server) handleGeminiModel(w http.ResponseWriter, r *http.Request) {
 func geminiModelObject(model antigravity.Model) map[string]any {
 	item := map[string]any{
 		"name":                       "models/" + model.ID,
+		"baseModelId":                model.ID,
 		"displayName":                model.Name,
 		"description":                model.Description,
 		"supportedGenerationMethods": model.Methods,
@@ -237,6 +275,9 @@ func geminiModelObject(model antigravity.Model) map[string]any {
 	}
 	if len(model.Capabilities) > 0 {
 		item["capabilities"] = model.Capabilities
+	}
+	if model.Capabilities["thinking"] {
+		item["thinking"] = true
 	}
 	if len(model.ThinkingLevels) > 0 {
 		item["thinkingLevels"], item["defaultThinkingLevel"] = model.ThinkingLevels, model.DefaultThinkingLevel
@@ -703,6 +744,11 @@ func mapGeminiTools(groups []geminiToolGroup, config geminiToolConfig) (antigrav
 
 // handleGeminiGenerate 为每个候选启动一次生成，任一候选失败时整个请求按首个错误失败
 func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, stream bool, count int) {
+	if !stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
+	}
 	candidates := s.startChatChoices(r.Context(), request, count, stream)
 	defer candidates.cancel()
 	if err := candidates.err; err != nil {
@@ -939,9 +985,12 @@ func geminiUsage(usage *antigravity.Usage) map[string]any {
 func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, candidates *chatChoices) {
 	sse := r.URL.Query().Get("alt") == "sse"
 	if sse {
-		if err := streamHeaders(w); err != nil {
+		stream, err := openStream(w, geminiHeartbeat)
+		defer stream.stop()
+		if err != nil {
 			return
 		}
+		w = stream
 	} else {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -978,22 +1027,14 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 			io.WriteString(w, tail)
 		}()
 	}
-	heartbeat := func() error {
-		if !sse {
-			return nil
-		}
-		writing.Lock()
-		defer writing.Unlock()
-		return writeGeminiHeartbeat(w)
-	}
 	results, err := candidates.run(func(index int, events <-chan antigravity.Event) (generationResult, error) {
-		return consumeStreamEvents(candidates.ctx, events, func(event antigravity.Event) error {
+		return consumeEvents(candidates.ctx, events, func(event antigravity.Event) error {
 			candidate := geminiStreamCandidate(event, index)
 			if candidate == nil {
 				return nil
 			}
 			return write(map[string]any{"responseId": request.ID, "modelVersion": cmp.Or(event.ProviderModel, request.Model), "candidates": []any{candidate}})
-		}, heartbeat)
+		})
 	})
 	if err != nil {
 		if !shouldWriteRequestError(r, err) {

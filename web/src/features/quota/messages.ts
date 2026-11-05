@@ -4,6 +4,8 @@ import { defineMessages } from '@/lib/i18n'
 export const quotaMessages = defineMessages(
   {
     gemini: 'Gemini',
+    'gemini-argon-wtu': 'Gemini Argon',
+    argon: 'Argon',
     '3p': 'Claude 与 GPT',
     '5h': '5 小时',
     weekly: '每周',
@@ -12,6 +14,8 @@ export const quotaMessages = defineMessages(
   },
   {
     gemini: 'Gemini',
+    'gemini-argon-wtu': 'Gemini Argon',
+    argon: 'Argon',
     '3p': 'Claude & GPT',
     '5h': '5h',
     weekly: 'Weekly',
@@ -20,6 +24,8 @@ export const quotaMessages = defineMessages(
   },
   {
     gemini: 'Gemini',
+    'gemini-argon-wtu': 'Gemini Argon',
+    argon: 'Argon',
     '3p': 'Claude 與 GPT',
     '5h': '5 小時',
     weekly: '每週',

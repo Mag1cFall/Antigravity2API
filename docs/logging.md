@@ -65,7 +65,7 @@ JSON 格式每行一条事件：
 | --- | --- |
 | `http.access` | 每个 HTTP 请求结束 |
 | `request.started` | 公开请求首次调用生成 |
-| `request.progress` | 分配账户、换账户、上游尝试结束、流式等待 |
+| `request.progress` | 分配账户、换账户、上游尝试结束、排队与请求准备等待、流式等待 |
 | `request.finished` | 公开请求结束并写入账本 |
 | `upstream.request` | 生成以外的一次上游请求结束 |
 
@@ -150,16 +150,19 @@ INFO  other@example.com    工具调用完成 | 状态=200 | 耗时=3.11s | 账�
 
 ## 流式等待
 
-生成事件流连续 15 秒没有新事件时写一条 WARN，下一个事件到达时写恢复：
+请求等待生成开始、等待上游首个事件或事件流连续 15 秒没有新事件时写一条 WARN，之后每 30 秒再写一条，`已等待` 为实际等待时长；等待结束时写结束或恢复。尚未选定账户时为排队等待，已选定账户时为请求准备等待（刷新 token、读取项目等）：
 
 ```text
+WARN  request              排队等待 | 已等待=15s | 模型=gemini-3.8-flash-high
+WARN  account@example.com  请求准备等待 | 已等待=45s | 账户=account@example.com | 模型=gemini-3.8-flash-high
+INFO  account@example.com  请求准备结束 | 等待=52.310s | 模型=gemini-3.8-flash-high
 WARN  account@example.com  上游首事件等待 | 模型=gemini-3.8-flash-high | 已等待=15s
 DEBUG account@example.com  上游首事件到达 | 模型=gemini-3.8-flash-high | 等待=21.448s | 事件=reasoning
 WARN  account@example.com  事件流停顿 | 模型=gemini-3.8-flash-high | 已等待=15s | 最近事件=text
 INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停顿=17.208s | 当前事件=text
 ```
 
-客户端断开后服务继续读完上游事件流，账本记下完整用量；上面四条等待诊断只在客户端连接期间写出。
+客户端断开后服务继续读完上游事件流，账本记下完整用量；上游首事件与事件流的四条诊断只在客户端连接期间写出。管理端请求页与日志页的进行中请求以该请求最近一条 `request.progress` 的消息作为当前阶段。
 
 ## 账户事件
 
@@ -215,6 +218,8 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 | `读取额度摘要失败 \| 错误=...` | WARN | 账户 |
 | `官方客户端已切换到该账户并重新启动` | INFO | 账户 |
 | `官方客户端切换账户失败 \| 错误=...` | ERROR | 账户 |
+| `手动预热完成 \| 模型=... \| 耗时=...ms` | INFO | 账户 |
+| `手动预热失败 \| 模型=... \| 耗时=...ms \| 错误=...` | WARN | 账户 |
 | `服务配置已保存 \| 变更=...` | INFO | `service` |
 | `管理端停止请求 \| 请求=...` | WARN | `request` |
 | `请求记录导出失败 \| 错误=...` | ERROR | `service` |
@@ -236,7 +241,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 
 ## 请求账本
 
-`RUNTIME_DIR/requests.db` 是 SQLite（WAL）账本。每个公开 POST 请求（API key 与配置的某个 key 相同，或未配置 key）结束后写入一行请求记录，入账条件见 [开发文档](development.md) “目录、组件与依赖”的处理链；写入由后台协程按批提交，响应先于写入完成，等待写入的条目超过 4096 条时丢弃新条目。
+`RUNTIME_DIR/requests.db` 是 SQLite（WAL）账本。每个公开 POST 请求（API key 与配置的某个 key 相同，或未配置 key）与每次管理端手动预热结束后写入一行请求记录，入账条件见 [开发文档](development.md) “目录、组件与依赖”的处理链；写入由后台协程按批提交，响应先于写入完成，等待写入的条目超过 4096 条时丢弃新条目。
 
 | 字段 | 内容 |
 | --- | --- |
@@ -352,6 +357,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 | `/v1/messages` 及其子路径（含 `/v1/messages/count_tokens`） | `anthropic` |
 | `/v1beta/` 下的路径（含 `:countTokens`、`/v1beta/interactions`、`/v1beta/files`） | `gemini` |
 | 其余（`/v1/completions`、`/v1/images/*`、`/v1/audio/*`、`/v1/files`、`/v1/interactions`、`/upload/v1beta/files`） | `other` |
+| 管理端手动预热 `/api/warmup` | `warmup` |
 
 上游尝试的请求与响应正文：失败的请求不论 `REQUEST_LOG_BODIES` 取值都保存，成功的请求只在 `REQUEST_LOG_BODIES=true` 时保存。公开协议的请求与响应正文只在 `REQUEST_LOG_BODIES=true` 时保存。正文为明文，各截断到 64 KiB 并记录原始字节数，公开正文与上游正文各保留最近 1000 条。
 

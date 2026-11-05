@@ -77,7 +77,7 @@ Download the desktop app for your system from [Releases](https://github.com/Mag1
 | --- | --- | --- | --- |
 | Windows | `windows-amd64.zip` | Double-click `antigravity2api.exe` | The folder of `antigravity2api.exe`; the whole folder can be copied or moved as is |
 | macOS | `desktop-<version>-darwin-universal.tar.gz` | Open `Antigravity2API.app` | `~/Library/Application Support/Antigravity2API` |
-| Linux | `desktop-<version>-linux-amd64.tar.gz` or `linux-arm64.tar.gz` | Run `antigravity2api`; requires the system GTK 4 and WebKitGTK 6.0 | `~/.config/Antigravity2API` |
+| Linux | `desktop-<version>-linux-amd64.tar.gz` or `linux-arm64.tar.gz` | Run `antigravity2api`; requires the system GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0` on Ubuntu 22.04 and later) | `~/.config/Antigravity2API` |
 
 The app opens the admin UI in a window; sign in with a Google account or import the account of the local official client on the Accounts page. On Windows without the WebView2 runtime the admin UI opens in the default browser. On Windows and macOS closing the window keeps the app in the tray; on Linux closing the window quits.
 
@@ -303,6 +303,7 @@ docs/                 # protocol, development and logging docs
 | --- | --- | --- |
 | `LISTEN` | Listen address of the public API, admin API and admin UI; when Windows reserves the port, the service listens on the next free port and the admin UI shows the actual address | `127.0.0.1:8017` |
 | `API_KEYS` | Public API keys, comma separated | empty |
+| `API_KEY_ACCOUNTS` | Accounts bound to API keys, each item written as `key:account\|account`, comma separated; a key with bound accounts uses only those accounts | empty |
 | `AUTH_DIR` | Account directory | `auth` |
 | `RUNTIME_DIR` | Runtime data directory: the request ledger `requests.db`, logs in `logs/`, uploaded `files/`, generated `media/`, conversation records, model catalogs and other runtime state | `runtime` |
 | `PROXY` | Global HTTP, HTTPS or SOCKS5 proxy; the comma-separated items form a proxy pool; the system proxy is used when empty | empty |
@@ -316,6 +317,8 @@ docs/                 # protocol, development and logging docs
 | `ROUTING_STRATEGY` | Routing strategy: `round-robin` or `fill-first` | `round-robin` |
 | `PREFER_LOWER_TIER_MODELS` | Model IDs that prefer lower-plan accounts, comma-separated; within the same priority, Free, then Pro, then Ultra accounts are used | empty |
 | `REQUEST_TIMEOUT` | Maximum wait for the first upstream event and between two upstream events | `5m` |
+| `NONSTREAM_KEEPALIVE` | When a non-streaming request waits more than 10 seconds, return 200 first and then write a newline every 10 seconds, so reverse proxies keep the connection open | `true` |
+| `FAKE_STREAM` | Streaming requests get the complete result first and then output it in streaming format; failures midway are regenerated on another account | `false` |
 | `QUOTA_REFRESH_INTERVAL` | Interval for reading the quota of every account, disabled ones included, in the background; minimum `1m`, `0` turns it off | `15m` |
 | `QUOTA_RESERVE_PERCENT` | Quota reserve, 0–99 | `0` |
 | `WEEKLY_QUOTA_WARMUP` | Start weekly quota timers automatically | `false` |

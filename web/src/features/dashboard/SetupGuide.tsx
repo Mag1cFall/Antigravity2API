@@ -7,8 +7,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardBody } from '@/components/ui/card'
 import {
   AddAccountDialog,
+  methodGroups,
   methodIcons,
-  methods,
   useMethodText,
 } from '@/features/accounts/AddAccountDialog'
 import { ApiKeyList } from '@/features/connect/ApiKeys'
@@ -45,70 +45,89 @@ function StepMarker({ index, done, label }: { index: number; done: boolean; labe
   )
 }
 
-// Step 是引导中的一步：序号、标题、说明与内容
+// Step 是引导中的一步：序号、标题、说明、标题行右侧的操作与内容
 function Step({
   index,
   done,
   title,
   hint,
+  action,
   children,
 }: {
   index: number
   done: boolean
   title: string
   hint: string
+  action?: ReactNode
   children: ReactNode
 }) {
   const m = useMessages(connectMessages)
   return (
     <Card aria-label={title}>
-      <div className="flex items-start gap-4 px-6 pt-6 pb-4 max-sm:px-4 max-sm:pt-4">
+      <div className="flex flex-wrap items-start gap-4 px-6 pt-6 pb-4 max-sm:px-4 max-sm:pt-4">
         <StepMarker index={index} done={done} label={m.stepDone} />
-        <div className="min-w-0">
+        <div className="min-w-0 flex-[1_1_240px]">
           <h2 className="text-md font-semibold">{title}</h2>
           <p className="mt-1 text-sm text-foreground-muted">{hint}</p>
         </div>
+        {action}
       </div>
       <CardBody className="sm:pl-[72px]">{children}</CardBody>
     </Card>
   )
 }
 
-// AccountMethods 是添加账户的四种方式，点击打开选中该方式的添加账户对话框
+// AccountMethods 是按登录与导入分组的五种添加方式，点击打开选中该方式的添加账户对话框
 function AccountMethods() {
   const text = useMethodText()
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {methods.map((method) => {
-        const Icon = methodIcons[method]
-        return (
-          <AddAccountDialog
-            key={method}
-            method={method}
-            trigger={
-              <button
-                type="button"
-                className="flex min-w-0 items-start gap-3 rounded-md border border-border bg-surface p-4 text-left hover:border-primary-border hover:bg-primary-soft"
-              >
-                <span className="flex size-control-sm shrink-0 items-center justify-center rounded-md bg-info-soft text-primary">
-                  <Icon size={16} aria-hidden />
-                </span>
-                <span className="min-w-0">
-                  <span className="block text-sm font-semibold">{text[method][0]}</span>
-                  <span className="mt-1 block text-xs text-foreground-muted">
-                    {text[method][1]}
-                  </span>
-                </span>
-              </button>
+    <div className="flex flex-col gap-4">
+      {methodGroups.map((group) => (
+        <div key={group.key} className="flex flex-col gap-2">
+          <span className="text-xs font-medium text-foreground-muted">
+            {text.groups[group.key]}
+          </span>
+          <div
+            className={
+              'grid grid-cols-1 gap-3 ' +
+              (group.methods.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2')
             }
-          />
-        )
-      })}
+          >
+            {group.methods.map((method) => {
+              const Icon = methodIcons[method]
+              return (
+                <AddAccountDialog
+                  key={method}
+                  method={method}
+                  trigger={
+                    <button
+                      type="button"
+                      className="flex min-w-0 items-start gap-3 rounded-md border border-border bg-surface p-4 text-left hover:border-primary-border hover:bg-primary-soft"
+                    >
+                      <span className="flex size-control-sm shrink-0 items-center justify-center rounded-md bg-info-soft text-primary">
+                        <Icon size={16} aria-hidden />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold">
+                          {text.methods[method][0]}
+                        </span>
+                        <span className="mt-1 block text-xs text-foreground-muted">
+                          {text.methods[method][1]}
+                        </span>
+                      </span>
+                    </button>
+                  }
+                />
+              )
+            })}
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
 
-// SetupGuide 是首次使用的仪表盘：添加账户、复制接口地址与 API key、选择客户端复制配置三步，每步完成后打勾；添加账户后可进入总览
+// SetupGuide 是首次使用的仪表盘：添加账户、复制接口地址与 API key、选择客户端复制配置三步，每步完成后打勾；添加账户后第一步标题行出现进入总览的按钮
 export function SetupGuide({ steps, onEnter }: { steps: SetupSteps; onEnter: () => void }) {
   const m = useMessages(connectMessages)
   return (
@@ -117,15 +136,20 @@ export function SetupGuide({ steps, onEnter }: { steps: SetupSteps; onEnter: () 
         <img src={logo} alt="" width={56} height={56} className="size-[56px]" />
         <h1 className="text-2xl font-semibold">{m.welcome}</h1>
         <p className="max-w-prose text-sm text-foreground-muted">{m.welcomeHint}</p>
-        <Button
-          variant="primary"
-          onClick={onEnter}
-          className={steps.accounts ? 'animate-fade-in' : 'invisible'}
-        >
-          {m.guideEnter}
-        </Button>
       </header>
-      <Step index={1} done={steps.accounts} title={m.stepAccounts} hint={m.stepAccountsHint}>
+      <Step
+        index={1}
+        done={steps.accounts}
+        title={m.stepAccounts}
+        hint={m.stepAccountsHint}
+        action={
+          steps.accounts && (
+            <Button variant="primary" onClick={onEnter} className="animate-fade-in">
+              {m.guideEnter}
+            </Button>
+          )
+        }
+      >
         <AccountMethods />
       </Step>
       <Step index={2} done={steps.endpoint} title={m.stepEndpoint} hint={m.stepEndpointHint}>

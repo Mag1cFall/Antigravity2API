@@ -1,10 +1,10 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ScrollText, X } from 'lucide-react'
+import { LoaderCircle, ScrollText, X } from 'lucide-react'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
-import { logsKey, useConnection } from '@/app/events'
+import { logsKey, useConnection, useRunning } from '@/app/events'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { SearchInput } from '@/components/ui/search-input'
@@ -14,11 +14,13 @@ import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
-import { matchLog, type MinimumLevel, parseLogFilter } from '@/features/logs/filter'
+import { matchLog, type MinimumLevel, parseLogFilter, requestStages } from '@/features/logs/filter'
 import { logMessages } from '@/features/logs/messages'
 import type { LogEntry, LogLevel, LogPage } from '@/features/logs/types'
 import { api } from '@/lib/api'
+import { formatElapsed } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { useNow } from '@/lib/time'
 
 // levelClass 是日志级别文字的颜色
 const levelClass: Record<LogLevel, string> = {
@@ -64,6 +66,49 @@ function LogLine({ entry, timeFormat }: { entry: LogEntry; timeFormat: Intl.Date
         )}
       </span>
     </div>
+  )
+}
+
+// reducedMotion 判断系统是否要求减少动态效果
+function reducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+// RunningStrip 是实时日志上方的进行中请求：模型、账户、已运行秒数与最近一条进度日志所写的阶段，每秒更新
+function RunningStrip({ logs }: { logs: LogEntry[] }) {
+  const m = useMessages(logMessages)
+  const { locale } = useI18n()
+  const now = useNow(1000)
+  const running = useRunning()
+  if (running.length === 0) return null
+  const stages = requestStages(logs)
+  return (
+    <ul aria-label={m.runningLabel} className="flex flex-col border-b border-border">
+      {running.map((record) => (
+        <li
+          key={record.id}
+          className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border bg-info-soft/50 px-4 py-[6px] text-xs first:border-t-0"
+        >
+          <LoaderCircle size={12} aria-hidden className="shrink-0 animate-spin text-primary" />
+          <span className="font-mono">{record.model}</span>
+          <span className="text-foreground-muted">{record.account || '—'}</span>
+          <span className="text-foreground tabular-nums">
+            {fill(m.runningFor, {
+              time: formatElapsed(now.getTime() - Date.parse(record.time), locale),
+            })}
+          </span>
+          {stages.get(record.id) && (
+            <span className="min-w-0 truncate text-warning-text">{stages.get(record.id)}</span>
+          )}
+          <Link
+            to={'/requests?id=' + encodeURIComponent(record.id)}
+            className="ml-auto text-primary hover:text-primary-hover"
+          >
+            {m.viewRequest}
+          </Link>
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -219,7 +264,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
   )
 }
 
-// LogsPage 是服务日志：实时尾随与已保存日志检索，视图与筛选条件保存在 URL；实时日志区占满页面剩余高度
+// LogsPage 是服务日志：实时尾随与已保存日志检索，视图与筛选条件保存在 URL；实时日志区占满页面剩余高度，上方列出进行中的请求，重新打开跟随时平滑滚到最新
 export function LogsPage() {
   const m = useMessages(logMessages)
   const { locale } = useI18n()
@@ -229,6 +274,7 @@ export function LogsPage() {
   const [params, setParams] = useSearchParams()
   const filter = parseLogFilter(params)
   const [follow, setFollow] = useState(true)
+  const resumed = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const logs = useQuery({
     queryKey: logsKey,
@@ -255,7 +301,10 @@ export function LogsPage() {
   const totalSize = virtualizer.getTotalSize()
   useEffect(() => {
     const element = scrollRef.current
-    if (follow && element) element.scrollTop = element.scrollHeight
+    if (!follow || !element) return
+    const behavior = resumed.current && !reducedMotion() ? 'smooth' : 'auto'
+    resumed.current = false
+    element.scrollTo({ top: element.scrollHeight, behavior })
   }, [follow, visible.length, totalSize])
 
   const update = (key: string, value: string) => {
@@ -342,7 +391,13 @@ export function LogsPage() {
             {fill(m.count, { shown: visible.length, total: all.length })}
           </span>
           <label className="flex items-center gap-2 text-sm">
-            <Switch checked={follow} onCheckedChange={setFollow} />
+            <Switch
+              checked={follow}
+              onCheckedChange={(value) => {
+                resumed.current = value
+                setFollow(value)
+              }}
+            />
             {m.follow}
           </label>
           <Tooltip disabledReason={all.length === 0 && m.clearEmpty}>
@@ -390,6 +445,7 @@ export function LogsPage() {
             className="max-w-field min-w-[200px] flex-[1_1_240px]"
           />
         </CardToolbar>
+        <RunningStrip logs={all} />
         {visible.length === 0 ? (
           all.length === 0 && connection === 'connecting' ? (
             <Loading label={m.loading} />

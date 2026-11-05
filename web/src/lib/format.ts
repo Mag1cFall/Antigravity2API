@@ -93,6 +93,22 @@ export function formatDuration(ms: number, locale: Locale) {
   return unit(ms / 3_600_000, 'hour', 1)
 }
 
+// formatElapsed 以整秒输出已经过的时长，满 1 分钟时输出分与秒，如“41 秒”“2 分钟 5 秒”
+export function formatElapsed(ms: number, locale: Locale) {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const unit = (value: number, name: string) =>
+    spaced(
+      numberFormat(locale, {
+        style: 'unit',
+        unit: name,
+        unitDisplay: locale === 'en' ? 'narrow' : 'short',
+      }).format(value),
+      locale,
+    )
+  if (total < 60) return unit(total, 'second')
+  return unit(Math.floor(total / 60), 'minute') + ' ' + unit(total % 60, 'second')
+}
+
 // formatBytes 以 1024 进制输出字节数，单位为 B、KB、MB、GB
 export function formatBytes(bytes: number, locale: Locale) {
   const units = ['B', 'KB', 'MB', 'GB']

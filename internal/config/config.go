@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -26,6 +27,7 @@ const File = ".env"
 var Keys = []string{
 	"LISTEN",
 	"API_KEYS",
+	"API_KEY_ACCOUNTS",
 	"AUTH_DIR",
 	"RUNTIME_DIR",
 	"PROXY",
@@ -39,6 +41,8 @@ var Keys = []string{
 	"ROUTING_STRATEGY",
 	"PREFER_LOWER_TIER_MODELS",
 	"REQUEST_TIMEOUT",
+	"NONSTREAM_KEEPALIVE",
+	"FAKE_STREAM",
 	"QUOTA_REFRESH_INTERVAL",
 	"QUOTA_RESERVE_PERCENT",
 	"WEEKLY_QUOTA_WARMUP",
@@ -75,12 +79,14 @@ const LogFileMB = 10
 
 // Config 保存服务的全部配置
 type Config struct {
-	Listen       string
-	APIKeys      []string
-	AuthDir      string
-	RuntimeDir   string
-	Proxy        string
-	SystemPrompt string
+	Listen  string
+	APIKeys []string
+	// APIKeyAccounts 是 API key 到它可用账户的绑定，没有绑定的 key 可用全部账户
+	APIKeyAccounts map[string][]string
+	AuthDir        string
+	RuntimeDir     string
+	Proxy          string
+	SystemPrompt   string
 	// SystemPromptSections 是 custom 档保留的官方段名
 	SystemPromptSections []string
 	// SystemPromptWrap 是 custom 档的 user 轮包装方式
@@ -96,6 +102,10 @@ type Config struct {
 	// PreferLowerTierModels 是同优先级内先用套餐低的账户的模型 ID
 	PreferLowerTierModels []string
 	RequestTimeout        time.Duration
+	// NonstreamKeepalive 为真时非流式请求等待结果期间每 10 秒写出一个换行
+	NonstreamKeepalive bool
+	// FakeStream 为真时流式请求先按非流式取得完整结果再以流式输出
+	FakeStream bool
 	// QuotaRefreshInterval 是后台刷新全部账户额度的间隔，为 0 时不刷新
 	QuotaRefreshInterval time.Duration
 	LogLevel             string
@@ -110,7 +120,21 @@ type Config struct {
 	QuotaReservePercent int
 	// WeeklyQuotaWarmup 为真时在定时额度刷新后为周额度窗口未开始计时的账户发一次最小请求
 	WeeklyQuotaWarmup bool
+	// Invalid 是加载时取值无效、改用默认值的配置项
+	Invalid []InvalidValue
+	// Environment 是取自进程环境变量、覆盖 .env 的配置项
+	Environment []string
 }
+
+// InvalidValue 是加载时取值无效、改用默认值的配置项
+type InvalidValue struct {
+	Key    string `json:"key"`
+	Value  string `json:"value"`
+	Reason string `json:"reason"`
+}
+
+// secretKeys 是取值可能含凭据的配置项，无效时不记录原值
+var secretKeys = []string{"API_KEYS", "PROXY", "ADMIN_PASSWORD"}
 
 // Default 返回可直接启动的默认配置
 func Default() Config {
@@ -125,6 +149,7 @@ func Default() Config {
 		AccountConcurrency:   2,
 		RoutingStrategy:      "round-robin",
 		RequestTimeout:       5 * time.Minute,
+		NonstreamKeepalive:   true,
 		QuotaRefreshInterval: 15 * time.Minute,
 		LogLevel:             "info",
 		LogFormat:            "json",
@@ -134,25 +159,46 @@ func Default() Config {
 	}
 }
 
-// Load 读取 env 文件，进程环境变量中的同名项覆盖文件值，文件不存在时使用默认值
+// Load 读取 env 文件，进程环境变量中的同名项覆盖文件值并记入 Environment，取值无效的项改用默认值并记入 Invalid，文件不存在时使用默认值
 func Load(path string) (Config, error) {
 	values, err := readEnvFile(path)
 	if err != nil {
 		return Config{}, err
 	}
+	cfg := Default()
 	for _, key := range Keys {
 		if value, ok := os.LookupEnv(key); ok {
 			values[key] = value
+			cfg.Environment = append(cfg.Environment, key)
 		}
 	}
-	cfg := Default()
-	if err := cfg.Set(values); err != nil {
-		return Config{}, err
+	defaults := Default().Values()
+	reject := func(key string, err error) {
+		cfg.Set(map[string]string{key: defaults[key]})
+		value, ok := values[key]
+		if !ok || slices.ContainsFunc(cfg.Invalid, func(item InvalidValue) bool { return item.Key == key }) {
+			return
+		}
+		if slices.Contains(secretKeys, key) {
+			value = ""
+		}
+		cfg.Invalid = append(cfg.Invalid, InvalidValue{Key: key, Value: value, Reason: err.Error()})
 	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
+	for _, key := range Keys {
+		if value, ok := values[key]; ok {
+			if err := cfg.Set(map[string]string{key: value}); err != nil {
+				reject(key, err)
+			}
+		}
 	}
-	return cfg, nil
+	for _, check := range checks {
+		if err := check.check(cfg); err != nil {
+			for _, key := range check.keys {
+				reject(key, err)
+			}
+		}
+	}
+	return cfg, cfg.Validate()
 }
 
 // Set 把 env 文本值解析到配置，未出现的项保持原值
@@ -188,6 +234,9 @@ func (c *Config) Set(values map[string]string) error {
 	if value, ok := values["API_KEYS"]; ok {
 		c.APIKeys = SplitList(value)
 	}
+	if value, ok := values["API_KEY_ACCOUNTS"]; ok && err == nil {
+		c.APIKeyAccounts, err = parseAPIKeyAccounts(value)
+	}
 	text("AUTH_DIR", &c.AuthDir)
 	text("RUNTIME_DIR", &c.RuntimeDir)
 	text("PROXY", &c.Proxy)
@@ -208,6 +257,8 @@ func (c *Config) Set(values map[string]string) error {
 		c.PreferLowerTierModels = SplitList(value)
 	}
 	duration("REQUEST_TIMEOUT", &c.RequestTimeout)
+	boolean("NONSTREAM_KEEPALIVE", &c.NonstreamKeepalive)
+	boolean("FAKE_STREAM", &c.FakeStream)
 	duration("QUOTA_REFRESH_INTERVAL", &c.QuotaRefreshInterval)
 	integer("QUOTA_RESERVE_PERCENT", &c.QuotaReservePercent)
 	boolean("WEEKLY_QUOTA_WARMUP", &c.WeeklyQuotaWarmup)
@@ -231,6 +282,7 @@ func (c Config) Values() map[string]string {
 	return map[string]string{
 		"LISTEN":                   c.Listen,
 		"API_KEYS":                 strings.Join(c.APIKeys, ","),
+		"API_KEY_ACCOUNTS":         formatAPIKeyAccounts(c.APIKeyAccounts),
 		"AUTH_DIR":                 c.AuthDir,
 		"RUNTIME_DIR":              c.RuntimeDir,
 		"PROXY":                    c.Proxy,
@@ -244,6 +296,8 @@ func (c Config) Values() map[string]string {
 		"ROUTING_STRATEGY":         c.RoutingStrategy,
 		"PREFER_LOWER_TIER_MODELS": strings.Join(c.PreferLowerTierModels, ","),
 		"REQUEST_TIMEOUT":          formatDuration(c.RequestTimeout),
+		"NONSTREAM_KEEPALIVE":      strconv.FormatBool(c.NonstreamKeepalive),
+		"FAKE_STREAM":              strconv.FormatBool(c.FakeStream),
 		"QUOTA_REFRESH_INTERVAL":   formatDuration(c.QuotaRefreshInterval),
 		"QUOTA_RESERVE_PERCENT":    strconv.Itoa(c.QuotaReservePercent),
 		"WEEKLY_QUOTA_WARMUP":      strconv.FormatBool(c.WeeklyQuotaWarmup),
@@ -270,73 +324,136 @@ func (c Config) Changed(other Config) []string {
 	return keys
 }
 
-// Save 校验后把配置原子写入 env 文件
+// Save 校验后把与默认值不同的配置项原子写入 env 文件，进程环境变量决定的项保留文件中原有的值
 func (c Config) Save(path string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	values := c.Values()
+	saved, err := readEnvFile(path)
+	if err != nil {
+		return err
+	}
+	values, defaults := c.Values(), Default().Values()
 	var output strings.Builder
 	for _, key := range Keys {
-		output.WriteString(key + "=" + formatEnvValue(values[key]) + "\n")
+		value, write := values[key], values[key] != defaults[key]
+		if slices.Contains(c.Environment, key) {
+			value, write = saved[key]
+		}
+		if write {
+			output.WriteString(key + "=" + formatEnvValue(value) + "\n")
+		}
 	}
 	return atomicWrite(path, []byte(output.String()))
 }
 
+// checks 是配置校验与各自涉及的配置项，校验失败的配置项在加载时改用默认值
+var checks = []struct {
+	keys  []string
+	check func(Config) error
+}{
+	{[]string{"LISTEN"}, func(c Config) error { return validateListen(c.Listen) }},
+	{[]string{"AUTH_DIR"}, func(c Config) error {
+		if c.AuthDir == "" {
+			return fmt.Errorf("AUTH_DIR 不能为空")
+		}
+		return nil
+	}},
+	{[]string{"RUNTIME_DIR"}, func(c Config) error {
+		if c.RuntimeDir == "" {
+			return fmt.Errorf("RUNTIME_DIR 不能为空")
+		}
+		return nil
+	}},
+	{[]string{"PROXY"}, func(c Config) error { return ValidateProxies(c.Proxy) }},
+	{[]string{"SYSTEM_PROMPT"}, func(c Config) error {
+		if !slices.Contains(SystemPrompts, c.SystemPrompt) {
+			return fmt.Errorf("SYSTEM_PROMPT 必须是 %s", strings.Join(SystemPrompts, "、"))
+		}
+		return nil
+	}},
+	{[]string{"SYSTEM_PROMPT_SECTIONS", "SYSTEM_PROMPT_WRAP"}, func(c Config) error {
+		if _, err := prompt.New(prompt.TierCustom, prompt.Custom{Sections: c.SystemPromptSections, Wrap: c.SystemPromptWrap}); err != nil {
+			return fmt.Errorf("SYSTEM_PROMPT_SECTIONS 或 SYSTEM_PROMPT_WRAP 无效: %w", err)
+		}
+		return nil
+	}},
+	{[]string{"MEDIA_OUTPUT"}, func(c Config) error {
+		if !slices.Contains(MediaOutputs, c.MediaOutput) {
+			return fmt.Errorf("MEDIA_OUTPUT 必须是 %s", strings.Join(MediaOutputs, "、"))
+		}
+		return nil
+	}},
+	{[]string{"MEDIA_BASE_URL"}, func(c Config) error {
+		if c.MediaBaseURL != "" {
+			if base, err := url.Parse(c.MediaBaseURL); err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
+				return fmt.Errorf("MEDIA_BASE_URL 必须是 http 或 https 地址")
+			}
+		}
+		return nil
+	}},
+	{[]string{"ACCOUNT_CONCURRENCY"}, func(c Config) error {
+		if c.AccountConcurrency <= 0 {
+			return fmt.Errorf("ACCOUNT_CONCURRENCY 必须是正整数")
+		}
+		return nil
+	}},
+	{[]string{"ROUTING_STRATEGY"}, func(c Config) error {
+		if !slices.Contains(RoutingStrategies, c.RoutingStrategy) {
+			return fmt.Errorf("ROUTING_STRATEGY 必须是 %s", strings.Join(RoutingStrategies, "、"))
+		}
+		return nil
+	}},
+	{[]string{"REQUEST_TIMEOUT"}, func(c Config) error {
+		if c.RequestTimeout <= 0 {
+			return fmt.Errorf("REQUEST_TIMEOUT 必须是正数时长")
+		}
+		return nil
+	}},
+	{[]string{"QUOTA_REFRESH_INTERVAL"}, func(c Config) error {
+		if c.QuotaRefreshInterval != 0 && c.QuotaRefreshInterval < time.Minute {
+			return fmt.Errorf("QUOTA_REFRESH_INTERVAL 必须是 0 或不小于 1m 的时长")
+		}
+		return nil
+	}},
+	{[]string{"QUOTA_RESERVE_PERCENT"}, func(c Config) error {
+		if c.QuotaReservePercent < 0 || c.QuotaReservePercent > 99 {
+			return fmt.Errorf("QUOTA_RESERVE_PERCENT 必须是 0 到 99 的整数")
+		}
+		return nil
+	}},
+	{[]string{"LOG_LEVEL"}, func(c Config) error {
+		if !slices.Contains(LogLevels, c.LogLevel) {
+			return fmt.Errorf("LOG_LEVEL 必须是 %s", strings.Join(LogLevels, "、"))
+		}
+		return nil
+	}},
+	{[]string{"LOG_FORMAT"}, func(c Config) error {
+		if !slices.Contains(LogFormats, c.LogFormat) {
+			return fmt.Errorf("LOG_FORMAT 必须是 %s", strings.Join(LogFormats, "、"))
+		}
+		return nil
+	}},
+	{[]string{"LOG_MAX_TOTAL_MB"}, func(c Config) error {
+		if c.LogMaxTotalMB < 2*LogFileMB {
+			return fmt.Errorf("LOG_MAX_TOTAL_MB 不能小于 %d", 2*LogFileMB)
+		}
+		return nil
+	}},
+	{[]string{"ADMIN_AUTH_ENABLED"}, func(c Config) error {
+		if c.AdminAuthEnabled && (c.AdminUsername == "" || c.AdminPassword == "") {
+			return fmt.Errorf("开启 ADMIN_AUTH_ENABLED 需要 ADMIN_USERNAME 与 ADMIN_PASSWORD")
+		}
+		return nil
+	}},
+}
+
 // Validate 校验配置能否用于启动服务
 func (c Config) Validate() error {
-	if err := validateListen(c.Listen); err != nil {
-		return err
-	}
-	if c.AuthDir == "" {
-		return fmt.Errorf("AUTH_DIR 不能为空")
-	}
-	if c.RuntimeDir == "" {
-		return fmt.Errorf("RUNTIME_DIR 不能为空")
-	}
-	if err := ValidateProxies(c.Proxy); err != nil {
-		return err
-	}
-	if !slices.Contains(SystemPrompts, c.SystemPrompt) {
-		return fmt.Errorf("SYSTEM_PROMPT 必须是 %s", strings.Join(SystemPrompts, "、"))
-	}
-	if _, err := prompt.New(prompt.TierCustom, prompt.Custom{Sections: c.SystemPromptSections, Wrap: c.SystemPromptWrap}); err != nil {
-		return fmt.Errorf("SYSTEM_PROMPT_SECTIONS 或 SYSTEM_PROMPT_WRAP 无效: %w", err)
-	}
-	if !slices.Contains(MediaOutputs, c.MediaOutput) {
-		return fmt.Errorf("MEDIA_OUTPUT 必须是 %s", strings.Join(MediaOutputs, "、"))
-	}
-	if c.MediaBaseURL != "" {
-		if base, err := url.Parse(c.MediaBaseURL); err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
-			return fmt.Errorf("MEDIA_BASE_URL 必须是 http 或 https 地址")
+	for _, check := range checks {
+		if err := check.check(c); err != nil {
+			return err
 		}
-	}
-	if c.AccountConcurrency <= 0 {
-		return fmt.Errorf("ACCOUNT_CONCURRENCY 必须是正整数")
-	}
-	if !slices.Contains(RoutingStrategies, c.RoutingStrategy) {
-		return fmt.Errorf("ROUTING_STRATEGY 必须是 %s", strings.Join(RoutingStrategies, "、"))
-	}
-	if c.RequestTimeout <= 0 {
-		return fmt.Errorf("REQUEST_TIMEOUT 必须是正数时长")
-	}
-	if c.QuotaRefreshInterval != 0 && c.QuotaRefreshInterval < time.Minute {
-		return fmt.Errorf("QUOTA_REFRESH_INTERVAL 必须是 0 或不小于 1m 的时长")
-	}
-	if c.QuotaReservePercent < 0 || c.QuotaReservePercent > 99 {
-		return fmt.Errorf("QUOTA_RESERVE_PERCENT 必须是 0 到 99 的整数")
-	}
-	if !slices.Contains(LogLevels, c.LogLevel) {
-		return fmt.Errorf("LOG_LEVEL 必须是 %s", strings.Join(LogLevels, "、"))
-	}
-	if !slices.Contains(LogFormats, c.LogFormat) {
-		return fmt.Errorf("LOG_FORMAT 必须是 %s", strings.Join(LogFormats, "、"))
-	}
-	if c.LogMaxTotalMB < 2*LogFileMB {
-		return fmt.Errorf("LOG_MAX_TOTAL_MB 不能小于 %d", 2*LogFileMB)
-	}
-	if c.AdminAuthEnabled && (c.AdminUsername == "" || c.AdminPassword == "") {
-		return fmt.Errorf("开启 ADMIN_AUTH_ENABLED 需要 ADMIN_USERNAME 与 ADMIN_PASSWORD")
 	}
 	return nil
 }
@@ -390,6 +507,36 @@ func (o Overrides) Apply(c *Config) {
 type ModelAlias struct {
 	Alias string
 	Model string
+}
+
+// parseAPIKeyAccounts 解析逗号分隔的 API key:账户|账户，以最后一个冒号分隔
+func parseAPIKeyAccounts(value string) (map[string][]string, error) {
+	bindings := map[string][]string{}
+	for _, item := range SplitList(value) {
+		index := strings.LastIndexByte(item, ':')
+		if index <= 0 {
+			return nil, fmt.Errorf("API_KEY_ACCOUNTS 的每一项必须是 API key:账户|账户")
+		}
+		key := strings.TrimSpace(item[:index])
+		for account := range strings.SplitSeq(item[index+1:], "|") {
+			if account = strings.TrimSpace(account); account != "" && !slices.Contains(bindings[key], account) {
+				bindings[key] = append(bindings[key], account)
+			}
+		}
+		if len(bindings[key]) == 0 {
+			return nil, fmt.Errorf("API_KEY_ACCOUNTS 中 API key 的账户不能为空")
+		}
+	}
+	return bindings, nil
+}
+
+// formatAPIKeyAccounts 按 API key 排序写出 API_KEY_ACCOUNTS
+func formatAPIKeyAccounts(bindings map[string][]string) string {
+	items := make([]string, 0, len(bindings))
+	for _, key := range slices.Sorted(maps.Keys(bindings)) {
+		items = append(items, key+":"+strings.Join(bindings[key], "|"))
+	}
+	return strings.Join(items, ",")
 }
 
 // parseModelMapping 解析逗号分隔的 别名:模型 ID，别名可含冒号，以最后一个冒号分隔

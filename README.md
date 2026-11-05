@@ -77,7 +77,7 @@
 | --- | --- | --- | --- |
 | Windows | `windows-amd64.zip` | 双击 `antigravity2api.exe` | `antigravity2api.exe` 所在目录，整个目录可以直接复制或移动 |
 | macOS | `desktop-<版本>-darwin-universal.tar.gz` | 打开 `Antigravity2API.app` | `~/Library/Application Support/Antigravity2API` |
-| Linux | `desktop-<版本>-linux-amd64.tar.gz` 或 `linux-arm64.tar.gz` | 运行 `antigravity2api`，需要系统的 GTK 4 与 WebKitGTK 6.0 | `~/.config/Antigravity2API` |
+| Linux | `desktop-<版本>-linux-amd64.tar.gz` 或 `linux-arm64.tar.gz` | 运行 `antigravity2api`，需要系统的 GTK 3 与 WebKitGTK 4.1（Ubuntu 22.04 起的 `libwebkit2gtk-4.1-0`） | `~/.config/Antigravity2API` |
 
 桌面版在窗口中打开管理端，在管理端的账户页登录 Google 账户或导入本机官方客户端的账户。Windows 系统没有 WebView2 运行时时管理端在默认浏览器中打开。Windows 与 macOS 关闭窗口后留在托盘，Linux 关闭窗口即退出。
 
@@ -303,6 +303,7 @@ docs/                 # 协议、开发与日志文档
 | --- | --- | --- |
 | `LISTEN` | 公开 API、管理 API 与管理端的监听地址；端口被 Windows 保留时改用其后第一个可用端口，管理端顶部显示实际地址 | `127.0.0.1:8017` |
 | `API_KEYS` | 公开 API key，逗号分隔多个 | 空 |
+| `API_KEY_ACCOUNTS` | API key 绑定的账户，每项写成 `key:账户\|账户`，逗号分隔多项；绑定了账户的 key 只用这些账户 | 空 |
 | `AUTH_DIR` | 账户目录 | `auth` |
 | `RUNTIME_DIR` | 运行数据目录：请求账本 `requests.db`、日志 `logs/`、上传的 `files/`、生成媒体 `media/`、会话记录、模型目录与其他运行状态 | `runtime` |
 | `PROXY` | 全局 HTTP、HTTPS 或 SOCKS5 代理，逗号分隔的各项组成代理池，为空时跟随系统代理 | 空 |
@@ -316,6 +317,8 @@ docs/                 # 协议、开发与日志文档
 | `ROUTING_STRATEGY` | 调度策略：`round-robin` 或 `fill-first` | `round-robin` |
 | `PREFER_LOWER_TIER_MODELS` | 优先用低套餐账户的模型 ID，逗号分隔；同一优先级内依次先用 Free、Pro、Ultra 账户 | 空 |
 | `REQUEST_TIMEOUT` | 等待首个上游事件与相邻两个上游事件之间的最长时长 | `5m` |
+| `NONSTREAM_KEEPALIVE` | 非流式请求等待超过 10 秒时先返回 200，之后每 10 秒写出一个换行，经反向代理时连接不因长时间无数据断开 | `true` |
+| `FAKE_STREAM` | 流式请求先取得完整结果再按流式格式输出，中途失败时换账户重新生成 | `false` |
 | `QUOTA_REFRESH_INTERVAL` | 后台读取全部账户（含停用账户）额度的间隔，最短 `1m`，`0` 为不自动刷新 | `15m` |
 | `QUOTA_RESERVE_PERCENT` | 额度保留比例，0–99 | `0` |
 | `WEEKLY_QUOTA_WARMUP` | 自动开始每周额度计时 | `false` |

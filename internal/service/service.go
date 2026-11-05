@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,6 +77,9 @@ type Service struct {
 	// proxies 是未设账户代理的账户共用的 PROXY 代理池，proxyCheck 请求立即检测代理池
 	proxies    *proxypool.Pool
 	proxyCheck chan struct{}
+	// launched 在服务启动后第一个账户就绪或首次刷新结束时关闭
+	launched   chan struct{}
+	launchOnce sync.Once
 	// warmed 是各账户各周额度桶最近一次唤醒的时间，保存在 RUNTIME_DIR/warmups.json
 	warmed map[string]map[string]time.Time
 	// saving 串行化冷却的读取与写入
@@ -132,7 +136,21 @@ func New(store *auth.Store, options Options) (*Service, error) {
 		proxies:       proxypool.New(cfg.Proxies()),
 		proxyCheck:    make(chan struct{}, 1),
 		warmed:        loadWarmups(filepath.Join(cfg.RuntimeDir, warmupsFile)),
+		launched:      make(chan struct{}),
 	}, nil
+}
+
+// markLaunched 结束启动期间的等待
+func (s *Service) markLaunched() {
+	s.launchOnce.Do(func() { close(s.launched) })
+}
+
+// WaitLaunch 在服务启动后还没有就绪账户且首次刷新未结束时等待，ctx 结束时返回
+func (s *Service) WaitLaunch(ctx context.Context) {
+	select {
+	case <-s.launched:
+	case <-ctx.Done():
+	}
 }
 
 // savedModel 是 RUNTIME_DIR/catalogs 中的目录条目，模型 ID、选择器标记与用途和上游字段并列保存
@@ -193,7 +211,7 @@ func (s *Service) setModels(id string, models []antigravity.CatalogModel) {
 	}
 }
 
-// latestQuota 把账本中同一次读取的额度桶还原为额度摘要，按 bucketId 前缀分组，取最近一次读取
+// latestQuota 把账本中同一次读取的额度桶还原为额度摘要，按额度组分组，取最近一次读取
 func latestQuota(snapshots []requestdb.QuotaSnapshot) (quotaRead, bool) {
 	if len(snapshots) == 0 {
 		return quotaRead{}, false
@@ -209,11 +227,11 @@ func latestQuota(snapshots []requestdb.QuotaSnapshot) (quotaRead, bool) {
 		if snapshot.ResetTime != nil {
 			bucket.ResetTime = snapshot.ResetTime.Format(time.RFC3339)
 		}
-		prefix, _, _ := strings.Cut(snapshot.BucketID, "-")
-		index, ok := groups[prefix]
+		group := antigravity.BucketGroup(snapshot.BucketID)
+		index, ok := groups[group]
 		if !ok {
 			index = len(read.summary.Groups)
-			groups[prefix] = index
+			groups[group] = index
 			read.summary.Groups = append(read.summary.Groups, antigravity.QuotaGroup{})
 		}
 		read.summary.Groups[index].Buckets = append(read.summary.Groups[index].Buckets, bucket)
@@ -257,16 +275,17 @@ func (s *Service) Accounts() []AccountStatus {
 	s.mu.Lock()
 	failures := maps.Clone(s.failures)
 	quotas := maps.Clone(s.quotas)
+	catalogs := maps.Clone(s.catalogs)
 	s.mu.Unlock()
 	statuses := make([]AccountStatus, 0, len(records))
 	for _, record := range records {
-		status := AccountStatus{Account: *record, Error: failures[record.ID], Quota: quotas[record.ID].summary.Groups, QuotaAt: quotas[record.ID].at}
+		status := AccountStatus{Account: *record, Error: failures[record.ID], Quota: usableQuota(quotas[record.ID].summary.Groups, catalogs[record.ID]), QuotaAt: quotas[record.ID].at}
 		if state, ok := s.pool.Status(record.ID); ok {
 			status.Ready, status.Active = true, state.Active
 			if len(state.Cooldown) != 0 {
 				status.Cooldown = state.Cooldown
 			}
-			for _, group := range []string{antigravity.QuotaGroupGemini, antigravity.QuotaGroupThirdParty} {
+			for _, group := range []string{antigravity.QuotaGroupGemini, antigravity.QuotaGroupArgon, antigravity.QuotaGroupThirdParty} {
 				if peers := s.pool.Peers(record.ID, group); len(peers) > 0 {
 					if status.Shared == nil {
 						status.Shared = make(map[string][]string)
@@ -280,8 +299,29 @@ func (s *Service) Accounts() []AccountStatus {
 	return statuses
 }
 
-// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，初始化尚未就绪、账户代理已变或重新登录过的启用账户：相邻两个账户的初始化相隔随机 1 到 3 秒开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度
+// usableQuota 返回额度摘要中账户目录有对应模型的额度桶，没有目录时原样返回；失去第三方模型权限的账户上游仍返回 3p 桶
+func usableQuota(groups []antigravity.QuotaGroup, catalog []antigravity.CatalogModel) []antigravity.QuotaGroup {
+	if len(catalog) == 0 {
+		return groups
+	}
+	var usable []antigravity.QuotaGroup
+	for _, group := range groups {
+		buckets := slices.DeleteFunc(slices.Clone(group.Buckets), func(bucket antigravity.QuotaBucket) bool {
+			return !slices.ContainsFunc(catalog, func(model antigravity.CatalogModel) bool {
+				return model.QuotaGroup() == antigravity.BucketGroup(bucket.BucketID)
+			})
+		})
+		if len(buckets) > 0 {
+			group.Buckets = buckets
+			usable = append(usable, group)
+		}
+	}
+	return usable
+}
+
+// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，结束时结束启动期间的等待，初始化尚未就绪、账户代理已变或重新登录过的启用账户：相邻两个账户的初始化相隔随机 1 到 3 秒开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度
 func (s *Service) Refresh(ctx context.Context) error {
+	defer s.markLaunched()
 	records := s.store.Accounts()
 	for _, record := range records {
 		s.mu.Lock()
@@ -474,6 +514,7 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account, login bo
 	s.pool.Profile(record.ID, record.Priority, assisted(*record, initialization.Assist).Rank())
 	s.pool.Credits(record.ID, record.AICredits)
 	s.pool.SetQuota(record.ID, s.quotas[record.ID].summary)
+	s.markLaunched()
 	go companion.Run(watch)
 	return nil
 }
@@ -643,6 +684,16 @@ func (s *Service) composer(cfg *config.Config) (*prompt.Composer, error) {
 
 // cooldownsFile 是 RUNTIME_DIR 下保存各账户冷却的文件，服务重启后恢复
 const cooldownsFile = "cooldowns.json"
+
+// ClearCooldown 清除账户在一个额度组或模型上的冷却并保存，下一次请求即可调度该账户，返回清除前是否有该项冷却
+func (s *Service) ClearCooldown(ctx context.Context, id, scope string) bool {
+	if !s.pool.Clear(id, scope) {
+		return false
+	}
+	s.saveCooldowns()
+	slog.InfoContext(ctx, "已清除冷却 | 范围="+scope, "source", id)
+	return true
+}
 
 // saveCooldowns 把各账户尚未到期的冷却写入 RUNTIME_DIR/cooldowns.json，同时只有一次读取与写入
 func (s *Service) saveCooldowns() {

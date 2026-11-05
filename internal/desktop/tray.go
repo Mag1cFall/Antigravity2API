@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -20,8 +21,8 @@ import (
 // quotaInterval 是托盘额度摘要的刷新间隔
 const quotaInterval = time.Minute
 
-// quotaGroups 是额度组及其在托盘中的名称，与管理端一致
-var quotaGroups = [][2]string{{"gemini", "Gemini"}, {"3p", "Claude 与 GPT"}}
+// quotaGroups 是额度组及其在托盘中的名称，与管理端一致；Argon 组只在有账户带该组额度时显示
+var quotaGroups = [][2]string{{"gemini", "Gemini"}, {"gemini-argon-wtu", "Gemini Argon"}, {"3p", "Claude 与 GPT"}}
 
 // trayAccount 是托盘从 GET /api/accounts 读取的账户字段
 type trayAccount struct {
@@ -134,6 +135,8 @@ func addQuota(menu *application.Menu, accounts []trayAccount) {
 		text := "—"
 		if count > 0 {
 			text = percent(total / float64(count))
+		} else if group[0] == "gemini-argon-wtu" {
+			continue
 		}
 		menu.Add(group[1] + " 剩余 " + text).SetEnabled(false)
 	}
@@ -151,6 +154,8 @@ func addQuota(menu *application.Menu, accounts []trayAccount) {
 			text := "—"
 			if fraction, ok := account.available(group[0]); ok {
 				text = percent(fraction)
+			} else if group[0] == "gemini-argon-wtu" {
+				continue
 			}
 			parts = append(parts, group[1]+" "+text)
 		}
@@ -166,7 +171,7 @@ func addQuota(menu *application.Menu, accounts []trayAccount) {
 func (a trayAccount) available(group string) (float64, bool) {
 	fraction, ok := 1.0, false
 	for _, bucket := range a.Quota {
-		if prefix, _, _ := strings.Cut(bucket.BucketID, "-"); prefix == group {
+		if antigravity.BucketGroup(bucket.BucketID) == group {
 			fraction, ok = min(fraction, bucket.RemainingFraction), true
 		}
 	}

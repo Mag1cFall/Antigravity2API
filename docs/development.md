@@ -9,7 +9,7 @@ Antigravity2API 是单个 Go 进程：公开协议适配、账户池、上游客
 | 运行 Release | 对应平台的可执行文件或安装包 |
 | 命令行版源码构建 | Go 1.26、Node.js 22.22+ 或 24+、pnpm 11.10 |
 | 桌面版源码构建 | 另需 Wails v3 CLI `v3.0.0-beta.29`；macOS 与 Linux 需要 CGO |
-| Linux 桌面版 | `libgtk-4-dev`、`libwebkitgtk-6.0-dev` |
+| Linux 桌面版 | `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`，构建标签另加 `gtk3` |
 
 Go 程序以 `go:embed` 内嵌 `internal/webui/dist`，构建 Go 之前先构建前端：
 
@@ -37,15 +37,18 @@ pnpm run typecheck
 
 | 作业 | 内容 | 产物 |
 | --- | --- | --- |
-| `web` | 前端检查与构建，解析版本 | `internal/webui/dist` |
-| `headless` | 测试、检查、构建与交叉编译 | Linux 与 macOS 共 4 个命令行包 |
+| `web` | 前端构建，解析版本 | `internal/webui/dist` |
+| `web-checks` | 前端 lint 与类型检查 | — |
+| `checks` | `go test` 与 `go vet` 两个并行任务 | — |
+| `headless` | 每个目标一个并行任务交叉编译 | Linux 与 macOS 共 4 个命令行包 |
 | `desktop-windows` | `desktop,production` 构建，GUI 子系统，带图标、清单与版本信息 | `<版本>-windows-amd64.zip` |
 | `desktop-macos` | arm64 与 amd64 合并为通用二进制，ad-hoc 签名的 `Antigravity2API.app` | `desktop-<版本>-darwin-universal.tar.gz` |
-| `desktop-linux` | amd64 与 arm64 | `desktop-<版本>-linux-<架构>.tar.gz` |
+| `desktop-linux` | amd64 与 arm64，在 Ubuntu 22.04 以 GTK 3 与 WebKitGTK 4.1 构建（glibc 2.35） | `desktop-<版本>-linux-<架构>.tar.gz` |
 | `release` | 只在推送标签时运行 | GitHub Release |
 | `docker` | 只在推送标签时运行 | `ghcr.io/mag1cfall/antigravity2api` |
 
-- 工具链：全部作业设 `GOTOOLCHAIN=local`。`web` 作业用 Node.js 22.23.3 与 `web/package.json` 的 `packageManager` 指定的 pnpm 11.10.0；`headless` 作业先以 `go.mod` 的 Go 1.26.0 运行 `go test`、`go vet` 与构建，再装最新稳定版 Go 交叉编译命令行包；`desktop-windows`、`desktop-macos`、`desktop-linux` 以最新稳定版 Go 构建
+- 工具链：全部作业设 `GOTOOLCHAIN=local`。`web` 作业用 Node.js 22.23.3 与 `web/package.json` 的 `packageManager` 指定的 pnpm 11.10.0；`checks` 作业以 `go.mod` 的 Go 1.26.0 运行 `go test`、`go vet` 与构建；`headless`、`desktop-windows`、`desktop-macos`、`desktop-linux` 以最新稳定版 Go 构建；macOS 的最低系统版本经 `CGO_CPPFLAGS` 与 `CGO_LDFLAGS` 传入，cgo 保留默认的 `-O2 -g`
+- 编译缓存：各 Go 作业以 `actions/cache` 按作业、Go 版本与 `go.sum` 恢复模块与编译缓存，只在 `main` 构建结束时保存
 - 包版本：标签构建为标签名，其余构建为提交号前 7 位，用于包名与可执行文件资源；资源与桌面包的数字版本去掉 `v` 与 `-` 之后的部分，非标签构建为 `0.0.0`。程序报告的版本取 Go 构建信息中的模块版本（见[在线更新](#在线更新)）
 - 命令行包：`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`，`CGO_ENABLED=0`、`-trimpath -ldflags='-s -w'`，tar.gz 中只有 `antigravity2api`
 - Windows 包：zip 中只有桌面版 `antigravity2api.exe`（`-H windowsgui`）；带子命令启动时附加启动它的控制台，没有控制台时新建一个，重定向的标准输入输出保持不变
@@ -133,7 +136,7 @@ api 层的公开接口规则：
 - CORS：响应带 `Access-Control-Allow-Origin: *` 与 `Access-Control-Expose-Headers: *`；`OPTIONS` 预检回显 `Access-Control-Request-Headers`，允许 `GET, POST, PUT, DELETE, OPTIONS`，返回 204
 - 请求体上限 716876456 字节（512 MiB 文件的 base64 长度加 1 MiB），超出时读取请求体失败，返回 400
 - 浏览器来源：`API_KEYS` 为空时，`Origin` 为 `null`、无法解析，或为 `http`、`https` 且主机不是 localhost 与回环地址的请求按 API key 不匹配处理；配置了 key 时不检查来源
-- API key：依次取 `X-Goog-API-Key`、`X-API-Key`、`Authorization: Bearer`、`?key=`，任一项与配置的某个 key 相同即通过，记录与用量按该 key 统计；都不匹配时返回所属协议的认证错误
+- API key：依次取 `X-Goog-API-Key`、`X-API-Key`、`Authorization: Bearer`、`?key=`，任一项与配置的某个 key 相同即通过，记录与用量按该 key 统计；`API_KEY_ACCOUNTS` 为该 key 绑定了账户时，请求只调度所绑账户；都不匹配时返回所属协议的认证错误
 - 认证错误的协议：路径以 `/v1beta/`、`/upload/` 或 `/v1/interactions` 开头为 Gemini（带 key 为 400 `INVALID_ARGUMENT`，不带 key 为 403 `PERMISSION_DENIED`），路径以 `/v1/messages` 开头或带 `anthropic-version` 头为 Anthropic 401 `authentication_error`，其余为 OpenAI 401 `invalid_api_key`；错误体见协议参考“错误映射”
 - 未知路径：`/v1/`、`/v1beta/`、`/upload/` 下的请求先经过上面的检查，再由 Go `ServeMux` 匹配端点；没有匹配的端点时（路径不存在，或路径存在而方法不同，如 `GET /v1/chat/completions`）以所属协议的错误体返回 404（见协议文档“API 投影”的错误映射）；任一路径的 `OPTIONS` 都返回 204
 - 客户端 IP：取直连地址
@@ -148,6 +151,10 @@ api 层的公开接口规则：
 2. 进程环境变量中的同名项覆盖文件值
 3. 启动参数 `--listen`、`--auth`、`--runtime`、`--proxy` 覆盖 `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR`、`PROXY`
 
+- 取值无效的项按默认值运行，启动时每项记一条 WARN；`GET /api/settings` 的 `invalid` 列出配置项、原值与原因，`API_KEYS`、`PROXY`、`ADMIN_PASSWORD` 不带原值
+- 进程环境变量决定的项列在 `GET /api/settings` 的 `environment`，设置页锁定这些项，`PATCH /api/settings` 忽略提交的这些项
+- 保存设置时 `.env` 只写与默认值不同的项，按配置项清单的顺序；进程环境变量决定的项保留 `.env` 中原有的值
+
 `LISTEN` 的端口被 Windows 保留（监听返回 WSAEACCES 10013，Hyper-V、WSL2 或 Docker 的 WinNAT 保留端口段）时，服务从下一个端口起依次尝试，在第一个可监听的端口上运行并记一条 WARN；`GET /api/status` 的 `listen` 为实际地址、`reserved_listen` 为被保留的配置地址，管理端各页顶部显示两者。
 
 `.env` 的解析规则：
@@ -160,10 +167,11 @@ api 层的公开接口规则：
 | 单引号值 | 原文 |
 | 双引号值 | 按 Go 字符串字面量解码 |
 | 裸值 | 去掉 ` #` 之后的行尾注释 |
-| 列表项（`API_KEYS`、`PROXY`、`SYSTEM_PROMPT_SECTIONS`、`PREFER_LOWER_TIER_MODELS`、`MODEL_MAPPING`） | 按逗号切分，见表下 |
+| 列表项（`API_KEYS`、`API_KEY_ACCOUNTS`、`PROXY`、`SYSTEM_PROMPT_SECTIONS`、`PREFER_LOWER_TIER_MODELS`、`MODEL_MAPPING`） | 按逗号切分，见表下 |
 | `MODEL_MAPPING` | 每项以最后一个 `:` 分成别名与模型 ID，两边各去掉首尾空白 |
+| `API_KEY_ACCOUNTS` | 每项以最后一个 `:` 分成 API key 与账户，账户以 `\|` 分隔、去重 |
 | `REQUEST_TIMEOUT`、`QUOTA_REFRESH_INTERVAL` | Go 时长，例如 `30s`、`5m`；`QUOTA_REFRESH_INTERVAL` 另接受 `0` |
-| 布尔项（`WEEKLY_QUOTA_WARMUP`、`LOG_FILE`、`REQUEST_LOG_BODIES`、`ADMIN_AUTH_ENABLED`） | Go `strconv.ParseBool`，见表下 |
+| 布尔项（`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`WEEKLY_QUOTA_WARMUP`、`LOG_FILE`、`REQUEST_LOG_BODIES`、`ADMIN_AUTH_ENABLED`） | Go `strconv.ParseBool`，见表下 |
 | 整数项（`ACCOUNT_CONCURRENCY`、`QUOTA_RESERVE_PERCENT`、`LOG_MAX_TOTAL_MB`） | 十进制整数，其他值报错 |
 | `MEDIA_OUTPUT`、`LOG_LEVEL`、`LOG_FORMAT` | 去掉首尾空白后转小写 |
 | 其他文本项 | 去掉首尾空白，大小写敏感 |
@@ -172,7 +180,7 @@ api 层的公开接口规则：
 - 布尔项接受 `1`、`t`、`T`、`true`、`TRUE`、`True` 与 `0`、`f`、`F`、`false`、`FALSE`、`False`，其他值报错
 - `ADMIN_PASSWORD` 保留原文
 
-解析或校验失败时启动报错，管理端保存时返回 400 `invalid_settings`，不取默认值：
+管理端保存时解析或校验失败返回 400 `invalid_settings`；启动时不合法的项按默认值运行：
 
 | 项 | 合法值 |
 | --- | --- |
@@ -183,6 +191,7 @@ api 层的公开接口规则：
 | `SYSTEM_PROMPT_SECTIONS` | 官方段名 |
 | `SYSTEM_PROMPT_WRAP` | `full`、`time`、`none` |
 | `MODEL_MAPPING` | 每项为 `别名:模型 ID`，两边非空 |
+| `API_KEY_ACCOUNTS` | 每项为 `API key:账户\|账户`，账户非空 |
 | `MEDIA_OUTPUT` | `inline`、`url` |
 | `MEDIA_BASE_URL` | 空或带主机的 `http`、`https` URL |
 | `ACCOUNT_CONCURRENCY` | 正整数，没有上限 |
@@ -341,6 +350,7 @@ api 层的公开接口规则：
 | 路径 | 内容 |
 | --- | --- |
 | `requests.db` | 请求账本（SQLite，WAL） |
+| `states.db` | Responses 与 Interactions 已结束的续接节点（SQLite，WAL），服务重启后读回，`previous_response_id`、`previous_interaction_id` 与按 ID 读取照常可用 |
 | `logs/antigravity2api.log` | 服务日志，轮转文件在同目录 |
 | `logs/crash.log` | 未恢复的 panic 与致命错误 |
 | `files/<ID>`、`files/<ID>.json` | Files API 上传的内容与元数据 |
@@ -512,6 +522,7 @@ api 层的公开接口规则：
 | 生成请求遇到额度耗尽（`QUOTA_EXHAUSTED` 或 `INSUFFICIENT_G1_CREDITS_BALANCE`，图像生成模型除外） | 该账户，后台读取 |
 | 账户初始化后首次成功生成 | 该账户，不先发 `loadCodeAssist` |
 | 周额度唤醒成功 | 该账户 |
+| 手动预热成功 | 该账户 |
 
 - 定时读取由服务启动时开始的每分钟计时器驱动，从服务启动起计时，不对齐时钟整分
 - 第 1 次在启动 60 秒后
@@ -536,6 +547,21 @@ api 层的公开接口规则：
 - 费用按 1000 输入 token 与 1000 输出 token 以 `requestdb.Cost` 估算；没有单价的模型排在有单价的之后，同价取目录中靠前的；没有对话模型时跳过该桶
 - 请求：经生成路径以 `AccountID` 指定该账户，发一条 user 消息 `Hi`，没有客户端系统提示与工具，使用当前的系统提示档位，读完回答；会话分区为空，会话记录空闲 24 小时即删除，因此每次唤醒都新建会话并发 `writeTrajectoryAcls` 与标题请求；唤醒请求不写请求账本
 - 结果：成功时记入 `RUNTIME_DIR/warmups.json` 并重新读取该账户的额度；失败写 WARN 日志 `周额度唤醒失败`（见运行日志文档“账户事件”），下一次定时读取后再试
+
+手动预热（`POST /api/warmup`）对一个账户与模型发同样的请求，用于检查账户与模型能否生成并让额度窗口开始计时：
+
+| 情况 | 结果 |
+| --- | --- |
+| 账户不存在 | `账户不存在: <账户>`，不发请求 |
+| 账户已停用 | `账户已停用`，不发请求 |
+| 账户不在账户池 | `账户未就绪 <原因>`，不发请求 |
+| 模型按 `resolve` 的规则在账户池中找不到 | `resolve` 的错误，不发请求 |
+| 模型不在该账户的目录中 | `账户的模型目录中没有 <模型 ID>`，不发请求 |
+| 其余 | 经生成路径以 `AccountID` 指定该账户发一条 `Hi` 并读完回答，成功后重新读取该账户的额度 |
+
+- 模型可以是公开目录中的族 ID、别名或目录条目 ID，按 `resolve` 确定目录条目
+- 每次预热写一条请求记录，`protocol` 为 `warmup`、`path` 为 `/api/warmup`，进行中与结束时推送 `request` 事件；进行中的预热列在 `GET /api/requests` 中，可由 `POST /api/requests/{id}/cancel` 停止，管理端断开连接不停止预热；不改变 `warmups.json`
+- 结束时写日志 `手动预热完成` 或 `手动预热失败`，来源为该账户
 
 管理端“验证”同步重新初始化单个账户（企业账户走 `BusinessInitialize`，个人账户在 `project` 为空时走登录序列），需要验证或初始化失败的账户由此恢复调度。
 
@@ -612,6 +638,7 @@ api 层的公开接口规则：
 - 结束：失败不换账户、达到换号上限或候选用尽时返回最近一次失败（候选用尽见“选择账户”第 3 步），超过 `REQUEST_TIMEOUT` 时返回 504
 - 流中错误：上游流以错误中断时，流式请求在客户端收到首个事件前、非流式请求在生成结束前（非流式请求的事件在生成结束后才写出）同样按原因换账户重新生成
 - 已写出事件：客户端已收到事件后的错误只处理账户，不换号
+- 重新生成：客户端还没有收到正文、函数调用与媒体时，流中断（没有 finishReason 或连接意外结束）、流尾 5xx，以及以 `MALFORMED_FUNCTION_CALL`、`UNEXPECTED_TOOL_CALL` 或没有内容的 `STOP` 结束的尝试最多重新生成 3 次，可再用同一账户，5xx 不冷却账户，网络错误照常请求代理检测；尝试结束前用量与结束事件暂存，错误在尝试结束后写出，已写出的思考保留
 
 | 失败 | 判定 | 账户处理 | 换账户 |
 | --- | --- | --- | --- |
@@ -619,7 +646,8 @@ api 层的公开接口规则：
 | 需要验证 | 403，`VALIDATION_REQUIRED` 或消息含 `verify your account` | 移出调度，保持启用 | 是 |
 | 违反条款 | 403，`TOS_VIOLATION` 或消息含 `terms of service` | 写为停用 | 是 |
 | 没有许可 | 403，`SUBSCRIPTION_REQUIRED` 或消息含 `license`、`subscription` | 该模型冷却 1 小时 | 是 |
-| 额度耗尽 | `QUOTA_EXHAUSTED`、`INSUFFICIENT_G1_CREDITS_BALANCE` | 额度组冷却到恢复时刻 | 是 |
+| 额度耗尽 | `QUOTA_EXHAUSTED` | 该模型冷却到恢复时刻 | 是 |
+| AI 积分不足 | `INSUFFICIENT_G1_CREDITS_BALANCE` | 额度组冷却到恢复时刻 | 是 |
 | 容量不足 | `MODEL_CAPACITY_EXHAUSTED` | 不冷却 | 是 |
 | 请求内容 | 429，没有 ErrorInfo 与恢复时刻 | 不冷却 | 否 |
 | 限速 | 其他 429 | 该模型冷却到恢复时刻，没有时 1 分钟 | 是 |
@@ -629,7 +657,7 @@ api 层的公开接口规则：
 | 输入过滤 | 过滤提示，见协议参考“输入过滤” | 不冷却 | 否，返回 400 |
 | 其他 | 其余上游错误 | 不冷却 | 否 |
 
-- 额度耗尽：同一共享额度池的账户一起冷却，后台读取该账户额度；图像生成模型只冷却该账户的该模型
+- 额度耗尽与 AI 积分不足：同一共享额度池的账户一起冷却，后台读取该账户额度；图像生成模型只冷却该账户的该模型；额度组的桶读到耗尽时，该组全部模型按额度摘要停用到桶重置
 - 连接错误：DNS、TCP、TLS 与代理失败，token 端点的 5xx 与 429，语音转写的 gRPC 错误；客户端未取消时才请求检测代理池。请求账本中这类尝试的状态码为 0，错误阶段为 `network`
 - 恢复时刻依次取 RetryInfo `retryDelay`、ErrorInfo `metadata.quotaResetDelay` 与 `quotaResetTimeStamp`；额度耗尽都没有时取目录 `quotaInfo.resetTime`，再没有时 1 分钟
 - 连续 INTERNAL 次数在该账户下一次成功生成后清零
@@ -679,7 +707,9 @@ api 层的公开接口规则：
 | `GET /api/accounts/export` | 下载账户 JSON |
 | `POST /api/accounts/{id}/switch` | 把账户写入本机官方客户端并重新启动它 |
 | `POST /api/accounts/{id}/quota` | 读取该账户的额度并返回账户 |
+| `DELETE /api/accounts/{id}/cooldowns/{scope}` | 清除该账户在一个额度组或模型上的冷却并返回账户，下一次请求即可调度该账户 |
 | `POST /api/accounts/refresh` | 同步刷新账户池并读取全部账户的额度 |
+| `POST /api/warmup` | 对一个账户与模型手动预热，返回结果与额度变化 |
 | `POST /api/logins` | 开始登录，`mode` 为 `browser` 或 `code` |
 | `POST /api/logins/{id}/code` | 提交授权码或回调地址，等到登录结束 |
 | `DELETE /api/logins/{id}` | 取消登录 |
@@ -720,7 +750,9 @@ api 层的公开接口规则：
 | `GET /api/accounts/export` | 查询参数 `id`，可重复，省略时为全部账户 | 账户 JSON 数组，`Content-Disposition` 文件名 `antigravity2api-accounts-<YYYYMMDD>.json` | — |
 | `POST /api/accounts/{id}/switch` | — | `{"account":"<邮箱>"}` | 404 `account_not_found`，502 `switch_failed` |
 | `POST /api/accounts/{id}/quota` | — | 账户 | 404 `account_not_found`，502 `quota_refresh_failed` |
+| `DELETE /api/accounts/{id}/cooldowns/{scope}` | — | 账户 | 404 `cooldown_not_found` |
 | `POST /api/accounts/refresh` | — | `{"accounts":[账户],"failed":{"<邮箱>":"<原因>"}}` | — |
+| `POST /api/warmup` | `{"account","model"}` | `{"account","model","quota_group","ok","duration_ms","error","request","before","after"}` | 400 `invalid_request` |
 | `POST /api/logins` | `{"mode":"browser"或"code"}` | 201 登录状态 | 400 `invalid_request`，502 `login_failed` |
 | `POST /api/logins/{id}/code` | `{"code":"<授权码或回调地址>"}` | 登录结束后的登录状态 | 400 `invalid_request`、`login_callback_rejected`，404 `login_not_found`，409 `login_code_submitted` |
 | `DELETE /api/logins/{id}` | — | 204 | 404 `login_not_found` |
@@ -741,6 +773,7 @@ api 层的公开接口规则：
 - 进行中请求的记录：`time` 为开始时间，`duration_ms` 为截至读取时的已用时间，`account` 为最近一次分配的账户，尚未分配时为空串，其余字段为截至读取时的值
 - 公开模型对象为 `antigravity.Model` 的 JSON：`id`、`name`、`description`、`methods`、`input_token_limit`、`output_token_limit`、`capabilities`、`provider`、`quota_group`、`thinking_levels`、`default_thinking_level`，空值省略
 - `accounts` 为就绪账户中目录含该模型的账户数：族条目按族内任一档位计，每个账户计一次；别名取目标模型的值
+- 预热结果：`ok` 为是否成功，失败时 `error` 为原因；`request` 为请求记录 ID；`before` 与 `after` 为预热前后该模型额度组 `quota_group` 的额度桶，格式同账户的 `quota`，模型未确定时省略 `quota_group`、两者为空数组；管理端断开连接时预热照常完成
 
 同一监听上的其他入口：`/v1/`、`/v1beta/`、`/upload/` 为公开 API（未知路径见第 2 节“api 层的公开接口规则”），`/media/` 为生成媒体（不校验 API key），`POST /api/pairing/accounts` 为远程配对上传；其余路径由管理端静态资源处理：
 
@@ -889,11 +922,11 @@ api 层的公开接口规则：
 
 | 页面 | 内容 |
 | --- | --- |
-| 仪表盘 | 首次使用三步引导、概览条、推荐账户、最近请求、额度变化 |
-| 账户 | 添加、刷新、筛选、搜索、排序、分页、额度与重置倒计时、刷新单个账户额度、家庭组徽标（共享额度池）、验证、启停、批量操作、详情、调度优先级、备注名、AI 积分超额使用、设备档案、切换官方客户端、代理、删除 |
+| 仪表盘 | 首次使用三步引导、概览条、额度最多的账户、最近请求、额度变化 |
+| 账户 | 添加、刷新、预热、筛选、搜索、排序、分页、额度与重置倒计时、刷新单个账户额度、家庭组徽标（共享额度池）、验证、启停、批量操作、详情、调度优先级、备注名、AI 积分超额使用、设备档案、切换官方客户端、代理、删除 |
 | 接入 | OpenAI、Anthropic 与 Gemini 兼容接口的 base URL（OpenAI 兼容含 Chat 与 Responses 两个协议）、API key 管理、客户端配置片段 |
 | 模型 | 额度组、上下文与输出上限、思考档位、可用账户数、模型映射（可编辑） |
-| 请求 | 进行中请求（可停止）、请求记录、用量、日志 |
+| 请求 | 进行中请求（可停止，显示当前阶段）、请求记录、用量、日志（上方列出进行中请求） |
 | 设置 | 服务、网络、系统提示（各系统提示档位的原文，`custom` 的段落与包装）、调度（含优先用低套餐账户的模型、额度保留比例与周额度唤醒）、日志、远程访问、关于 |
 
 各页面的组成：
@@ -914,12 +947,16 @@ api 层的公开接口规则：
 | 用量 | 统计条 | 请求、缓存命中率、token、耗时、费用 |
 | 用量 | 趋势与分项 | 用量趋势图与分项表 |
 
-- 账户详情：额度与刷新、调度优先级、备注名、AI 积分超额使用、近 30 天用量、资料（套餐、AI 积分余额与使用积分所需的最低余额、项目、代理、添加时间、access token 到期）、设备档案；操作为重新初始化账户、代理、参与调度、删除、切换到官方客户端
+- 账户详情：额度与刷新、各项冷却的截止时间与“清除冷却”按钮（`DELETE /api/accounts/{id}/cooldowns/{scope}`）、调度优先级、备注名、AI 积分超额使用、近 30 天用量、资料（套餐、AI 积分余额与使用积分所需的最低余额、项目、代理、添加时间、access token 到期）、设备档案；操作为重新初始化账户、代理、参与调度、删除、切换到官方客户端
 - 模型映射卡片：目标模型的下拉为目录中的模型，可增删行；保存时以 `PATCH /api/settings` 只提交 `MODEL_MAPPING`；别名须非空、不含逗号、不重复，目标模型必选
-- 进行中：只在有进行中请求时显示，数据来自事件流；列为时间与协议、模型、账户、已用时、“停止”（`POST /api/requests/{id}/cancel`）
+- 进行中：只在有进行中请求时显示，数据来自事件流；列为时间与协议、模型与当前阶段、账户、已用时、“停止”（`POST /api/requests/{id}/cancel`）；当前阶段为该请求最近一条 `request.progress` 日志首行去掉“模型=”一项，各项以中点相连；事件流的初始快照到达前请求页显示加载
+- 日志页的实时日志上方每个进行中请求一行：模型、账户、已运行时长、当前阶段与“查看请求”
+- 请求记录与详情中的协议显示为 OpenAI Chat、OpenAI Responses、Anthropic Messages、Gemini
 - 记录表的列为时间、结果、状态码、模型、账户、首字、耗时、输入·缓存·输出、估算费用
 - 记录详情：失败阶段、上游状态码、协议与路径、请求模型、上游模型、账户、排队·首字·总耗时、token、估算费用、工具调用、流式、请求类型与系统提示档位、会话与步序、API key、客户端、响应 ID、客户端请求 ID、各上游尝试（账户、状态、耗时、错误、重试等待、traceId）与正文
 - 概览条：就绪账户为 `state` 为 `ready` 的账户数与账户总数，下方是按状态着色的分布条与各非就绪状态的数量（点击转到账户页该状态）；额度为各已启用账户的平均剩余比例（共享额度池只计一次），每组另有 5 小时与每周两条比例条，下方为任一额度桶低于 20% 的已启用账户数；24 小时请求为请求数、失败数与估算费用，下方逐小时柱状图（有失败的小时为红色）填满格内剩余高度
+- 用量趋势每根柱的提示为该桶的起始时间与请求数，图下方左端为范围起点、右端为“现在”
+- 模型页额度组筛选的每一项带该组的模型数
 - 用量筛选：候选为报告 `options` 中这段时间出现过的非空取值，选中的取值以逗号连接写入 URL 的 `model`、`account`、`api_key`，同样带在 `GET /api/usage` 与导出 CSV 的查询参数中；有筛选时显示“清除筛选”
 - 统计条的耗时为 p50、p95 与首字；分项表的列为请求数、占比、失败、限流、缓存、思考、回复、p50、p95、费用
 - 界面上的“首字”为请求记录的首事件耗时 `first_event_ms`：请求进入到首个正文、思考或工具调用事件的毫秒数，见运行日志文档
@@ -928,11 +965,12 @@ api 层的公开接口规则：
 - 账户用量：账户详情的“近 30 天用量”、账户表的“最近使用”与按最近使用排序都读取 `GET /api/usage?from=<当前时间减 30 天>&to=<当前时间加 1 秒>&tz=<浏览器时区>&bucket=auto`，取 `groups.account` 中该账户的一项；详情显示 `requests`、`total_tokens` 与 `cost_usd`，标题旁显示 `last_at` 的相对时间，没有该项时显示“30 天内未使用”
 - 账户页与模型页的 `q` 去掉首尾空白后不区分大小写地按子串匹配：账户页匹配邮箱（`id`）、备注名与项目，模型页匹配模型 ID 与显示名
 - 账户页每页 20 个账户，`page` 小于 1 时为第 1 页，超过总页数时为最后一页
-- 账户表各行等高：账户列为邮箱与其下的标签区，标签区在窗口宽度 1280 以下分三行（备注名与套餐；家庭组、优先级与 AI 积分的图标标签；“最近使用”与代理），1280 及以上为一行；状态列为状态标签与异常账户的“重新初始化”图标按钮一行，其下为至多两行的原因，待验证账户的原因为“打开验证页面”链接；异常账户的原因为上游错误冒号后的说明（`upstream <状态码> <status> <reason>: <说明>`），悬停显示原文，点击打开详情；每个额度组固定两个额度桶的高度；截断的文字与图标标签的全文在提示中
+- 账户表各行等高：账户列为邮箱与其下的标签区，标签区在窗口宽度 1280 以下分三行（备注名与套餐；家庭组、优先级与 AI 积分的图标标签；“最近使用”与代理），1280 及以上为一行；状态列为状态标签与异常账户的“重新初始化”图标按钮一行，其下为至多两行的原因，待验证账户的原因为“去验证”链接（打开 `verify_url`）与“重新初始化”按钮，详情中为验证说明、“打开验证页面”与“重新初始化账户”；异常账户的原因为上游错误冒号后的说明（`upstream <状态码> <status> <reason>: <说明>`），悬停显示原文，点击打开详情；每个额度组固定两个额度桶的高度；截断的文字与图标标签的全文在提示中
 - 窗口宽度小于 640 时每个账户为四行的卡片：邮箱；状态标签、套餐、AI 积分与一行原因；Gemini 与 Claude 和 GPT 各一行，只显示两个额度桶的剩余百分比；参与调度开关与更多操作在邮箱行右侧。备注名、家庭组、优先级、代理、最近使用、重置倒计时与切换官方客户端在账户详情中
 - AI 积分：开启超额使用的账户行显示 AI 积分标签与积分余额，提示为余额与使用积分所需的最低余额；开启超额使用且 `credit_balance` 低于 `credit_minimum` 时，标签、详情中的余额与超额使用开关下方的说明为警示色，说明超额使用不会生效
 - 账户行的操作为参与调度开关、刷新额度（窗口宽度 1280 及以上）、切换官方客户端与更多操作；更多操作菜单为详情、刷新额度、代理与删除
 - 刷新全部（账户页与仪表盘）对列表中的每个账户调用 `POST /api/accounts/{id}/quota`（状态为 `error` 的账户先调用 `POST /api/accounts/{id}/verify` 重新初始化），同时最多 4 个：按钮显示“刷新中 已完成/总数”，排队的账户在状态标签旁显示沙漏，正在读取的显示转圈；每个账户完成后立即替换该行，读取失败的账户在状态标签旁显示警示图标，悬停为原因，点击打开详情，详情的额度分区显示原因，之后读到该账户的额度时清除；结束后提示失败的账户与原因。进度在切换页面后保留
+- 预热（账户页）打开对话框：左侧为公开目录中的对话模型，右侧为全部账户与状态标签，各带全选；勾选了账户时默认选中这些账户，否则默认选中就绪账户。开始后对每个账户与模型的组合调用 `POST /api/warmup`，各账户同时进行、同一账户的模型依次进行，每行显示账户、模型、等待中或进行中、完成后的成功或失败与原因、耗时、该额度组各额度桶预热前后的剩余比例与“查看记录”（打开 `/requests?id=<ID>`），上方为已完成数与成功数；进行中不能关闭对话框，结束后可重新选择或重新预热，并重新读取账户列表
 - 操作结果以右下角轻提示显示，5 秒后消失，悬停、聚焦与窗口失焦不延长；新提示使总数超过 3 条时，从最早的开始移除不带操作按钮的提示，新提示与带“撤销”的提示保留
 
 设置页各分区的配置项（数字项的取值范围见下方）：
@@ -942,7 +980,7 @@ api 层的公开接口规则：
 | 服务 `service` | `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR`、API key（链接到接入页）、`MEDIA_OUTPUT`、`MEDIA_BASE_URL` |
 | 网络 `network` | `PROXY`（每行一个）与代理池状态 |
 | 系统提示 `prompt` | `SYSTEM_PROMPT`、原文预览、`SYSTEM_PROMPT_SECTIONS`、`SYSTEM_PROMPT_WRAP` |
-| 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP` |
+| 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP` |
 | 日志 `logging` | `LOG_LEVEL`、`LOG_FORMAT`、`LOG_FILE`、`LOG_MAX_TOTAL_MB`、`REQUEST_LOG_BODIES` |
 | 远程访问 `remote` | `ADMIN_AUTH_ENABLED`、`ADMIN_USERNAME`、`ADMIN_PASSWORD`（已设置时输入框为空并显示占位） |
 | 关于 `about` | 版本与在线更新、宿主、监听地址、API 地址、启动时间、模拟的客户端版本与官方最新版本、许可证、主页、发行页 |
@@ -953,7 +991,9 @@ api 层的公开接口规则：
 | `QUOTA_RESERVE_PERCENT` | 0–99 | 0–99 的整数 |
 | `LOG_MAX_TOTAL_MB` | 20–100000 | 不小于 20 的整数 |
 
+- `.env` 中有取值无效的项时，设置页顶部列出配置项、原值与原因；进程环境变量决定的项带“环境变量”标签，悬停显示变量名，控件停用
 - 加减按钮到达范围端点时停用；输入框中直接键入的值不受按钮范围限制，按“可提交的值”校验，与服务端一致
+- `REQUEST_TIMEOUT` 与 `QUOTA_REFRESH_INTERVAL` 为数值加单位（秒、分钟、小时）：打开时整小时用小时、整分钟用分钟、其余用秒，切换单位时只换算显示的数值（保留 6 位有效数字），改动数值后才写入；保存为 Go 时长（如 `30s`、`5m`），数值为 0 时保存 `0`
 
 #### 路由与登录
 
@@ -972,18 +1012,18 @@ api 层的公开接口规则：
 | `/settings/:分区` | 设置 | — |
 | 其余路径 | 页面不存在 | — |
 
-设置分区为 `service`、`network`、`prompt`、`scheduling`、`logging`、`remote`、`about`，路径中没有或不认识的分区显示 `service`。
+设置分区为 `service`、`network`、`prompt`、`scheduling`、`logging`、`remote`、`about`，路径中没有或不认识的分区显示 `service`；分区导航在窗口宽度小于 640 时排成等宽两列。
 
 - 外壳先读 `GET /api/session`，`authenticated` 为 false 时以替换历史的方式转到 `/login?next=<原路径与查询>`
 - 任一查询返回 401 时重新读取会话，会话无效即转到登录页；查询遇到 5xx 时重试 2 次，4xx 与网络错误不重试
 - 登录页：`enabled` 为 false 时只显示开启方法；提交 `POST /api/session`，401 显示用户名或密码错误，429 显示一分钟后再试；成功后转到 `next`（不以 `/` 开头时转到 `/`），已登录时直接转到 `next`
 - 顶栏导航为仪表盘、账户、接入、模型、请求、设置；仪表盘只在路径为 `/` 时高亮，其余按路径前缀高亮；“退出登录”只在开启登录且已登录时显示，`DELETE /api/session` 后转到 `/login`
-- 登录后订阅 `/api/events`：连接打开时清空日志与进行中请求的缓存；`accounts` 替换账户列表，`log` 追加日志（页面保留最近 2000 条），`request` 维护进行中请求并在请求结束时刷新请求记录；进行中请求的详情显示等待，请求结束后读取记录，`login` 更新对应的登录；断开时内容区顶部显示断线提示，浏览器自动重连并重新收到初始快照
+- 登录后订阅 `/api/events`：连接打开时清空日志与进行中请求的缓存；`accounts` 替换账户列表，`log` 追加日志（页面保留最近 2000 条），`request` 维护进行中请求并在请求结束时刷新请求记录；进行中请求的详情显示等待，请求结束后读取记录，`login` 更新对应的登录；初始快照为账户列表、最近日志与进行中请求，以 `ready` 结束；断开时内容区顶部显示断线提示，浏览器自动重连并重新收到初始快照
 - 数据依赖集中在 `web/src/app/sync.ts`：账户列表缓存的任何写入（事件流、操作结果、重新读取）中，各账户的 ID、状态或 `quota_at` 变化时重新读取模型目录与额度变化曲线；请求结束时重新读取请求记录、最近请求与用量（含仪表盘 24 小时请求与账户的最近使用）；保存设置后重新读取模型目录与代理池；正在读取的查询不打断
 
 #### 添加账户
 
-添加账户对话框有浏览器登录、粘贴授权码、导入官方客户端、远程配对四种方式。打开时的默认方式：桌面窗口，或页面主机为 `localhost`、`127.0.0.1`、`[::1]` 时为浏览器登录，其余为粘贴授权码；从仪表盘引导的方式卡片打开时选中该方式。
+添加账户对话框的方式分两组：登录 Google 账户（浏览器登录、粘贴授权码、远程配对）与导入已登录的账户（从官方客户端导入、导入账户文件）。打开时的默认方式：桌面窗口，或页面主机为 `localhost`、`127.0.0.1`、`[::1]` 时为浏览器登录，其余为粘贴授权码；从仪表盘引导的方式卡片打开时选中该方式。
 
 | 方式 | 流程 |
 | --- | --- |
@@ -991,6 +1031,7 @@ api 层的公开接口规则：
 | 粘贴授权码 | `POST /api/logins` `mode=code` → 登录链接与倒计时 → 提交授权码 → 结束 |
 | 导入官方客户端 | `POST /api/accounts/import` → 导入数量 |
 | 远程配对 | `POST /api/pairing` → 配对命令与倒计时 → 过期后重新生成 |
+| 导入账户文件 | 拖入或选择文件、粘贴文本 → `POST /api/accounts/import/json` → 导入数量与失败的账户 |
 
 - 浏览器登录与粘贴授权码生成登录链接后自动打开：浏览器中在点击“生成登录链接”时打开新标签页，链接返回后跳转到登录链接；桌面窗口交给系统浏览器打开
 - 登录链接可打开或复制，倒计时取 `expires_at`，格式为 `m:ss`；回调地址与授权码都经 `POST /api/logins/{id}/code` 提交，提交前去掉首尾空白，为空时提示先粘贴
@@ -1000,7 +1041,7 @@ api 层的公开接口规则：
 
 #### 首次使用引导
 
-账户列表为空时仪表盘显示三步引导。引导期间添加了账户时保留引导并显示“进入仪表盘”；之后再打开仪表盘时显示总览。
+账户列表为空时仪表盘显示三步引导，第一步列出两组添加方式。引导期间添加了账户时保留引导，第一步标题行显示“进入仪表盘”；之后再打开仪表盘时显示总览。
 
 | 步骤 | 完成条件 |
 | --- | --- |
@@ -1020,7 +1061,9 @@ API key 列表取自 `GET /api/settings` 的 `API_KEYS`（逗号分隔）：
 - “添加 API key”对话框预填随机值：`sk-` 加 32 位字母与数字，取自 `crypto.getRandomValues`；可重新生成或换成自定义值
 - 修改打开同一对话框，预填原值
 - 保存前去掉首尾空白；值不能为空、不能含空白或逗号、不能与其他 key 相同
-- 添加、修改与删除都以 `PATCH /api/settings` 只提交 `API_KEYS`；删除立即保存，5 秒内可撤销，撤销时写回原列表
+- 对话框列出全部账户的复选框，勾选的账户写入 `API_KEY_ACCOUNTS` 作为该 key 的可用账户，都不勾选时可用全部账户；列表中绑定了账户的 key 显示账户数
+- 添加、修改与删除都以 `PATCH /api/settings` 提交 `API_KEYS` 与 `API_KEY_ACCOUNTS`，`API_KEY_ACCOUNTS` 只保留仍在列表中的 key；删除立即保存，5 秒内可撤销，撤销时写回原列表与原绑定
+- `API_KEYS` 由进程环境变量决定时，添加、删除与修改 key 的值停用，列表下方显示该环境变量，对话框只能修改绑定的账户；`API_KEY_ACCOUNTS` 由进程环境变量决定时账户勾选停用
 
 客户端配置片段中的占位取值：
 
@@ -1034,6 +1077,7 @@ API key 列表取自 `GET /api/settings` 的 `API_KEYS`（逗号分隔）：
 - 可选模型为实时目录中的 Agent 模型或普通对话模型，不含图像生成、语音转写与 Tab 补全模型；目录为空时 `<model>` 与 `<small>` 写成 `<模型 ID>`
 - `<model>` 的默认值：Claude Code 取第一个 `provider` 含 anthropic 的模型，其余客户端取第一个 ID 含 `flash` 的模型，没有时取第一个模型；`<small>` 默认取第一个 ID 含 `flash` 的模型
 - 环境变量按终端选择写法：macOS / Linux 为 `export NAME=value`，Windows PowerShell 为 `$env:NAME = "value"`；默认值按浏览器 User-Agent 是否含 `Windows` 选择
+- 客户端标签带各客户端的图标（`@lobehub/icons-static-svg`，curl 为终端图标），窗口宽度小于 640 时排成等宽两列
 - 选中的客户端写入 `?client=`，取值为 `claude-code`（默认）、`codex`、`opencode`、`cherry-studio`、`curl`
 
 Claude Code 的终端命令（PowerShell 写法同上替换）与 `~/.claude/settings.json`：
@@ -1127,7 +1171,7 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 - 删除账户（单个与批量）：账户行立即隐藏，5 秒后发出 `DELETE /api/accounts/{id}`；5 秒内撤销，或经导入与登录再次加入同一账户时不发出删除并恢复显示；删除完成且账户列表刷新后不再隐藏该账户，之后再次加入时照常显示
 - 排序：按添加时间（默认）；按重置时间，取各额度桶中剩余比例低于 100% 的最早 `reset_time`，从早到晚；按最近使用，取近 30 天用量中各账户的 `last_at`，从近到远。没有对应时间的账户排在后面，保持添加顺序
 
-#### 额度与推荐账户
+#### 额度与额度最多的账户
 
 | 量 | 计算 |
 | --- | --- |
@@ -1137,10 +1181,10 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 | 低额度账户 | 已启用且任一额度桶低于 20% 的账户数 |
 | 就绪账户 | `state` 为 `ready` 的账户数 / 总数，说明中列出其余状态的数量 |
 | 24 小时请求 | 近 24 小时请求数、失败数与估算费用 |
-| 推荐账户 | 每个额度组中可用比例最高的账户 |
+| 额度最多的账户 | 每个额度组中可用比例最高的账户 |
 
 - 已启用指 `state` 不是 `disabled`；计算额度均值时，同一共享额度池的账户只取列表中第一个出现的，没有该组额度的账户不计入
-- 推荐账户的候选：界面状态为就绪或冷却中、该组不在 `cooldown` 中、可用比例大于 0；比例相同时取列表靠前的账户
+- 额度最多的账户的候选：界面状态为就绪或冷却中、该组不在 `cooldown` 中、可用比例大于 0；比例相同时取列表靠前的账户
 - 界面状态：`error` 且带 `verify_url` 为“需验证”，其余与 `state` 相同
 - 比例条颜色：不低于 30% 为绿色，10% 到 30% 为黄色，低于 10% 为红色
 - 重置倒计时取 `reset_time` 与当前时间之差，向上取整到分钟，写成 `6d 15h`、`1h 16m`、`12m`，为零的部分省略，已过重置时间时不显示；账户页与仪表盘每 30 秒刷新一次
@@ -1183,6 +1227,7 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 | 百分比 | 1 位小数 |
 | 费用 | 美元；大于 0 且小于 1 时保留 4 位有效数字，其余最多 2 位小数 |
 | 时长 | 不足 1 秒为整数毫秒；不足 10 秒为秒且 2 位小数；不足 1 分钟为秒且 1 位小数；不足 1 小时为分钟；其余为小时 |
+| 进行中请求的已运行时长 | 整秒；满 1 分钟为分与秒 |
 | 字节 | 1024 进制，字节取整，KB 起 1 位小数 |
 | 相对时间 | 秒、分、时、天逐级进位 |
 | 日期时间 | 当天只显示时分秒，其余加月日，24 小时制 |

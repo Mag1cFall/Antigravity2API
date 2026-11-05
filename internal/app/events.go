@@ -40,6 +40,8 @@ type activeRequest struct {
 	cancel context.CancelCauseFunc
 	// relays 等待生成事件转发协程结束，使记录包含断开后排空的事件
 	relays sync.WaitGroup
+	// accounts 是请求 API key 绑定的账户，为空时可用全部账户
+	accounts []string
 }
 
 // hub 保存最新账户列表、最近日志与进行中的请求，并向事件流连接分发事件
@@ -154,13 +156,13 @@ func (h *hub) stop(id string) bool {
 	return active != nil
 }
 
-// subscribe 返回新连接的事件通道，先放入账户列表、最近日志与进行中的请求
+// subscribe 返回新连接的事件通道，先放入账户列表、最近日志、进行中的请求与表示初始快照结束的 ready
 func (h *hub) subscribe() chan event {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	rows := h.runningLocked()
 	logs := h.logs[max(len(h.logs)-logInitial, 0):]
-	subscriber := make(chan event, 1+len(logs)+len(rows)+subscriberBuffer)
+	subscriber := make(chan event, 2+len(logs)+len(rows)+subscriberBuffer)
 	if h.accounts != nil {
 		subscriber <- *h.accounts
 	}
@@ -170,6 +172,7 @@ func (h *hub) subscribe() chan event {
 	for _, row := range rows {
 		subscriber <- event{Type: "request", Data: row}
 	}
+	subscriber <- event{Type: "ready"}
 	h.subscribers[subscriber] = struct{}{}
 	return subscriber
 }
