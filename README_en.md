@@ -218,7 +218,7 @@ POST   /v1beta/interactions/{id}/cancel
 
 ### Admin UI and Service Status
 
-Open `http://127.0.0.1:8017/` in a browser for the admin UI, which uses the `/api/*` endpoints. Loopback access needs no sign-in; after setting `ADMIN_AUTH_ENABLED=true`, `ADMIN_USERNAME` and `ADMIN_PASSWORD`, other devices can sign in. Settings saved in the UI are written back to `.env`; `LISTEN`, `AUTH_DIR` and `RUNTIME_DIR` take effect after a restart, the others on the next request. The About section of Settings shows the latest GitHub release; after confirming, the app downloads the package for its platform, verifies the SHA-256, replaces the program and restarts into the new version, downloading through `PROXY`; Docker deployments update with the image.
+Open `http://127.0.0.1:8017/` in a browser for the admin UI, which uses the `/api/*` endpoints. Loopback access needs no sign-in; after setting `ADMIN_AUTH_ENABLED=true`, `ADMIN_USERNAME` and `ADMIN_PASSWORD`, other devices can sign in. Behind a reverse proxy, forward `Host` unchanged (`proxy_set_header Host $http_host;` in nginx); the admin UI recognizes remote access by the domain it is reached at and requires sign-in. Settings saved in the UI are written back to `.env`; `LISTEN`, `AUTH_DIR` and `RUNTIME_DIR` take effect after a restart, the others on the next request. The About section of Settings shows the latest GitHub release; after confirming, the app downloads the package for its platform, verifies the SHA-256, replaces the program and restarts into the new version, downloading through `PROXY`; Docker deployments update with the image.
 
 ## Client Setup
 

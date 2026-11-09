@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/oauth2"
-
 	"github.com/Mag1cFall/Antigravity2API/internal/auth"
 )
 
@@ -39,7 +37,7 @@ func (s *server) exportAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, items)
 }
 
-// importAccountFile 导入账户 JSON 或含 refresh token 的文本：同时最多 transferWorkers 个账户以 refresh token 换取 access token、读取邮箱后写入，本服务导出的资料一并写回，返回导入的账户与失败项并在后台刷新账户池
+// importAccountFile 导入账户 JSON 或含 refresh token 的文本：同时最多 transferWorkers 个账户以 refresh token 换取 access token、读取邮箱后写入，返回导入的账户与失败项并在后台刷新账户池
 func (s *server) importAccountFile(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTransferSize))
 	if err != nil {
@@ -62,14 +60,14 @@ func (s *server) importAccountFile(w http.ResponseWriter, r *http.Request) {
 		slots <- struct{}{}
 		workers.Go(func() {
 			defer func() { <-slots }()
-			id, err := s.importTransfer(r, item)
+			account, err := s.deps.Service.Import(r.Context(), item)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				failed = append(failed, transferFailure{Account: cmp.Or(item.Email, item.RefreshToken[:min(len(item.RefreshToken), 10)]+"…"), Error: err.Error()})
 				return
 			}
-			imported = append(imported, id)
+			imported = append(imported, account.ID)
 		})
 	}
 	workers.Wait()
@@ -78,20 +76,4 @@ func (s *server) importAccountFile(w http.ResponseWriter, r *http.Request) {
 		s.refreshLater()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": imported, "failed": failed})
-}
-
-// importTransfer 以导入项的 refresh token 写入账户，再写回本服务导出的备注名、代理、优先级、启用状态与 AI 积分设置
-func (s *server) importTransfer(r *http.Request, item auth.Transfer) (string, error) {
-	account, err := s.deps.Store.AddWithDevice(r.Context(), &oauth2.Token{RefreshToken: item.RefreshToken}, item.Device)
-	if err != nil {
-		return "", err
-	}
-	if item.Device.InstallationID == "" {
-		return account.ID, nil
-	}
-	account.Label, account.Proxy, account.Priority, account.AICredits = item.Label, item.Proxy, item.Priority, item.AICredits
-	if item.Enabled != nil {
-		account.Enabled = *item.Enabled
-	}
-	return account.ID, s.deps.Store.Save(account)
 }

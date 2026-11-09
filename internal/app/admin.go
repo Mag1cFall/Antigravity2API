@@ -101,16 +101,6 @@ func (s *server) findAccount(id string) (account, bool) {
 	return account{}, false
 }
 
-// stored 返回账户目录中的账户，不存在时返回 nil
-func (s *server) stored(id string) *auth.Account {
-	for _, account := range s.deps.Store.Accounts() {
-		if account.ID == id {
-			return account
-		}
-	}
-	return nil
-}
-
 // updateAccount 启用或停用账户、设置账户代理、调度优先级、备注名与 AI 积分超额使用并在后台刷新账户池，代理变化的账户在刷新时重新初始化
 func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -128,32 +118,35 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	stored := s.stored(r.PathValue("id"))
-	if stored == nil {
-		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+r.PathValue("id"))
-		return
-	}
 	if input.Proxy != nil {
-		proxy := strings.TrimSpace(*input.Proxy)
-		if err := config.ValidateProxy(proxy); err != nil && proxy != proxypool.Direct {
+		*input.Proxy = strings.TrimSpace(*input.Proxy)
+		if err := config.ValidateProxy(*input.Proxy); err != nil && *input.Proxy != proxypool.Direct {
 			writeError(w, http.StatusBadRequest, "invalid_proxy", err.Error())
 			return
 		}
-		stored.Proxy = proxy
 	}
-	if input.Enabled != nil {
-		stored.Enabled = *input.Enabled
+	stored, ok, err := s.deps.Store.Update(r.PathValue("id"), func(account *auth.Account) {
+		if input.Proxy != nil {
+			account.Proxy = *input.Proxy
+		}
+		if input.Enabled != nil {
+			account.Enabled = *input.Enabled
+		}
+		if input.Priority != nil {
+			account.Priority = *input.Priority
+		}
+		if input.Label != nil {
+			account.Label = strings.TrimSpace(*input.Label)
+		}
+		if input.AICredits != nil {
+			account.AICredits = *input.AICredits
+		}
+	})
+	if !ok {
+		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+r.PathValue("id"))
+		return
 	}
-	if input.Priority != nil {
-		stored.Priority = *input.Priority
-	}
-	if input.Label != nil {
-		stored.Label = strings.TrimSpace(*input.Label)
-	}
-	if input.AICredits != nil {
-		stored.AICredits = *input.AICredits
-	}
-	if err := s.deps.Store.Save(stored); err != nil {
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "account_update_failed", err.Error())
 		return
 	}
@@ -184,7 +177,7 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 // deleteAccount 删除账户并在后台刷新账户池
 func (s *server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.stored(id) == nil {
+	if _, ok := s.deps.Store.Account(id); !ok {
 		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+id)
 		return
 	}
@@ -250,7 +243,7 @@ func (s *server) clearCooldown(w http.ResponseWriter, r *http.Request) {
 // switchAccount 把账户写入本机官方客户端并重新启动官方客户端
 func (s *server) switchAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.stored(id) == nil {
+	if _, ok := s.deps.Store.Account(id); !ok {
 		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+id)
 		return
 	}

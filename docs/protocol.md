@@ -263,12 +263,15 @@ client_id=1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.
 
 ### token 刷新
 
-`NewTokenSource(token, method, proxy, save)` 以 `oauth2.ReuseTokenSourceWithExpiry` 包装 OAuth 客户端的 `TokenSource`，提前量为 300 秒；`method` 为账户的 `auth_method`：
+`NewTokenSource(token, method, provider, proxy, save)` 以 `oauth2.ReuseTokenSourceWithExpiry` 包装 OAuth 客户端的 `TokenSource`，提前量为 300 秒；`method` 与 `provider` 为账户的 `auth_method` 与 `wif_provider`，客户端的选择与官方客户端的 `getOAuthConfig` 相同：
 
-| `method` | 客户端 | token 端点 | 刷新表单 |
+| 账户 | 客户端 | token 端点 | 刷新表单 |
 | --- | --- | --- | --- |
-| `business_licensed_enterprise` | `OAuthConfigWIF` | `https://sts.googleapis.com/v1/oauthtoken` | `client_id`、`grant_type=refresh_token`、`refresh_token` |
+| `wif_provider` 非空 | `OAuthConfigWIF` | `https://sts.googleapis.com/v1/oauthtoken` | `client_id`、`grant_type=refresh_token`、`refresh_token` |
+| `business_licensed_enterprise`，`wif_provider` 为空 | `OAuthConfigCloud` | `https://oauth2.googleapis.com/token` | `client_id`、`client_secret`、`grant_type=refresh_token`、`refresh_token` |
 | 其他 | `OAuthConfig` | `https://oauth2.googleapis.com/token` | `client_id`、`client_secret`、`grant_type=refresh_token`、`refresh_token` |
+
+`OAuthConfigCloud` 为“Continue with Google Cloud”以 Google 账户登录的客户端 `884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com`，scope 为个人账户的前五项，没有 `aicode`。
 
 - 时机：access token 剩余有效期不足 300 秒后的下一次上游请求前刷新，与官方客户端相同
 - 写回：得到的 access token 与上一次不同时调用 `save` 写回 `token.json`，`save` 出错时本次请求失败

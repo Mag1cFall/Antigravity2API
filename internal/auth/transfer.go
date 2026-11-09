@@ -2,15 +2,18 @@ package auth
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"regexp"
 	"slices"
 	"strings"
 
+	"golang.org/x/oauth2"
+
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
-// Transfer 是账户 JSON 中的一个账户：Email 为文件中写的邮箱，备注名、代理、优先级、启用、AI 积分与设备档案取自本服务导出的文件（带 device.installation_id）
+// Transfer 是账户 JSON 中的一个账户：Email 为文件中写的邮箱，备注名、代理、优先级、启用、AI 积分、认证方式、WIF provider 与设备档案取自本服务导出的文件（带 device.installation_id）
 type Transfer struct {
 	Email        string             `json:"email"`
 	RefreshToken string             `json:"refresh_token"`
@@ -19,6 +22,8 @@ type Transfer struct {
 	Priority     int                `json:"priority,omitempty"`
 	Enabled      *bool              `json:"enabled,omitempty"`
 	AICredits    bool               `json:"ai_credits,omitempty"`
+	AuthMethod   string             `json:"auth_method,omitempty"`
+	WIFProvider  string             `json:"wif_provider,omitempty"`
 	Device       antigravity.Device `json:"device"`
 }
 
@@ -34,9 +39,22 @@ func (s *Store) Export(ids []string) []Transfer {
 			continue
 		}
 		enabled := account.Enabled
-		items = append(items, Transfer{Email: account.Email, RefreshToken: token.RefreshToken, Label: account.Label, Proxy: account.Proxy, Priority: account.Priority, Enabled: &enabled, AICredits: account.AICredits, Device: account.Device})
+		items = append(items, Transfer{Email: account.Email, RefreshToken: token.RefreshToken, Label: account.Label, Proxy: account.Proxy, Priority: account.Priority, Enabled: &enabled, AICredits: account.AICredits, AuthMethod: account.AuthMethod, WIFProvider: account.WIFProvider, Device: account.Device})
 	}
 	return items
+}
+
+// Import 以导入项的 refresh token 写入账户，换取 token 与读取邮箱经 proxy 发出；本服务导出的项沿用其认证方式与 WIF provider，并写入备注名、代理、优先级、启用状态与 AI 积分设置
+func (s *Store) Import(ctx context.Context, item Transfer, proxy antigravity.Proxy) (*Account, error) {
+	return s.add(ctx, &oauth2.Token{RefreshToken: item.RefreshToken}, identity{device: item.Device, method: item.AuthMethod, provider: item.WIFProvider}, proxy, func(account *Account) {
+		if item.Device.InstallationID == "" {
+			return
+		}
+		account.Label, account.Proxy, account.Priority, account.AICredits = item.Label, item.Proxy, item.Priority, item.AICredits
+		if item.Enabled != nil {
+			account.Enabled = *item.Enabled
+		}
+	})
 }
 
 // ParseTransfers 从账户 JSON 中取出账户，按 refresh token 去重：任意层级中带 refresh_token、refreshToken 或 token.refresh_token 的对象各为一个账户（本服务与 Antigravity Manager 的导出、CLIProxyAPI 与 gcli2api 的账户文件、opencode-antigravity-auth 与 antigravity-claude-proxy 的 accounts.json、sub2api 的数据导出），platform 不是 antigravity 的对象跳过，refreshToken 中 “|” 之后的项目 ID 去掉；内容不是 JSON 时取文本中的全部 refresh token
