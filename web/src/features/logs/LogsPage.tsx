@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { LoaderCircle, ScrollText, X } from 'lucide-react'
-import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { memo, type ReactNode, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 
 import { logsKey, useConnection, useRunning } from '@/app/events'
@@ -17,9 +17,11 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { matchLog, type MinimumLevel, parseLogFilter, requestStages } from '@/features/logs/filter'
 import { logMessages } from '@/features/logs/messages'
 import type { LogEntry, LogLevel, LogPage } from '@/features/logs/types'
-import { api } from '@/lib/api'
-import { formatElapsed } from '@/lib/format'
+import { rangeQuery } from '@/features/usage/queries'
+import { api, errorMessage } from '@/lib/api'
+import { dateFormat, formatElapsed } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { changeParams } from '@/lib/params'
 import { useNow } from '@/lib/time'
 
 // levelClass 是日志级别文字的颜色
@@ -30,8 +32,14 @@ const levelClass: Record<LogLevel, string> = {
   ERROR: 'text-error-text',
 }
 
-// LogLine 是一条日志：时间、级别、来源与消息排成一行，宽度小于 640px 时消息换到第二行
-function LogLine({ entry, timeFormat }: { entry: LogEntry; timeFormat: Intl.DateTimeFormat }) {
+// LogLine 是一条日志：时间、级别、来源与消息排成一行，宽度小于 640px 时消息换到第二行；条目与格式化器不变时跳过重渲染
+const LogLine = memo(function LogLine({
+  entry,
+  timeFormat,
+}: {
+  entry: LogEntry
+  timeFormat: Intl.DateTimeFormat
+}) {
   const m = useMessages(logMessages)
   return (
     <div
@@ -44,9 +52,7 @@ function LogLine({ entry, timeFormat }: { entry: LogEntry; timeFormat: Intl.Date
             : 'hover:bg-muted/60')
       }
     >
-      <span className="text-foreground-subtle tabular-nums">
-        {timeFormat.format(new Date(entry.time))}
-      </span>
+      <span className="text-foreground-subtle">{timeFormat.format(new Date(entry.time))}</span>
       <span className={'font-semibold ' + levelClass[entry.level]}>{entry.level}</span>
       <Tooltip label={entry.source}>
         <span className="truncate text-foreground-muted">{entry.source}</span>
@@ -67,7 +73,7 @@ function LogLine({ entry, timeFormat }: { entry: LogEntry; timeFormat: Intl.Date
       </span>
     </div>
   )
-}
+})
 
 // reducedMotion 判断系统是否要求减少动态效果
 function reducedMotion() {
@@ -92,7 +98,7 @@ function RunningStrip({ logs }: { logs: LogEntry[] }) {
           <LoaderCircle size={12} aria-hidden className="shrink-0 animate-spin text-primary" />
           <span className="font-mono">{record.model}</span>
           <span className="text-foreground-muted">{record.account || '—'}</span>
-          <span className="text-foreground tabular-nums">
+          <span className="text-foreground">
             {fill(m.runningFor, {
               time: formatElapsed(now.getTime() - Date.parse(record.time), locale),
             })}
@@ -124,12 +130,8 @@ function savedQuery(
   requestId: string,
   before: number,
 ) {
-  const now = Date.now()
-  const query = new URLSearchParams({
-    from: new Date(now - savedRanges[range]).toISOString(),
-    to: new Date(now + 1000).toISOString(),
-    limit: '100',
-  })
+  const query = rangeQuery(savedRanges[range])
+  query.set('limit', '100')
   if (errorsOnly) query.set('level', 'ERROR')
   if (q.trim()) query.set('q', q.trim())
   if (requestId) query.set('request_id', requestId)
@@ -156,18 +158,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
     initialPageParam: 0,
     getNextPageParam: (last) => last.next_before,
   })
-  const update = (key: string, value: string) => {
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current)
-        if (value) next.set(key, value)
-        else next.delete(key)
-        return next
-      },
-      { replace: true },
-    )
-  }
-  const timeFormat = new Intl.DateTimeFormat(locale, {
+  const timeFormat = dateFormat(locale, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -184,7 +175,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
           label={m.range}
           value={range}
           onValueChange={(value) => {
-            update('range', value === '24h' ? '' : value)
+            changeParams(setParams, { range: value === '24h' ? '' : value })
           }}
           options={[
             { value: '24h', label: m.range24h },
@@ -196,7 +187,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
           label={m.filterLevel}
           value={errorsOnly ? 'ERROR' : 'WARN'}
           onValueChange={(value) => {
-            update('level', value === 'ERROR' ? 'ERROR' : '')
+            changeParams(setParams, { level: value === 'ERROR' ? 'ERROR' : '' })
           }}
           options={[
             { value: 'WARN', label: m.warn },
@@ -208,7 +199,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
             size="sm"
             aria-label={fill(m.clearRequest, { id: requestId })}
             onClick={() => {
-              update('request_id', '')
+              changeParams(setParams, { request_id: '' })
             }}
           >
             <span className="font-mono">{requestId}</span>
@@ -220,7 +211,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
           placeholder={m.searchSaved}
           value={q}
           onChange={(event) => {
-            update('q', event.target.value)
+            changeParams(setParams, { q: event.target.value })
           }}
           className="max-w-field min-w-[200px] flex-[1_1_240px]"
         />
@@ -290,7 +281,7 @@ export function LogsPage() {
     estimateSize: () => 29,
     overscan: 16,
   })
-  const timeFormat = new Intl.DateTimeFormat(locale, {
+  const timeFormat = dateFormat(locale, {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -307,17 +298,6 @@ export function LogsPage() {
     element.scrollTo({ top: element.scrollHeight, behavior })
   }, [follow, visible.length, totalSize])
 
-  const update = (key: string, value: string) => {
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current)
-        if (value && value !== 'all') next.set(key, value)
-        else next.delete(key)
-        return next
-      },
-      { replace: true },
-    )
-  }
   const levelLabels: Record<MinimumLevel, string> = {
     all: m.all,
     INFO: m.info,
@@ -351,9 +331,7 @@ export function LogsPage() {
         client.setQueryData<LogEntry[]>(logsKey, (current) => [...previous, ...(current ?? [])])
         toast({
           tone: 'error',
-          title: fill(m.clearFailed, {
-            message: error instanceof Error ? error.message : String(error),
-          }),
+          title: fill(m.clearFailed, { message: errorMessage(error) }),
         })
       })
     }, 5000)
@@ -387,7 +365,7 @@ export function LogsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-foreground-muted">{m.description}</p>
         <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm text-foreground-muted tabular-nums">
+          <span className="text-sm text-foreground-muted">
             {fill(m.count, { shown: visible.length, total: all.length })}
           </span>
           <label className="flex items-center gap-2 text-sm">
@@ -417,7 +395,7 @@ export function LogsPage() {
             className="max-w-field max-sm:flex-1"
             value={filter.source || 'all'}
             onValueChange={(value) => {
-              update('source', value)
+              changeParams(setParams, { source: value === 'all' ? '' : value })
             }}
             options={[
               { value: 'all', label: m.allSources },
@@ -428,7 +406,7 @@ export function LogsPage() {
             label={m.filterLevel}
             value={filter.level}
             onValueChange={(value) => {
-              update('level', value)
+              changeParams(setParams, { level: value === 'all' ? '' : value })
             }}
             options={(['all', 'INFO', 'WARN', 'ERROR'] as const).map((value) => ({
               value,
@@ -440,7 +418,7 @@ export function LogsPage() {
             placeholder={m.search}
             value={filter.q}
             onChange={(event) => {
-              update('q', event.target.value)
+              changeParams(setParams, { q: event.target.value })
             }}
             className="max-w-field min-w-[200px] flex-[1_1_240px]"
           />

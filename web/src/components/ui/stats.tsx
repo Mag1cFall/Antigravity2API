@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
 // Stat 是统计条中的一项，detail 是一组以中点分隔的短语，换行只发生在两项之间
-export interface Stat {
+interface Stat {
   key: string
   label: string
   value: ReactNode
@@ -41,7 +41,7 @@ export function StatCards({ items }: { items: Stat[] }) {
           className="-mt-px -ml-px flex min-w-0 flex-col gap-1 border-t border-l border-border px-4 py-3 max-lg:last:odd:col-span-2"
         >
           <dt className="min-w-0 text-xs break-words text-foreground-muted">{item.label}</dt>
-          <dd className="text-xl font-semibold break-words tabular-nums">{item.value}</dd>
+          <dd className="text-xl font-semibold break-words">{item.value}</dd>
           {item.detail && item.detail.length > 0 && (
             <dd className="text-xs break-words text-foreground-muted">
               <DotList items={item.detail} />

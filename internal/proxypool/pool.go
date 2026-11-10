@@ -3,7 +3,7 @@ package proxypool
 import (
 	"context"
 	"net/url"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 )
@@ -61,17 +61,17 @@ func (p *Pool) SetProxies(urls []string) {
 		if state == nil {
 			state = &proxyState{url: value, healthy: true}
 		}
-		if !p.contains(state) {
+		if !slices.Contains(p.proxies, state) {
 			p.proxies = append(p.proxies, state)
 		}
 	}
 	orphans := []string{}
 	for id, state := range p.bindings {
-		if !p.contains(state) {
+		if !slices.Contains(p.proxies, state) {
 			orphans = append(orphans, id)
 		}
 	}
-	sort.Strings(orphans)
+	slices.Sort(orphans)
 	for _, id := range orphans {
 		if len(p.proxies) == 0 {
 			delete(p.bindings, id)
@@ -114,21 +114,11 @@ func (p *Pool) rebalance() {
 			return
 		}
 		ids := accounts[most]
-		sort.Strings(ids)
+		slices.Sort(ids)
 		id := ids[len(ids)-1]
 		accounts[most], accounts[least] = ids[:len(ids)-1], append(accounts[least], id)
 		p.bindings[id] = least
 	}
-}
-
-// contains 报告代理是否仍在列表中
-func (p *Pool) contains(target *proxyState) bool {
-	for _, state := range p.proxies {
-		if state == target {
-			return true
-		}
-	}
-	return false
 }
 
 // Assign 返回账户使用的代理：已绑定的代理可用时沿用，否则绑定可用代理中账户最少的一个；全部不可用时保持原绑定，代理池为空时返回空串
@@ -188,7 +178,7 @@ func (p *Pool) Release(accountID string) {
 // Check 以 probe 并行检测全部代理并更新状态
 func (p *Pool) Check(ctx context.Context, probe func(context.Context, string) (time.Duration, error)) {
 	p.mu.Lock()
-	targets := append([]*proxyState(nil), p.proxies...)
+	targets := slices.Clone(p.proxies)
 	p.mu.Unlock()
 	type result struct {
 		latency time.Duration
@@ -229,7 +219,7 @@ func (p *Pool) Status() []Status {
 	result := make([]Status, 0, len(p.proxies))
 	for _, state := range p.proxies {
 		ids := append([]string{}, accounts[state]...)
-		sort.Strings(ids)
+		slices.Sort(ids)
 		result = append(result, Status{
 			URL: Redact(state.url), Healthy: state.healthy, CheckedAt: state.checked,
 			LatencyMS: state.latency.Milliseconds(), Error: state.err, Accounts: ids,

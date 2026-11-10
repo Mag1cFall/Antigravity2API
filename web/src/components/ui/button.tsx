@@ -18,9 +18,7 @@ const buttonVariants = cva(
           'border-primary-border bg-transparent text-primary enabled:hover:bg-primary-soft enabled:active:bg-primary-soft-strong',
         ghost:
           'border-transparent bg-transparent text-foreground enabled:hover:bg-hover enabled:active:bg-nav-active',
-        destructive:
-          'border-destructive bg-destructive text-white enabled:hover:border-destructive-hover enabled:hover:bg-destructive-hover enabled:active:border-destructive-active enabled:active:bg-destructive-active',
-        link: 'h-auto border-transparent px-0 text-primary enabled:hover:text-primary-hover enabled:active:text-primary-active',
+        link: 'border-transparent text-primary enabled:hover:text-primary-hover enabled:active:text-primary-active',
       },
       size: {
         sm: 'h-control-sm px-3 pointer-coarse:h-touch',

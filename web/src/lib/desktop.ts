@@ -16,7 +16,7 @@ function readShell(): string | null {
 export const isDesktop = readShell() === 'desktop'
 
 // WindowAction 是顶栏窗口按钮发给桌面壳的动作
-export type WindowAction = 'minimise' | 'toggle-maximise' | 'close'
+type WindowAction = 'minimise' | 'toggle-maximise' | 'close'
 
 declare global {
   interface Window {

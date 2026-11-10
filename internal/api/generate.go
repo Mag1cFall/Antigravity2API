@@ -14,11 +14,13 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// errIncompleteStream 表示上游事件流没有结束事件就关闭
 var errIncompleteStream = errors.New("upstream stream closed before finish")
-var errUpstreamStream = errors.New("upstream stream error")
 
+// streamHeartbeatInterval 为流式响应的心跳间隔，也是写出响应头前等待首个事件的时长
 const streamHeartbeatInterval = 10 * time.Second
 
+// generationResult 为一次生成的全部事件与从中累积的正文、思考、函数调用、媒体、用量与结束信息
 type generationResult struct {
 	events        []antigravity.Event
 	text          bytes.Buffer
@@ -34,6 +36,7 @@ type generationResult struct {
 	finished      bool
 }
 
+// apply 把一个事件累积进结果，错误事件返回其错误，函数调用的空参数补为空对象
 func (result *generationResult) apply(event antigravity.Event) error {
 	if event.ProviderModel != "" {
 		result.providerModel = event.ProviderModel
@@ -43,10 +46,7 @@ func (result *generationResult) apply(event antigravity.Event) error {
 		result.usage = &usage
 	}
 	if event.Kind == antigravity.EventError {
-		if event.Err != nil {
-			return event.Err
-		}
-		return errUpstreamStream
+		return event.Err
 	}
 	switch event.Kind {
 	case antigravity.EventText:
@@ -54,17 +54,15 @@ func (result *generationResult) apply(event antigravity.Event) error {
 	case antigravity.EventReasoning:
 		result.reasoning.WriteString(event.Text)
 	case antigravity.EventToolCall:
-		if event.ToolCall != nil {
-			call := *event.ToolCall
-			if len(call.Arguments) == 0 {
-				call.Arguments = json.RawMessage(`{}`)
-			}
-			if !json.Valid(call.Arguments) {
-				return fmt.Errorf("upstream tool call %q arguments are not JSON", call.Name)
-			}
-			event.ToolCall = &call
-			result.toolCalls = append(result.toolCalls, call)
+		call := *event.ToolCall
+		if len(call.Arguments) == 0 {
+			call.Arguments = json.RawMessage(`{}`)
 		}
+		if !json.Valid(call.Arguments) {
+			return fmt.Errorf("upstream tool call %q arguments are not JSON", call.Name)
+		}
+		event.ToolCall = &call
+		result.toolCalls = append(result.toolCalls, call)
 	case antigravity.EventMedia:
 		result.media = append(result.media, *event.Media)
 	case antigravity.EventGrounding:
@@ -93,10 +91,7 @@ func awaitStreamStart(ctx context.Context, events <-chan antigravity.Event) (<-c
 			return nil, first, errIncompleteStream
 		}
 		if event.Kind == antigravity.EventError {
-			if event.Err != nil {
-				return nil, first, event.Err
-			}
-			return nil, first, errUpstreamStream
+			return nil, first, event.Err
 		}
 		first = event
 	}
@@ -115,7 +110,8 @@ func awaitStreamStart(ctx context.Context, events <-chan antigravity.Event) (<-c
 }
 
 // consumeEvents 收集全部事件，emit 不为空时逐个交给 emit
-func consumeEvents(ctx context.Context, events <-chan antigravity.Event, emit func(antigravity.Event) error) (result generationResult, resultErr error) {
+func consumeEvents(ctx context.Context, events <-chan antigravity.Event, emit func(antigravity.Event) error) (generationResult, error) {
+	var result generationResult
 	for {
 		select {
 		case <-ctx.Done():
@@ -139,6 +135,32 @@ func consumeEvents(ctx context.Context, events <-chan antigravity.Event, emit fu
 	}
 }
 
+// mergedTextEvents 把相邻、同为正文或同为思考且都不带思考签名的事件合并为一个事件，其余事件原样保留
+func mergedTextEvents(events []antigravity.Event) []antigravity.Event {
+	merged := make([]antigravity.Event, 0, len(events))
+	var text strings.Builder
+	open := false
+	flush := func() {
+		if open {
+			merged[len(merged)-1].Text = text.String()
+			text.Reset()
+		}
+	}
+	for _, event := range events {
+		mergeable := (event.Kind == antigravity.EventText || event.Kind == antigravity.EventReasoning) && event.ThoughtSignature == ""
+		if !mergeable || !open || merged[len(merged)-1].Kind != event.Kind {
+			flush()
+			merged = append(merged, event)
+			open = mergeable
+		}
+		if mergeable {
+			text.WriteString(event.Text)
+		}
+	}
+	flush()
+	return merged
+}
+
 // renderedText 按事件顺序拼接正文与媒体 Markdown，媒体前后各起一行
 func renderedText(events []antigravity.Event, media mediaOutput) string {
 	var content strings.Builder
@@ -156,18 +178,9 @@ func renderedText(events []antigravity.Event, media mediaOutput) string {
 	return content.String()
 }
 
+// outputTokens 返回含思考在内的输出 token 数
 func outputTokens(usage *antigravity.Usage) int64 {
-	if usage == nil {
-		return 0
-	}
 	return usage.OutputTokens + usage.ReasoningTokens
-}
-
-func inputTokens(usage *antigravity.Usage) int64 {
-	if usage == nil {
-		return 0
-	}
-	return usage.InputTokens
 }
 
 // clientSession 返回请求的会话标识：通过校验的 API key 与 values 中首个非空的客户端会话标识，以 NUL 相连

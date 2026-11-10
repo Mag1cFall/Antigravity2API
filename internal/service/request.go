@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -330,7 +331,7 @@ func renameFunctions(request antigravity.GenerateRequest, claude bool) (antigrav
 	if len(renamed) == 0 {
 		return request, nil
 	}
-	rename := func(name string) string { return cmpName(renamed[name], name) }
+	rename := func(name string) string { return cmp.Or(renamed[name], name) }
 	request.Tools.Functions = slices.Clone(request.Tools.Functions)
 	for index := range request.Tools.Functions {
 		request.Tools.Functions[index].Name = rename(request.Tools.Functions[index].Name)
@@ -346,12 +347,4 @@ func renameFunctions(request antigravity.GenerateRequest, claude bool) (antigrav
 		}
 	}
 	return request, original
-}
-
-// cmpName 返回改名后的名称，没有改名时返回原名
-func cmpName(renamed, name string) string {
-	if renamed != "" {
-		return renamed
-	}
-	return name
 }

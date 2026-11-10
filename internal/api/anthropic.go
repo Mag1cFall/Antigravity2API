@@ -12,6 +12,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// anthropicRequest 为 Messages 请求中服务使用的字段
 type anthropicRequest struct {
 	Model         string             `json:"model"`
 	Messages      []anthropicMessage `json:"messages"`
@@ -67,11 +68,13 @@ func (request anthropicRequest) session() string {
 	return userID
 }
 
+// anthropicMessage 为一条消息，content 为字符串或内容块数组
 type anthropicMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
 }
 
+// anthropicTool 为工具定义，Options 为 type、name、description 与 input_schema 之外的字段
 type anthropicTool struct {
 	Type        string                     `json:"type"`
 	Name        string                     `json:"name"`
@@ -80,6 +83,7 @@ type anthropicTool struct {
 	Options     map[string]json.RawMessage `json:"-"`
 }
 
+// UnmarshalJSON 读取工具定义并把其余字段收进 Options
 func (tool *anthropicTool) UnmarshalJSON(data []byte) error {
 	type knownTool anthropicTool
 	var known knownTool
@@ -99,6 +103,7 @@ func (tool *anthropicTool) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// anthropicContentBlock 为响应中的内容块
 type anthropicContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
@@ -113,6 +118,7 @@ type anthropicContentBlock struct {
 	Data      string          `json:"data,omitempty"`
 }
 
+// handleAnthropicMessages 处理 Messages 请求，按 stream 返回 Message 或事件流
 func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	var request anthropicRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -193,6 +199,7 @@ func (request anthropicRequest) thinkingBlocks() (bool, bool) {
 	return true, request.Thinking.Display == "omitted"
 }
 
+// handleAnthropicCountTokens 返回 Messages 请求的输入 token 数
 func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request) {
 	var request anthropicRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -226,6 +233,7 @@ func (s *server) anthropicGenerateRequest(r *http.Request, request anthropicRequ
 	return generateRequest, inlineRemoteMedia(r.Context(), generateRequest.Contents)
 }
 
+// toGenerateRequest 把 Messages 请求转换为生成请求
 func (request anthropicRequest) toGenerateRequest(id string) (antigravity.GenerateRequest, error) {
 	if request.Thinking != nil {
 		switch request.Thinking.Type {
@@ -316,6 +324,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 	}, nil
 }
 
+// anthropicSystemText 返回 system 的文本，text 块数组以换行相连
 func anthropicSystemText(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return "", nil
@@ -392,6 +401,7 @@ func anthropicSystemMessage(raw json.RawMessage, declared []anthropicTool, known
 	return strings.Join(texts, "\n"), declared, nil
 }
 
+// anthropicRole 把 user 与 assistant 换成上游角色
 func anthropicRole(role string) (antigravity.Role, error) {
 	switch role {
 	case "user":
@@ -591,6 +601,7 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 	return parts, nil
 }
 
+// mapAnthropicTools 转换工具与 tool_choice：客户端工具与自定义工具为函数声明，web_search 为 Google 搜索，其余服务端工具不声明
 func mapAnthropicTools(tools []anthropicTool, choice json.RawMessage) (antigravity.Tools, error) {
 	var mapped antigravity.Tools
 	for _, tool := range tools {
@@ -708,6 +719,7 @@ func anthropicComputerTool(typeName string, width, height int64, zoom bool) (str
 	return description, parameters
 }
 
+// anthropicToolChoice 把 tool_choice 转换为工具配置，省略时为 auto
 func anthropicToolChoice(raw json.RawMessage) (antigravity.ToolConfig, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return antigravity.ToolConfig{Mode: "auto"}, nil
@@ -790,11 +802,12 @@ func anthropicBlocks(id string, result generationResult, thinking, omitted bool,
 			blocks = append(blocks, anthropicContentBlock{Type: "redacted_thinking", Data: signature})
 		}
 	}
-	for _, event := range result.events {
+	mediaBlock := -1
+	for _, event := range mergedTextEvents(result.events) {
 		switch event.Kind {
 		case antigravity.EventText:
-			if len(blocks) > 0 && blocks[len(blocks)-1].Type == "text" {
-				blocks[len(blocks)-1].Text += event.Text
+			if last := len(blocks) - 1; last >= 0 && last != mediaBlock && blocks[last].Type == "text" {
+				blocks[last].Text += event.Text
 			} else {
 				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: event.Text})
 			}
@@ -810,14 +823,13 @@ func anthropicBlocks(id string, result generationResult, thinking, omitted bool,
 		case antigravity.EventThoughtSignature:
 			sign(event.ThoughtSignature)
 		case antigravity.EventMedia:
+			mediaBlock = len(blocks)
 			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: media.markdown(*event.Media)})
 		case antigravity.EventToolCall:
-			if event.ToolCall != nil {
-				sign(event.ToolCall.ThoughtSignature)
-				blocks = append(blocks, anthropicContentBlock{
-					Type: "tool_use", ID: event.ToolCall.ID, Name: event.ToolCall.Name, Input: event.ToolCall.Arguments,
-				})
-			}
+			sign(event.ToolCall.ThoughtSignature)
+			blocks = append(blocks, anthropicContentBlock{
+				Type: "tool_use", ID: event.ToolCall.ID, Name: event.ToolCall.Name, Input: event.ToolCall.Arguments,
+			})
 		case antigravity.EventGrounding:
 			position := slices.IndexFunc(blocks, func(block anthropicContentBlock) bool { return block.Type == "text" })
 			if position < 0 {
@@ -841,6 +853,7 @@ func serverToolID(messageID string) string {
 	return "srvtoolu_" + strings.TrimPrefix(messageID, "msg_")
 }
 
+// anthropicStop 把结束原因换成 stop_reason：输出上限、停止序列与 pause_turn 原样对应，内容过滤为 refusal，其余在有函数调用时为 tool_use，否则为 end_turn
 func anthropicStop(reason string, hasTools bool) string {
 	normalized := strings.ToLower(strings.TrimSpace(reason))
 	switch normalized {
@@ -861,9 +874,10 @@ func anthropicStop(reason string, hasTools bool) string {
 	}
 }
 
+// anthropicUsage 返回 usage，input_tokens 不含缓存命中的 token
 func anthropicUsage(usage *antigravity.Usage) map[string]any {
 	return map[string]any{
-		"input_tokens":                inputTokens(usage) - usage.CachedTokens,
+		"input_tokens":                usage.InputTokens - usage.CachedTokens,
 		"cache_creation_input_tokens": 0,
 		"cache_read_input_tokens":     usage.CachedTokens,
 		"output_tokens":               outputTokens(usage),
@@ -932,6 +946,7 @@ type anthropicStreamWriter struct {
 	media     mediaOutput
 }
 
+// streamAnthropic 把事件逐个写成 Messages 流，只声明搜索时先暂存正文直到搜索来源到达，中途失败时写出 error 事件
 func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter, events <-chan antigravity.Event) {
 	emit, release := writer.live, func() error { return nil }
 	if writer.search {
@@ -947,6 +962,7 @@ func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter,
 	_ = writer.finish(result)
 }
 
+// emit 写出一个具名 SSE 事件
 func (writer *anthropicStreamWriter) emit(eventType string, payload any) error {
 	return writeSSE(writer.w, eventType, payload)
 }
@@ -1037,9 +1053,6 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 		}
 		return writer.closeBlock()
 	case antigravity.EventToolCall:
-		if event.ToolCall == nil {
-			return nil
-		}
 		call := event.ToolCall
 		if err := writer.sign(call.ThoughtSignature); err != nil {
 			return err
@@ -1087,6 +1100,7 @@ func (writer *anthropicStreamWriter) sign(signature string) error {
 	return nil
 }
 
+// ensureBlock 在当前块不是 blockType 时关闭当前块并开始一个 text 或 thinking 块
 func (writer *anthropicStreamWriter) ensureBlock(blockType string) error {
 	if writer.currentBlock == blockType {
 		return nil
@@ -1109,6 +1123,7 @@ func (writer *anthropicStreamWriter) ensureBlock(blockType string) error {
 	return nil
 }
 
+// closeBlock 结束当前块：text 块先写出引用，thinking 块先写出签名
 func (writer *anthropicStreamWriter) closeBlock() error {
 	if writer.currentBlock == "" {
 		return nil
@@ -1143,6 +1158,7 @@ func (writer *anthropicStreamWriter) closeBlock() error {
 	return nil
 }
 
+// finish 结束当前块并写出 message_delta 与 message_stop
 func (writer *anthropicStreamWriter) finish(result generationResult) error {
 	if err := writer.closeBlock(); err != nil {
 		return err
@@ -1171,6 +1187,7 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 	return writer.emit("message_stop", map[string]string{"type": "message_stop"})
 }
 
+// error 写出 error 事件
 func (writer *anthropicStreamWriter) error(err error) error {
 	return writer.emit("error", map[string]any{
 		"type":  "error",

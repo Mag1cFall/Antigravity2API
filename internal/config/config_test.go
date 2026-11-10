@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,8 +31,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	cfg.APIKeys = []string{"sk-one", "sk-two"}
 	cfg.Proxy = "socks5://user:pass@127.0.0.1:1080"
 	cfg.SystemPrompt = "custom"
-	cfg.SystemPromptSections = []string{"identity", "skills"}
-	cfg.SystemPromptWrap = "none"
+	cfg.SystemPromptTemplate = "Line one\n  {{.Client}}\n"
+	cfg.SystemPromptUserTemplate = ""
 	cfg.PreferLowerTierModels = []string{"gemini-3.8-flash", "gpt-oss-120b"}
 	cfg.LogLevel = "debug"
 	cfg.LogFile = false
@@ -50,6 +51,24 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if changed := cfg.Changed(loaded); len(changed) != 0 {
 		t.Fatalf("读回后不同的项: %v", changed)
+	}
+}
+
+// TestSaveLoadLongTemplate 验证 100 KB 的自定义模板保存后读回同一文本
+func TestSaveLoadLongTemplate(t *testing.T) {
+	isolateEnv(t)
+	path := filepath.Join(t.TempDir(), ".env")
+	cfg := Default()
+	cfg.SystemPromptTemplate = strings.Repeat("Follow the project rules.\n", 4000)
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SystemPromptTemplate != cfg.SystemPromptTemplate {
+		t.Fatalf("读回 %d 字符，保存 %d 字符", len(loaded.SystemPromptTemplate), len(cfg.SystemPromptTemplate))
 	}
 }
 
@@ -82,19 +101,19 @@ func TestLoadDefaultsAndEnvOverride(t *testing.T) {
 // TestValidateRejects 验证各类无效配置被拒绝
 func TestValidateRejects(t *testing.T) {
 	cases := map[string]func(*Config){
-		"监听地址无端口":  func(c *Config) { c.Listen = "127.0.0.1" },
-		"代理协议无效":   func(c *Config) { c.Proxy = "ftp://127.0.0.1:21" },
-		"未知系统提示档位": func(c *Config) { c.SystemPrompt = "none" },
-		"自定义档段名无效": func(c *Config) { c.SystemPromptSections = []string{"identity", "tools"} },
-		"自定义档包装无效": func(c *Config) { c.SystemPromptWrap = "partial" },
-		"额度刷新间隔过短": func(c *Config) { c.QuotaRefreshInterval = 30 * time.Second },
-		"并发为零":     func(c *Config) { c.AccountConcurrency = 0 },
-		"未知日志级别":   func(c *Config) { c.LogLevel = "trace" },
-		"日志总量过小":   func(c *Config) { c.LogMaxTotalMB = 10 },
-		"未知调度策略":   func(c *Config) { c.RoutingStrategy = "random" },
-		"超时为零":     func(c *Config) { c.RequestTimeout = 0 },
-		"未知日志格式":   func(c *Config) { c.LogFormat = "xml" },
-		"开启登录缺密码":  func(c *Config) { c.AdminAuthEnabled = true },
+		"监听地址无端口":    func(c *Config) { c.Listen = "127.0.0.1" },
+		"代理协议无效":     func(c *Config) { c.Proxy = "ftp://127.0.0.1:21" },
+		"未知系统提示档位":   func(c *Config) { c.SystemPrompt = "none" },
+		"自定义档模板字段无效": func(c *Config) { c.SystemPromptTemplate = "{{.Tools}}" },
+		"自定义档模板语法无效": func(c *Config) { c.SystemPromptUserTemplate = "{{if .First}}" },
+		"额度刷新间隔过短":   func(c *Config) { c.QuotaRefreshInterval = 30 * time.Second },
+		"并发为零":       func(c *Config) { c.AccountConcurrency = 0 },
+		"未知日志级别":     func(c *Config) { c.LogLevel = "trace" },
+		"日志总量过小":     func(c *Config) { c.LogMaxTotalMB = 10 },
+		"未知调度策略":     func(c *Config) { c.RoutingStrategy = "random" },
+		"超时为零":       func(c *Config) { c.RequestTimeout = 0 },
+		"未知日志格式":     func(c *Config) { c.LogFormat = "xml" },
+		"开启登录缺密码":    func(c *Config) { c.AdminAuthEnabled = true },
 	}
 	for name, mutate := range cases {
 		cfg := Default()

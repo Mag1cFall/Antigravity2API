@@ -6,13 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/Mag1cFall/Antigravity2API/internal/api"
+	"github.com/Mag1cFall/Antigravity2API/internal/sqlitedb"
 )
 
 const schema = `
@@ -29,13 +27,9 @@ func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	options := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)"}}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?"+options.Encode())
+	db, err := sqlitedb.Open(path, schema)
 	if err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(schema); err != nil {
-		return nil, errors.Join(fmt.Errorf("初始化续接状态库: %w", err), db.Close())
+		return nil, fmt.Errorf("初始化续接状态库: %w", err)
 	}
 	return &DB{db: db}, nil
 }

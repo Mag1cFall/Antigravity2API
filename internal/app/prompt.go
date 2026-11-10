@@ -1,25 +1,36 @@
 package app
 
 import (
-	"cmp"
 	"net/http"
 
-	"github.com/Mag1cFall/Antigravity2API/internal/config"
 	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
 )
 
-// getPromptPreview 以预览数据渲染档位的系统指令与首轮 user 消息并列出全部官方段；tier、sections 与 wrap 未给出时取实时配置
-func (s *server) getPromptPreview(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	cfg := s.live.Load()
-	custom := prompt.Custom{Sections: cfg.SystemPromptSections, Wrap: cfg.SystemPromptWrap}
-	if query.Has("sections") {
-		custom.Sections = config.SplitList(query.Get("sections"))
+// promptTemplates 为内置三档的模板与全部官方段的原文
+type promptTemplates struct {
+	Tiers    map[prompt.Tier]prompt.Custom `json:"tiers"`
+	Sections []prompt.Section              `json:"sections"`
+}
+
+// promptPreviewRequest 为预览请求：档位，自定义档另带 system 模板与 user 模板
+type promptPreviewRequest struct {
+	Tier prompt.Tier `json:"tier"`
+	prompt.Custom
+}
+
+// getPromptTemplates 返回内置三档的模板与按官方顺序排列的官方段原文
+func (s *server) getPromptTemplates(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, promptTemplates{Tiers: prompt.Builtins, Sections: prompt.Sections})
+}
+
+// previewPrompt 以预览数据渲染档位的系统指令与首轮 user 消息，自定义档用请求中的模板
+func (s *server) previewPrompt(w http.ResponseWriter, r *http.Request) {
+	var request promptPreviewRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
 	}
-	if query.Has("wrap") {
-		custom.Wrap = query.Get("wrap")
-	}
-	preview, err := prompt.Render(prompt.Tier(cmp.Or(query.Get("tier"), cfg.SystemPrompt)), custom)
+	preview, err := prompt.Render(request.Tier, request.Custom)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_prompt", err.Error())
 		return

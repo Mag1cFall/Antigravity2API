@@ -5,7 +5,7 @@ import type { Settings } from '@/features/settings/types'
 import { api } from '@/lib/api'
 
 // settingsKey 是设置的查询键
-export const settingsKey = ['settings']
+const settingsKey = ['settings']
 
 // useSettings 读取 .env 中的设置
 export function useSettings() {

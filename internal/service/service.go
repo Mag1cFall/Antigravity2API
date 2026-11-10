@@ -86,7 +86,7 @@ type Service struct {
 	saving sync.Mutex
 }
 
-// composerCache 表示按档位与自定义档选项缓存的 Composer，key 由档位、段名与包装方式组成
+// composerCache 表示按档位与自定义档模板缓存的 Composer，key 由档位、system 模板与 user 模板组成
 type composerCache struct {
 	key      string
 	composer *prompt.Composer
@@ -329,7 +329,7 @@ func pace(ctx context.Context) error {
 	}
 }
 
-// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，结束时结束启动期间的等待，初始化尚未就绪、账户代理已变或重新登录过的启用账户：相邻两个账户的初始化相隔 pace 开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度
+// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，结束时结束启动期间的等待，初始化尚未就绪、账户代理已变或重新登录过的启用账户：相邻两个账户的初始化相隔 pace 开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度，已删除账户的目录与 Hub 状态文件随之删除
 func (s *Service) Refresh(ctx context.Context) error {
 	defer s.markLaunched()
 	records := s.store.Accounts()
@@ -403,7 +403,26 @@ func (s *Service) Refresh(ctx context.Context) error {
 			delete(s.quotas, id)
 		}
 	}
+	s.forget()
 	return errors.Join(errs...)
+}
+
+// forget 删除不在账户库中的账户的目录缓存及其留在 RUNTIME_DIR/catalogs 与 hub 的文件，调用方持有 s.mu
+func (s *Service) forget() {
+	for _, name := range []string{"catalogs", "hub"} {
+		dir := filepath.Join(s.live.Load().RuntimeDir, name)
+		entries, _ := os.ReadDir(dir)
+		for _, entry := range entries {
+			id, ok := strings.CutSuffix(entry.Name(), ".json")
+			if _, known := s.store.Account(id); !ok || known {
+				continue
+			}
+			delete(s.catalogs, id)
+			if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+				slog.Warn("删除已移除账户的运行数据失败 | 错误="+err.Error(), "source", id)
+			}
+		}
+	}
 }
 
 // Verify 重新初始化一个启用账户，需要验证或初始化失败的账户由此恢复调度
@@ -676,11 +695,11 @@ func (s *Service) configure(cfg *config.Config) {
 	s.pool.Reserve(float64(cfg.QuotaReservePercent) / 100)
 }
 
-// composer 返回实时配置档位对应的 Composer，档位或自定义档的段与包装方式变化时重建
+// composer 返回实时配置档位对应的 Composer，档位或自定义档的模板变化时重建
 func (s *Service) composer(cfg *config.Config) (*prompt.Composer, error) {
 	tier := prompt.Tier(cfg.SystemPrompt)
-	custom := prompt.Custom{Sections: cfg.SystemPromptSections, Wrap: cfg.SystemPromptWrap}
-	key := string(tier) + "|" + strings.Join(custom.Sections, ",") + "|" + custom.Wrap
+	custom := prompt.Custom{System: cfg.SystemPromptTemplate, User: cfg.SystemPromptUserTemplate}
+	key := string(tier) + "\x00" + custom.System + "\x00" + custom.User
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.prompt.composer != nil && s.prompt.key == key {

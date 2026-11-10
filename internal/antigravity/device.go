@@ -62,13 +62,13 @@ func (d Device) WithAccount(email string) Device {
 
 // spaced 返回档案系统的官方 language_server 的 protojson 是否在结构逗号后加空格：protobuf detrand 以构建号为种子，构建号为奇数时加
 func (d Device) spaced() bool {
-	changelist, _ := strconv.Atoi(changelists[d.OS])
+	changelist, _ := strconv.Atoi(changelists[d.OS+"/"+d.Arch])
 	return changelist%2 == 1
 }
 
 // UserAgent 返回官方客户端在档案的系统与架构上发送的 User-Agent
 func (d Device) UserAgent() string {
-	return fmt.Sprintf("antigravity/hub/%s (aidev_client; os_type=%s; arch=%s; cl=%s)", ClientVersion, d.OS, d.Arch, changelists[d.OS])
+	return fmt.Sprintf("antigravity/hub/%s (aidev_client; os_type=%s; arch=%s; cl=%s)", ClientVersion, d.OS, d.Arch, changelists[d.OS+"/"+d.Arch])
 }
 
 // Hostname 返回由 installation_id 确定的主机名：Windows 为系统默认的 DESKTOP-加 7 位字母数字，macOS 为“用户名s-MacBook-Pro.local”，Linux 为“用户名-pc”
@@ -81,14 +81,6 @@ func (d Device) Hostname() string {
 		return d.UserName + "s-MacBook-Pro.local"
 	}
 	return d.UserName + "-pc"
-}
-
-// unleashInstance 返回 unleash 客户端库默认的 instanceId：系统用户名（Windows 带主机名前缀）、连字符与主机名
-func (d Device) unleashInstance() string {
-	if d.OS == "windows" {
-		return d.Hostname() + `\` + d.UserName + "-" + d.Hostname()
-	}
-	return d.UserName + "-" + d.Hostname()
 }
 
 // Location 返回档案时区，无法解析的值按 UTC

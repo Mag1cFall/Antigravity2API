@@ -12,11 +12,9 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,16 +22,6 @@ import (
 )
 
 const (
-	// unleashURL 为官方 language_server 功能开关服务的客户端接口
-	unleashURL = "https://antigravity-unleash.goog/api/client"
-	// unleashToken 为官方 language_server 内置的 unleash 客户端令牌
-	unleashToken = "*:production.e44558998bfc35ea9584dc65858e4485fdaa5d7ef46903e0c67712d1"
-	// unleashApp 为 unleash 的 appName 与请求 User-Agent
-	unleashApp = "codeium-language-server"
-	// unleashSDK 为官方 language_server 所用 unleash 客户端库的版本
-	unleashSDK = "unleash-client-go:4.5.0"
-	// unleashSpec 为 unleash 客户端规范版本
-	unleashSpec = "4.3.1"
 	// endpointTokeninfo 为冷启动时查询 access token 的接口
 	endpointTokeninfo = "https://www.googleapis.com/oauth2/v3/tokeninfo"
 	// endpointClearcut 为 clearcut 日志上报接口
@@ -47,17 +35,17 @@ const (
 )
 
 const (
-	// pollPeriod 为 unleash、listExperiments 与 fetchConfig 的轮询周期
+	// pollPeriod 为 listExperiments 与 fetchConfig 的轮询周期
 	pollPeriod = time.Minute
 	// pollOffset 为实验轮询相对虚拟进程启动后整分钟的偏移
-	pollOffset = 700 * time.Millisecond
+	pollOffset = 55 * time.Millisecond
 	// nuxPeriod 为 cascadeNuxes 的轮询周期
 	nuxPeriod = 2 * time.Minute
-	// accountRounds 为套餐、目录、资料、设置与头像随实验轮询刷新的间隔轮数
+	// accountRounds 为套餐与目录随实验轮询刷新的间隔轮数
 	accountRounds = 6
 )
 
-// companionState 表示伴随请求所需的账户状态：套餐、地区、遥测开关、标题模型、目录的实验 ID、最近一次实验与配置的响应和耗时、是否发出过 fetchConfig与最近一次 fetchConfig 的错误文本
+// companionState 表示伴随请求所需的账户状态：套餐、地区、遥测开关、标题模型、目录的实验 ID、最近一次实验与配置的响应和耗时、是否发出过 fetchConfig、最近一次 fetchConfig 的错误文本与实验是否已改以 fetchConfig 为准
 type companionState struct {
 	tier               string
 	region             string
@@ -70,6 +58,7 @@ type companionState struct {
 	aicodeLatency      time.Duration
 	configured         bool
 	aicodeError        string
+	mendel             bool
 	reported           int
 }
 
@@ -152,10 +141,14 @@ func configError(err error) string {
 	return ""
 }
 
-// configure 发出一轮实验中 listExperiments 之后的请求：routed 为真时以 fetchConfig 为准，失败才改发 listExperiments；否则只在本轮 listExperiments 成功（listed）时发 fetchConfig 作对照，返回是否发出了对照
+// configure 发出一轮实验中 listExperiments 之后的请求：routed 为真时以 fetchConfig 为准，成功后事件的实验开关与实验 ID 改取 fetchConfig，失败才改发 listExperiments 并改回取 listExperiments；否则只在本轮 listExperiments 成功（listed）时发 fetchConfig 作对照，返回是否发出了对照
 func (c *Client) configure(ctx context.Context, routed, listed bool) bool {
 	if routed {
-		if c.fetchConfig(ctx) != nil {
+		err := c.fetchConfig(ctx)
+		c.mu.Lock()
+		c.state.mendel = err == nil
+		c.mu.Unlock()
+		if err != nil {
 			c.listExperiments(ctx)
 		}
 		return false
@@ -237,74 +230,10 @@ type refresher interface {
 	Refresh() (*oauth2.Token, error)
 }
 
-// coldRound 记录冷启动第二轮中第三次 loadCodeAssist 的进度：started 为它是否已发出，assist 在它结束或第二轮放弃时关闭
-type coldRound struct {
-	started   atomic.Bool
-	assist    chan struct{}
-	endAssist func()
-}
+// coldDelays 为冷启动第一次 loadCodeAssist 结束到 fetchUserInfo 与 listExperiments 发出的毫秒数，官方 2.30.0 的 15 次冷启动各列一次
+var coldDelays = [][2]int{{351, 217}, {455, 370}, {208, 443}, {149, 227}, {417, 338}, {189, 219}, {260, 261}, {212, 313}, {227, 451}, {61, 174}, {203, 202}, {331, 330}, {214, 422}, {94, 187}, {213, 214}}
 
-// newColdRound 返回尚未发出请求的第二轮进度
-func newColdRound() *coldRound {
-	round := &coldRound{assist: make(chan struct{})}
-	round.endAssist = sync.OnceFunc(func() { close(round.assist) })
-	return round
-}
-
-// pending 在第二轮已发出时等待 done 关闭，尚未发出时立即返回
-func (r *coldRound) pending(ctx context.Context, done chan struct{}) error {
-	if !r.started.Load() {
-		return nil
-	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// coldOrders 为冷启动第一次 loadCodeAssist 之后 fetchUserInfo 与 listExperiments 的先后：s 先 fetchUserInfo、结束 41–51 ms 后 listExperiments，c 两者同时发出，l 先 listExperiments、结束 4–59 ms 后 fetchUserInfo；按官方 2.28.1 的 7 次冷启动中出现的次数各列一次
-var coldOrders = []byte{'s', 's', 's', 's', 'c', 'l', 'l'}
-
-const (
-	// userinfoFresh 为冷启动中 userinfo 的复用时长：进行中或在此时长内结束时另一路不再发出
-	userinfoFresh = 450 * time.Millisecond
-)
-
-// sharedRead 记录冷启动中一种账户资料读取的进度，供两路请求合并，ended 为最近一次读取结束的时刻
-type sharedRead struct {
-	mu      sync.Mutex
-	running bool
-	ended   time.Time
-}
-
-// begin 在没有进行中的读取且上次读取不在 fresh 内结束时标记读取开始并返回 true
-func (s *sharedRead) begin(fresh time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.running || !s.ended.IsZero() && time.Since(s.ended) < fresh {
-		return false
-	}
-	s.running = true
-	return true
-}
-
-// busy 返回是否有进行中的读取
-func (s *sharedRead) busy() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.running
-}
-
-// end 记下读取结束的时刻
-func (s *sharedRead) end() {
-	s.mu.Lock()
-	s.running, s.ended = false, time.Now()
-	s.mu.Unlock()
-}
-
-// ColdStart 按官方客户端 2.28.1 以已保存账户启动时的请求与并发关系完成初始化，不发 prod loadCodeAssist、fetchAdminControls 与额度摘要：tokeninfo 与第一次 loadCodeAssist 并发，access token 已过期时两路各自刷新、tokeninfo 之后再刷新一次；第一次 loadCodeAssist 结束 43–63 ms 后按 coldOrders 发 fetchUserInfo 与 listExperiments，fetchUserInfo 结束 47–53 ms 后记录 Hub 存储加载事件，同时读 userinfo 与头像；listExperiments 之后第一次 fetchConfig 与目录并发，目录结束 50–66 ms 后第二轮实验请求；tokeninfo 结束 60–80 ms 后发第二次 loadCodeAssist，其后 userinfo 与第三次 loadCodeAssist 并发，第三次之后 fetchUserInfo；userinfo 在另一路进行中或 userinfoFresh 内结束时不发，第三次 loadCodeAssist 发出时第一次 fetchUserInfo 仍在进行则第三次之后不发 fetchUserInfo，否则在第三次结束 51–56 ms 后再发；目录在第三次 loadCodeAssist 进行中时等它结束再发；第一次 listExperiments 的 use-aicode-mendel 开启时第二轮改为先 fetchConfig、失败才 listExperiments，listExperiments 失败的那一轮不发 fetchConfig；全部请求结束后由 settle 记录对照事件与迁移组；只有 token、loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
+// ColdStart 按官方客户端 2.30.0 以已保存账户启动时的请求与并发关系完成初始化，不发 prod loadCodeAssist、fetchAdminControls 与额度摘要：tokeninfo 与第一次 loadCodeAssist 并发，access token 已过期时两路各自刷新、tokeninfo 之后再刷新一次；第一次 loadCodeAssist 结束 47–65 ms 后读目录，并按 coldDelays 发 fetchUserInfo 与 listExperiments；fetchUserInfo 结束 43–64 ms 后记录 Hub 存储加载事件，再过 38–59 ms 记录启动耗时；listExperiments 结束 122–195 ms 后发一次 fetchConfig 作对照，listExperiments 失败时不发；tokeninfo 结束 177–369 ms 后发第二次 loadCodeAssist，它结束时第一次仍在进行则不发第三次，否则在 43–59 ms 后且不早于 fetchUserInfo 发出后 80–145 ms 发第三次，第三次发出时 fetchUserInfo 已结束则在第三次结束 49–59 ms 后再发一次 fetchUserInfo；迁移组在目录读取结束 15–49 ms 后记录，对照事件在 fetchConfig 结束 3–15 ms 后记录，两者都不早于 ready：启动耗时事件之后 1–7 ms，发过第二次 fetchUserInfo 时为它结束 49–59 ms 后，对照事件再晚 1–2 ms；fetchUserInfo 与第二次 loadCodeAssist 中先结束的一个之后 165–292 ms 读 userinfo，其后 190–587 ms 读头像，头像不计入初始化；只有 token、loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
 func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 	source, renew := c.source.(refresher)
 	renew = renew && source.Stale()
@@ -314,170 +243,174 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 		}
 	}
 	var result Initialization
-	var users, settings sharedRead
-	var configured, experimented time.Time
-	user := optional(func() error {
-		if !users.begin(userinfoFresh) {
-			return nil
+	var settings, ready, refetched time.Time
+	checked, assisted, read, reloaded := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	endRead, endReload := sync.OnceFunc(func() { close(read) }), sync.OnceFunc(func() { close(reloaded) })
+	booted, finished, settled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	endBoot := sync.OnceFunc(func() { close(booted) })
+	record := func(at time.Time, slack int, event func()) error {
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		profile, err := c.Userinfo(ctx)
-		if err != nil {
-			users.end()
+		if floor := ready.Add(time.Duration(slack) * time.Millisecond); at.Before(floor) {
+			at = floor
+		}
+		if err := until(ctx, at); err != nil {
 			return err
 		}
-		result.User = profile
-		users.end()
-		c.avatar(ctx, profile.Picture)
+		event()
 		return nil
-	})
-	refetch := optional(func() error {
-		_, err := c.FetchUserInfo(ctx)
-		return err
-	})
-	round := newColdRound()
-	checked := make(chan struct{})
-	err := parallel(func() error {
+	}
+	check := func() error {
 		defer close(checked)
 		return c.checkToken(ctx, source, renew)
-	}, func() (err error) {
+	}
+	first := func() (err error) {
+		defer endRead()
+		defer endBoot()
 		if renew {
-			if _, err := source.Refresh(); err != nil {
+			_, err = source.Refresh()
+		}
+		if err == nil {
+			result.Assist, err = c.LoadCodeAssist(ctx, EndpointDaily)
+		}
+		delays := coldDelays[between(0, len(coldDelays)-1)]
+		ended := time.Now()
+		settings = ended.Add(time.Duration(delays[0]) * time.Millisecond)
+		close(assisted)
+		if err != nil {
+			return err
+		}
+		return parallel(func() (err error) {
+			if err := pause(ctx, 47, 65); err != nil {
 				return err
 			}
-		}
-		if result.Assist, err = c.LoadCodeAssist(ctx, EndpointDaily); err != nil {
-			return err
-		}
-		if err := pause(ctx, 43, 63); err != nil {
-			return err
-		}
-		order := coldOrders[between(0, len(coldOrders)-1)]
-		read, listing := make(chan struct{}), make(chan struct{})
-		after := func(done chan struct{}, low, high int) error {
-			select {
-			case <-done:
-			case <-ctx.Done():
-				return ctx.Err()
+			if result.Catalog, err = c.FetchAvailableModels(ctx); err != nil {
+				return err
 			}
-			return pause(ctx, low, high)
-		}
-		return parallel(func() error {
-			if order == 'l' {
-				if err := after(listing, 4, 59); err != nil {
-					return err
-				}
-			}
-			settings.begin(0)
-			var err error
-			result.Settings, err = c.FetchUserInfo(ctx)
-			settings.end()
-			close(read)
-			time.AfterFunc(time.Duration(between(47, 53))*time.Millisecond, c.hubLoaded)
-			if err != nil {
-				return nil
-			}
-			return user()
+			c.recordCatalog(result.Catalog)
+			return record(time.Now().Add(time.Duration(between(15, 49))*time.Millisecond), 0, c.hubMigrations)
 		}, func() error {
-			if order == 's' {
-				if err := after(read, 41, 51); err != nil {
-					return err
-				}
+			if err := until(ctx, settings); err != nil {
+				return err
 			}
-			listed := c.listExperiments(ctx) == nil
-			close(listing)
-			return parallel(func() error {
-				if c.configure(ctx, false, listed) {
-					configured = time.Now()
-				}
+			result.Settings, _ = c.FetchUserInfo(ctx)
+			endRead()
+			if err := pause(ctx, 43, 64); err != nil {
+				return err
+			}
+			c.hubLoaded()
+			if err := pause(ctx, 38, 59); err != nil {
+				return err
+			}
+			ready = c.hubStarted().Add(time.Duration(between(1, 7)) * time.Millisecond)
+			endBoot()
+			return nil
+		}, func() error {
+			if err := until(ctx, ended.Add(time.Duration(delays[1])*time.Millisecond)); err != nil {
+				return err
+			}
+			if c.listExperiments(ctx) != nil {
 				return nil
-			}, func() (err error) {
-				if err := round.pending(ctx, round.assist); err != nil {
-					return err
-				}
-				if result.Catalog, err = c.FetchAvailableModels(ctx); err != nil {
-					return err
-				}
-				c.recordCatalog(result.Catalog)
-				if err := pause(ctx, 50, 66); err != nil {
-					return err
-				}
-				routed := c.routed()
-				c.configure(ctx, routed, !routed && c.listExperiments(ctx) == nil)
-				experimented = time.Now()
-				return nil
-			})
+			}
+			if err := pause(ctx, 122, 195); err != nil {
+				return err
+			}
+			c.configure(ctx, false, true)
+			return record(time.Now().Add(time.Duration(between(3, 15))*time.Millisecond), between(1, 2), c.report)
 		})
-	}, func() error {
-		defer round.endAssist()
+	}
+	second := func() error {
+		defer close(finished)
+		defer endReload()
 		select {
 		case <-checked:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		if err := pause(ctx, 60, 80); err != nil {
+		if err := pause(ctx, 177, 369); err != nil {
 			return err
 		}
 		if _, err := c.LoadCodeAssist(ctx, EndpointDaily); err != nil {
 			return err
 		}
-		return parallel(user, func() error {
-			round.started.Store(true)
-			joined := settings.busy()
-			_, err := c.LoadCodeAssist(ctx, EndpointDaily)
-			round.endAssist()
-			if err == nil && !joined {
-				if err := pause(ctx, 51, 56); err != nil {
-					return err
-				}
-				refetch()
-				settings.end()
-			}
+		endReload()
+		select {
+		case <-assisted:
+		default:
+			return nil
+		}
+		third := time.Now().Add(time.Duration(between(43, 59)) * time.Millisecond)
+		if floor := settings.Add(time.Duration(between(80, 145)) * time.Millisecond); floor.After(third) {
+			third = floor
+		}
+		if err := until(ctx, third); err != nil {
 			return err
-		})
-	})
-	if err != nil {
-		return Initialization{}, err
+		}
+		joined := true
+		select {
+		case <-read:
+			joined = false
+		default:
+		}
+		if _, err := c.LoadCodeAssist(ctx, EndpointDaily); err != nil || joined {
+			return err
+		}
+		if err := pause(ctx, 49, 59); err != nil {
+			return err
+		}
+		c.FetchUserInfo(ctx)
+		refetched = time.Now()
+		return nil
 	}
-	c.mu.Lock()
-	c.hub.cold = true
-	c.mu.Unlock()
-	settings.mu.Lock()
-	loaded := settings.ended
-	settings.mu.Unlock()
-	if err := c.settle(ctx, configured, experimented, loaded); err != nil {
+	err := parallel(check, first, second, func() error {
+		<-booted
+		<-finished
+		if !refetched.IsZero() {
+			ready = refetched.Add(time.Duration(between(49, 59)) * time.Millisecond)
+		}
+		c.mu.Lock()
+		c.hub.cold = true
+		c.mu.Unlock()
+		close(settled)
+		return nil
+	}, optional(func() error {
+		select {
+		case <-read:
+		case <-reloaded:
+		case <-ctx.Done():
+			return nil
+		}
+		if pause(ctx, 165, 292) != nil {
+			return nil
+		}
+		c.mu.Lock()
+		c.hub.profiled = time.Now()
+		c.mu.Unlock()
+		profile, err := c.Userinfo(ctx)
+		if err != nil {
+			return err
+		}
+		result.User = profile
+		time.AfterFunc(time.Duration(between(190, 587))*time.Millisecond, func() { c.avatar(context.WithoutCancel(ctx), profile.Picture) })
+		return nil
+	}))
+	if err != nil {
 		return Initialization{}, err
 	}
 	return result, nil
 }
 
-// settle 按官方冷启动在设置读取完成（最后一次 fetchUserInfo 结束 44–50 ms 后）之后记录对照事件与迁移组：对照事件不早于发出对照的 fetchConfig 结束 1–2 ms，没有对照时不记录；迁移组不早于第二轮实验请求结束 3–5 ms；同一时刻时迁移组在前
-func (c *Client) settle(ctx context.Context, configured, experimented, loaded time.Time) error {
-	ready := loaded.Add(time.Duration(between(44, 50)) * time.Millisecond)
-	later := func(at time.Time, low, high int) time.Time {
-		at = at.Add(time.Duration(between(low, high)) * time.Millisecond)
-		if at.Before(ready) {
-			return ready
-		}
-		return at
+// until 等到 at，ctx 结束时返回其错误
+func until(ctx context.Context, at time.Time) error {
+	select {
+	case <-time.After(time.Until(at)):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	type step struct {
-		at     time.Time
-		record func()
-	}
-	steps := []step{{later(experimented, 3, 5), c.hubMigrations}}
-	if !configured.IsZero() {
-		steps = append(steps, step{later(configured, 1, 2), c.report})
-	}
-	slices.SortStableFunc(steps, func(a, b step) int { return a.at.Compare(b.at) })
-	for _, step := range steps {
-		select {
-		case <-time.After(time.Until(step.at)):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		step.record()
-	}
-	return nil
 }
 
 // pause 等待 [low, high] ms 内的随机时长，ctx 结束时返回其错误
@@ -646,17 +579,15 @@ func (c *Client) title(ctx context.Context, envelope titleEnvelope) error {
 
 // Companion 按官方 language_server 的节奏代一个账户发出与生成无关的伴随请求，创建时刻为该账户虚拟进程的启动时刻
 type Companion struct {
-	client     *Client
-	started    time.Time
-	connection string
-	etag       string
+	client  *Client
+	started time.Time
 }
 
-// NewCompanion 以当前时刻为虚拟进程启动时刻创建账户的伴随请求调度，unleash connectionId 每个虚拟进程随机生成
+// NewCompanion 以当前时刻为虚拟进程启动时刻创建账户的伴随请求调度
 func NewCompanion(client *Client) *Companion {
 	started := time.Now()
 	client.launch(started)
-	return &Companion{client: client, started: started, connection: uuid.NewString()}
+	return &Companion{client: client, started: started}
 }
 
 // every 在启动后 offset + k·period（k ≥ 1）的时刻调用 run，错过的时刻不补发，ctx 结束时返回
@@ -674,161 +605,7 @@ func (m *Companion) every(ctx context.Context, offset, period time.Duration, run
 	}
 }
 
-// Unleash 立即注册并拉取功能开关，此后每 60 s 拉取一次并带上次响应的 ETag，启动 60 s 时上报一次开关求值统计；ctx 结束时返回
-func (m *Companion) Unleash(ctx context.Context) {
-	go m.unleash(ctx, "/register", m.registration())
-	m.features(ctx)
-	m.every(ctx, 0, pollPeriod, func(round int) {
-		if round == 1 {
-			go m.unleash(ctx, "/metrics", m.metrics(time.Now()))
-		}
-		m.features(ctx)
-	})
-}
-
-// clock 把时刻写成设备档案时区与系统时钟精度下的本地时间：Windows 100 ns，macOS 1 µs，Linux 1 ns，宿主时钟只到 100 ns 时补足随机纳秒
-func (m *Companion) clock(at time.Time) time.Time {
-	at = at.Round(0).In(m.client.device.Location())
-	switch m.client.device.OS {
-	case "windows":
-		return at.Truncate(100 * time.Nanosecond)
-	case "darwin":
-		return at.Truncate(time.Microsecond)
-	}
-	if at.Nanosecond()%100 == 0 {
-		at = at.Add(rand.N(100 * time.Nanosecond))
-	}
-	return at
-}
-
-// unleashRegistration 表示 unleash 注册正文
-type unleashRegistration struct {
-	AppName          string    `json:"appName"`
-	InstanceID       string    `json:"instanceId"`
-	ConnectionID     string    `json:"connectionId"`
-	SDKVersion       string    `json:"sdkVersion"`
-	Strategies       []string  `json:"strategies"`
-	Started          time.Time `json:"started"`
-	Interval         int       `json:"interval"`
-	PlatformVersion  string    `json:"platformVersion"`
-	PlatformName     string    `json:"platformName"`
-	YggdrasilVersion *string   `json:"yggdrasilVersion"`
-	SpecVersion      string    `json:"specVersion"`
-}
-
-// unleashToggle 表示一个开关在统计窗口内的求值次数
-type unleashToggle struct {
-	Yes      int            `json:"yes"`
-	No       int            `json:"no"`
-	Variants map[string]int `json:"variants"`
-}
-
-// unleashMetrics 表示 unleash 开关求值统计正文
-type unleashMetrics struct {
-	AppName      string `json:"appName"`
-	InstanceID   string `json:"instanceId"`
-	ConnectionID string `json:"connectionId"`
-	Bucket       struct {
-		Start   time.Time                `json:"start"`
-		Stop    time.Time                `json:"stop"`
-		Toggles map[string]unleashToggle `json:"toggles"`
-	} `json:"bucket"`
-	PlatformVersion  string  `json:"platformVersion"`
-	PlatformName     string  `json:"platformName"`
-	YggdrasilVersion *string `json:"yggdrasilVersion"`
-	SDKVersion       string  `json:"sdkVersion"`
-	SpecVersion      string  `json:"specVersion"`
-}
-
-// registration 返回虚拟进程启动时的 unleash 注册正文
-func (m *Companion) registration() unleashRegistration {
-	return unleashRegistration{
-		AppName:         unleashApp,
-		InstanceID:      m.client.device.unleashInstance(),
-		ConnectionID:    m.connection,
-		SDKVersion:      unleashSDK,
-		Strategies:      []string{"default", "applicationHostname", "gradualRolloutRandom", "gradualRolloutSessionId", "gradualRolloutUserId", "remoteAddress", "userWithId", "flexibleRollout"},
-		Started:         m.clock(m.started),
-		Interval:        int(pollPeriod / time.Second),
-		PlatformVersion: serverRuntimes[m.client.device.OS],
-		PlatformName:    "go",
-		SpecVersion:     unleashSpec,
-	}
-}
-
-// metrics 返回启动后首个统计窗口的正文，窗口内只有 API_SERVER_CLIENT_USE_HTTP_2 的一次求值；窗口起点在 Windows 上等于启动时刻，在 macOS 与 Linux 上晚 1.0–1.5 µs
-func (m *Companion) metrics(stop time.Time) unleashMetrics {
-	start := m.started
-	if m.client.device.OS != "windows" {
-		start = start.Add(time.Duration(between(1000, 1500)))
-	}
-	body := unleashMetrics{
-		AppName:         unleashApp,
-		InstanceID:      m.client.device.unleashInstance(),
-		ConnectionID:    m.connection,
-		PlatformVersion: serverRuntimes[m.client.device.OS],
-		PlatformName:    "go",
-		SDKVersion:      unleashSDK,
-		SpecVersion:     unleashSpec,
-	}
-	body.Bucket.Start, body.Bucket.Stop = m.clock(start), m.clock(stop)
-	body.Bucket.Toggles = map[string]unleashToggle{"API_SERVER_CLIENT_USE_HTTP_2": {Yes: 1, Variants: map[string]int{"disabled": 1}}}
-	return body
-}
-
-// unleashHeaders 设置 unleash 请求共有的请求头
-func (m *Companion) unleashHeaders(request *http.Request) {
-	request.Header.Set("User-Agent", unleashApp)
-	request.Header.Set("Authorization", unleashToken)
-	request.Header.Set("Unleash-Sdk", unleashSDK)
-	request.Header.Set("Unleash-Connection-Id", m.connection)
-	request.Header.Set("Unleash-Appname", unleashApp)
-	request.Header.Set("Unleash-Instanceid", m.client.device.unleashInstance())
-	request.Header.Set("Unleash-Interval", strconv.Itoa(int(pollPeriod/time.Millisecond)))
-}
-
-// unleash 以 JSON 正文 POST 注册或统计
-func (m *Companion) unleash(ctx context.Context, path string, body any) error {
-	var payload bytes.Buffer
-	if err := json.NewEncoder(&payload).Encode(body); err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, unleashURL+path, &payload)
-	if err != nil {
-		return err
-	}
-	m.unleashHeaders(request)
-	request.Header.Set("Content-Type", "application/json")
-	_, err = m.client.discard(m.client.web, request)
-	return err
-}
-
-// features 拉取功能开关，带上次响应的 ETag，记下新的 ETag
-func (m *Companion) features(ctx context.Context) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, unleashURL+"/features", nil)
-	if err != nil {
-		return
-	}
-	m.unleashHeaders(request)
-	request.Header.Set("Unleash-Client-Spec", unleashSpec)
-	if m.etag != "" {
-		request.Header.Set("If-None-Match", m.etag)
-	}
-	started := time.Now()
-	response, err := m.client.web.Do(m.client.traced(request))
-	if err != nil {
-		m.client.logRequest(request, 0, started, err)
-		return
-	}
-	io.Copy(io.Discard, response.Body)
-	response.Body.Close()
-	m.client.logRequest(request, response.StatusCode, started, nil)
-	if etag := response.Header.Get("ETag"); response.StatusCode == http.StatusOK && etag != "" {
-		m.etag = etag
-	}
-}
-
-// Run 冷启动时按官方界面加载记录 Hub 界面事件并从加载项目列表起每 120 s 读取新手提示；登录序列启动时先记录迁移、搜索索引与权限迁移事件再记录实验对照，新手提示从初始化中的那次读取起每 120 s 读取；此后在启动后每个整分钟读取实验与配置并记录对照，每 6 轮同时刷新套餐、目录、资料、设置与头像，读到的账户状态经 Observe 交出；ctx 结束时返回
+// Run 冷启动时按官方界面加载记录 Hub 界面事件；登录序列启动时先记录迁移、搜索索引与权限迁移事件再记录实验对照，100–120 ms 后读取插件市场目录，新手提示从初始化中的那次读取起每 120 s 读取；此后在启动后每个整分钟读取实验与配置，每 6 轮同时刷新套餐与目录，读到的账户状态经 Observe 交出；ctx 结束时返回
 func (m *Companion) Run(ctx context.Context) {
 	if m.client.coldStarted() {
 		go m.client.hubInterface(ctx)
@@ -836,11 +613,17 @@ func (m *Companion) Run(ctx context.Context) {
 		m.client.hubLogin()
 		m.client.report()
 		go m.every(ctx, time.Since(m.started), nuxPeriod, func(int) { m.client.nuxes(ctx) })
+		go func() {
+			if pause(ctx, 100, 120) == nil {
+				m.client.readMarketplaces(ctx)
+				m.client.logMarketplace()
+			}
+		}()
 	}
 	m.every(ctx, pollOffset, pollPeriod, func(round int) { m.poll(ctx, round) })
 }
 
-// poll 执行一轮实验轮询：listExperiments 成功后发 fetchConfig 并记录对照，fetchConfig 失败时对照带错误文本；use-aicode-mendel 开启时只发 fetchConfig，失败才 listExperiments，不记录对照；刷新轮 loadCodeAssist 与第一个实验请求并发，fetchAvailableModels 与 fetchConfig 并发，fetchConfig 之后 userinfo 与 fetchUserInfo 并发，userinfo 之后读头像
+// poll 执行一轮实验轮询：use-aicode-mendel 开启时只发 fetchConfig，失败才 listExperiments，不记录对照；关闭时 listExperiments 成功后发 fetchConfig 并记录对照，fetchConfig 失败时对照带错误文本；刷新轮 loadCodeAssist 与第一个实验请求并发，fetchAvailableModels 与 fetchConfig 并发
 func (m *Companion) poll(ctx context.Context, round int) {
 	c := m.client
 	refresh := round%accountRounds == 0
@@ -859,14 +642,6 @@ func (m *Companion) poll(ctx context.Context, round int) {
 	}
 	if c.configure(ctx, routed, listed) {
 		c.report()
-	}
-	if refresh {
-		group.Go(func() {
-			if user, err := c.Userinfo(ctx); err == nil {
-				c.avatar(ctx, user.Picture)
-			}
-		})
-		group.Go(func() { c.FetchUserInfo(ctx) })
 	}
 	group.Wait()
 }
@@ -1003,7 +778,7 @@ func (s companionState) clearcutEvent(at time.Time, device Device, name string, 
 	return appendVarint(event, 11, 5)
 }
 
-// extension 编码 clearcut 事件扩展的公共字段：客户端、版本、设备、套餐、遥测关闭标记、地区、子客户端与按 shape 附带的实验开关：开关取最近一次 listExperiments；use-aicode-mendel 开启时取最近一次 fetchConfig，对照事件在 fetchConfig 成功时仍取 listExperiments，fetchConfig 尚未成功时为空
+// extension 编码 clearcut 事件扩展的公共字段：客户端、版本、设备、套餐、遥测关闭标记、地区、子客户端与按 shape 附带的实验开关：开关取最近一次 listExperiments，实验改以 fetchConfig 为准后取最近一次 fetchConfig；对照的 fetchConfig 失败时对照事件的开关为空
 func (s companionState) extension(device Device, shape eventShape) []byte {
 	if shape.bare {
 		s.tier, s.region = "", ""
@@ -1020,7 +795,7 @@ func (s companionState) extension(device Device, shape eventShape) []byte {
 	ext = appendBytes(ext, 27, []byte("hub"))
 	if shape.flags {
 		flags := s.ccpa.Flags
-		if s.routed() && (!shape.compared || s.aicodeError != "") {
+		if s.mendel || shape.compared && s.aicodeError != "" {
 			flags = s.aicode.ExperimentConfig.ExperimentFlags
 		}
 		byName := make(map[string]experimentFlag, len(flags))

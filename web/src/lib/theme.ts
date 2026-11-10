@@ -1,5 +1,5 @@
 // Theme 是界面配色
-export type Theme = 'light' | 'dark'
+type Theme = 'light' | 'dark'
 
 // themeKey 是本地存储中保存配色的键，没有保存时跟随系统
 const themeKey = 'antigravity2api.theme'

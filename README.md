@@ -245,7 +245,7 @@ export ANTHROPIC_MODEL=claude-opus-5-5
 claude
 ```
 
-Claude Code 后台任务使用的小模型名可用 `MODEL_MAPPING` 映射到目录中的模型，例如 `MODEL_MAPPING=claude-haiku-5-5:gemini-3.8-flash-low`。
+Claude Code 后台任务使用的小模型名可用 `MODEL_MAPPING` 映射到目录中的模型，例如 `MODEL_MAPPING=claude-haiku-5-5:gemini-3.8-flash-low`；管理端模型页的“模型映射”可逐行添加与修改。
 
 Codex（`~/.codex/config.toml`）：
 
@@ -269,9 +269,9 @@ wire_api = "responses"
 | `full` | 全部段落，客户端系统提示接在末尾 | 按官方格式包装，带本地时间与模型选择 |
 | `medium` | identity、guidelines、communication_style 三段 | 按官方格式包装，带本地时间 |
 | `aggressive` | identity 一段 | 原样发送 |
-| `custom` | `SYSTEM_PROMPT_SECTIONS` 选中的段落 | 按 `SYSTEM_PROMPT_WRAP` 包装 |
+| `custom` | `SYSTEM_PROMPT_TEMPLATE` 的模板 | `SYSTEM_PROMPT_USER_TEMPLATE` 的模板 |
 
-管理端设置页的“查看原文”显示各系统提示档位发给上游的系统指令与首轮用户消息。`custom` 在设置页逐段勾选保留的官方段落，每段可展开原文，再选择用户消息的包装方式。
+管理端设置页的“查看原文”显示各系统提示档位发给上游的系统指令与首轮用户消息。`custom` 在设置页直接编辑两段文字：系统指令与用户消息的包装。“载入预设”把内置档位的全文放进编辑框，“插入”在光标处放入官方段落或变量；`{{.Client}}` 处是客户端自己的系统提示，`{{.Text}}` 处是用户消息原文。两段都是 Go `text/template` 模板，编辑框下方显示代入示例数据后的字符数或模板错误。
 
 ## 目录结构
 
@@ -308,8 +308,8 @@ docs/                 # 协议、开发与日志文档
 | `RUNTIME_DIR` | 运行数据目录：请求账本 `requests.db`、日志 `logs/`、上传的 `files/`、生成媒体 `media/`、会话记录、模型目录与其他运行状态 | `runtime` |
 | `PROXY` | 全局 HTTP、HTTPS 或 SOCKS5 代理，逗号分隔的各项组成代理池，为空时跟随系统代理 | 空 |
 | `SYSTEM_PROMPT` | 系统提示档位：`full`、`medium`、`aggressive`、`custom` | `full` |
-| `SYSTEM_PROMPT_SECTIONS` | `custom` 档位保留的官方段名，逗号分隔，按官方顺序拼接 | `identity,guidelines,communication_style` |
-| `SYSTEM_PROMPT_WRAP` | `custom` 档位的用户消息包装：`full` 官方完整包装、`time` 请求与本地时间、`none` 不包装 | `time` |
+| `SYSTEM_PROMPT_TEMPLATE` | `custom` 档位的系统指令模板，多行内容写成双引号内以 `\n` 换行的一行 | `medium` 档位的系统指令 |
+| `SYSTEM_PROMPT_USER_TEMPLATE` | `custom` 档位的用户消息模板，为空时原样发送 | `medium` 档位的用户消息包装 |
 | `MODEL_MAPPING` | 客户端模型名到目录模型 ID 的映射，每项写成 `别名:模型 ID`，逗号分隔多项 | 空 |
 | `MEDIA_OUTPUT` | 生成媒体的给出方式：`inline` 或 `url` | `inline` |
 | `MEDIA_BASE_URL` | 媒体链接使用的服务地址，例如 `https://ai.example.com`；为空时使用每个请求访问的地址，经反向代理时跟随 `X-Forwarded-Proto` | 空 |

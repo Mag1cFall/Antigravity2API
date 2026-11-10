@@ -5,15 +5,13 @@ import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { CopyButton } from '@/components/ui/copy-button'
-import { PageHeader } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
-import { stackThird as third, Table, Td, Th } from '@/components/ui/table'
+import { stackThird, Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccounts } from '@/features/accounts/queries'
 import { modelMessages } from '@/features/models/messages'
-import { ModelMapping } from '@/features/models/ModelMapping'
 import { useModels } from '@/features/models/queries'
 import { kindOf, type Model } from '@/features/models/types'
 import { quotaMessages } from '@/features/quota/messages'
@@ -22,6 +20,7 @@ import { useSettings } from '@/features/settings/queries'
 import { parseMapping } from '@/features/settings/schema'
 import { formatNumber, formatTokens } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { changeParams } from '@/lib/params'
 
 // groupTone 是额度组标签的颜色
 const groupTone: Record<string, string> = {
@@ -96,10 +95,10 @@ function ModelRow({
       <Td className="max-sm:hidden">
         {groupBadge ?? <span className="text-foreground-subtle">—</span>}
       </Td>
-      <Td label={m.context} className={'text-right max-sm:text-left ' + third}>
+      <Td label={m.context} className={'text-right max-sm:text-left ' + stackThird}>
         <Limit value={model.input_token_limit} />
       </Td>
-      <Td label={m.output} className={'text-right max-sm:text-left ' + third}>
+      <Td label={m.output} className={'text-right max-sm:text-left ' + stackThird}>
         <Limit value={model.output_token_limit} />
       </Td>
       <Td label={m.thinking} className="max-sm:order-1 max-sm:basis-full">
@@ -126,7 +125,7 @@ function ModelRow({
           <span className="text-foreground-subtle">—</span>
         )}
       </Td>
-      <Td label={m.accounts} className={'text-right max-sm:text-left ' + third}>
+      <Td label={m.accounts} className={'text-right max-sm:text-left ' + stackThird}>
         {model.accounts > 0 ? (
           <span>
             {model.accounts}
@@ -142,7 +141,7 @@ function ModelRow({
   )
 }
 
-// ModelsPage 是模型目录：按额度组筛选（带模型数）与搜索，列出上下文、输出上限、思考档位与可用账户，宽度小于 640px 时每个模型一张卡片，目录读到后下方编辑模型映射
+// ModelsPage 是模型目录：按额度组筛选（带模型数）与搜索，列出上下文、输出上限、思考档位与可用账户，宽度小于 640px 时每个模型一张卡片
 export function ModelsPage() {
   const m = useMessages(modelMessages)
   const q = useMessages(quotaMessages)
@@ -180,131 +179,111 @@ export function ModelsPage() {
         a.index - b.index,
     )
     .map(({ model }) => model)
-  const targets = list.filter((model) => !aliases.has(model.id)).map((model) => model.id)
-  const update = (key: string, value: string) => {
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current)
-        if (value && value !== 'all') next.set(key, value)
-        else next.delete(key)
-        return next
-      },
-      { replace: true },
-    )
-  }
-
   return (
-    <>
-      <PageHeader
-        title={m.title}
-        description={models.data ? fill(m.summary, { count: list.length, ready }) : m.description}
-      />
-      <Card>
-        {models.isPending ? (
-          <Loading label={app.loading} />
-        ) : models.isError ? (
-          <ErrorState
-            title={m.loadFailed}
-            error={models.error}
-            retryLabel={app.retry}
-            onRetry={() => void models.refetch()}
-          />
-        ) : list.length === 0 ? (
-          <EmptyState
-            icon={<Boxes size={20} aria-hidden />}
-            title={m.emptyTitle}
-            description={m.emptyDescription}
-            action={
-              <Button asChild>
-                <Link to="/accounts">{m.goAccounts}</Link>
-              </Button>
-            }
-          />
-        ) : (
-          <>
-            <CardToolbar>
-              <Segmented
-                label={m.group}
-                value={group}
-                onValueChange={(value) => {
-                  update('group', value)
-                }}
-                options={[
-                  { value: 'all', label: m.all + ' ' + String(list.length) },
-                  ...groups.map((value) => ({
-                    value,
-                    label:
-                      q[value] +
-                      ' ' +
-                      String(list.filter((model) => model.quota_group === value).length),
-                  })),
-                ]}
-              />
-              <SearchInput
-                aria-label={m.search}
-                placeholder={m.search}
-                value={query}
-                onChange={(event) => {
-                  update('q', event.target.value)
-                }}
-                className="w-full max-w-field sm:ml-auto"
-              />
-            </CardToolbar>
-            {visible.length === 0 ? (
-              <EmptyState
-                icon={<Boxes size={20} aria-hidden />}
-                title={m.noMatchTitle}
-                description={m.noMatchDescription}
-                action={
-                  <Button
-                    onClick={() => {
-                      setParams({}, { replace: true })
-                    }}
-                  >
-                    {m.clear}
-                  </Button>
-                }
-              />
-            ) : (
-              <Table label={m.title} fixed stack minWidth={860}>
-                <colgroup>
-                  <col />
-                  <col className="w-[140px]" />
-                  <col className="w-[104px]" />
-                  <col className="w-[104px]" />
-                  <col className="w-[200px]" />
-                  <col className="w-[112px]" />
-                </colgroup>
-                <thead>
-                  <tr>
-                    <Th>{m.model}</Th>
-                    <Th>{m.group}</Th>
-                    <Th className="text-right">{m.context}</Th>
-                    <Th className="text-right">{m.output}</Th>
-                    <Th>{m.thinking}</Th>
-                    <Th className="text-right">
-                      <Tooltip label={m.accountsHint}>
-                        <span>{m.accounts}</span>
-                      </Tooltip>
-                    </Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visible.map((model) => (
-                    <ModelRow
-                      key={model.id}
-                      model={model}
-                      alias={aliases.get(model.id)}
-                      ready={ready}
-                    />
-                  ))}
-                </tbody>
-              </Table>
-            )}
-          </>
-        )}
-      </Card>
-      {!models.isPending && <ModelMapping targets={targets} />}
-    </>
+    <Card>
+      {models.isPending ? (
+        <Loading label={app.loading} />
+      ) : models.isError ? (
+        <ErrorState
+          title={m.loadFailed}
+          error={models.error}
+          retryLabel={app.retry}
+          onRetry={() => void models.refetch()}
+        />
+      ) : list.length === 0 ? (
+        <EmptyState
+          icon={<Boxes size={20} aria-hidden />}
+          title={m.emptyTitle}
+          description={m.emptyDescription}
+          action={
+            <Button asChild>
+              <Link to="/accounts">{m.goAccounts}</Link>
+            </Button>
+          }
+        />
+      ) : (
+        <>
+          <CardToolbar>
+            <Segmented
+              label={m.group}
+              value={group}
+              onValueChange={(value) => {
+                changeParams(setParams, { group: value === 'all' ? '' : value })
+              }}
+              options={[
+                { value: 'all', label: m.all + ' ' + String(list.length) },
+                ...groups.map((value) => ({
+                  value,
+                  label:
+                    q[value] +
+                    ' ' +
+                    String(list.filter((model) => model.quota_group === value).length),
+                })),
+              ]}
+            />
+            <SearchInput
+              aria-label={m.search}
+              placeholder={m.search}
+              value={query}
+              onChange={(event) => {
+                changeParams(setParams, { q: event.target.value })
+              }}
+              className="w-full max-w-field sm:ml-auto"
+            />
+          </CardToolbar>
+          {visible.length === 0 ? (
+            <EmptyState
+              icon={<Boxes size={20} aria-hidden />}
+              title={m.noMatchTitle}
+              description={m.noMatchDescription}
+              action={
+                <Button
+                  onClick={() => {
+                    setParams({}, { replace: true })
+                  }}
+                >
+                  {m.clear}
+                </Button>
+              }
+            />
+          ) : (
+            <Table label={m.title} fixed stack minWidth={860}>
+              <colgroup>
+                <col />
+                <col className="w-[140px]" />
+                <col className="w-[104px]" />
+                <col className="w-[104px]" />
+                <col className="w-[200px]" />
+                <col className="w-[112px]" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <Th>{m.model}</Th>
+                  <Th>{m.group}</Th>
+                  <Th className="text-right">{m.context}</Th>
+                  <Th className="text-right">{m.output}</Th>
+                  <Th>{m.thinking}</Th>
+                  <Th className="text-right">
+                    <Tooltip label={m.accountsHint}>
+                      <span>{m.accounts}</span>
+                    </Tooltip>
+                  </Th>
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((model) => (
+                  <ModelRow
+                    key={model.id}
+                    model={model}
+                    alias={aliases.get(model.id)}
+                    ready={ready}
+                  />
+                ))}
+              </tbody>
+            </Table>
+          )}
+        </>
+      )}
+    </Card>
   )
 }

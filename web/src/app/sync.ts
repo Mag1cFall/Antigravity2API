@@ -38,9 +38,7 @@ export function syncQueries(client: QueryClient) {
   return client.getQueryCache().subscribe((event) => {
     if (event.type !== 'updated' || event.action.type !== 'success') return
     if (event.query.queryHash !== accountsHash) return
-    const data = event.query.state.data as { accounts: Account[] } | undefined
-    if (!data) return
-    const next = catalogState(data.accounts)
+    const next = catalogState((event.query.state.data as { accounts: Account[] }).accounts)
     if (last !== undefined && next !== last) invalidate(client, accountDependents)
     last = next
   })

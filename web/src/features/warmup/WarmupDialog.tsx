@@ -9,9 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Table, Td, Th } from '@/components/ui/table'
-import { accountMessages } from '@/features/accounts/messages'
+import { AccountStatusBadge } from '@/features/accounts/AccountStatus'
 import { accountsKey } from '@/features/accounts/queries'
-import { statusOf, statusTone } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
 import { useModels } from '@/features/models/queries'
 import { kindOf } from '@/features/models/types'
@@ -19,7 +18,7 @@ import { quotaMessages } from '@/features/quota/messages'
 import { bucketParts, compareBuckets, nameOf } from '@/features/quota/quota'
 import type { QuotaBucket } from '@/features/quota/types'
 import { warmupMessages } from '@/features/warmup/messages'
-import { api } from '@/lib/api'
+import { api, errorMessage } from '@/lib/api'
 import { formatDuration, formatPercent } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
@@ -80,7 +79,6 @@ function QuotaChange({ before, after }: { before: QuotaBucket[]; after: QuotaBuc
 // WarmupDialog 选定账户与对话模型后对每个组合发一次最小生成请求，各账户并行、同一账户内依次进行，逐行显示结果、耗时、错误原因与额度变化；selected 非空时默认选中这些账户，否则默认选中就绪账户
 export function WarmupDialog({ accounts, selected }: { accounts: Account[]; selected: string[] }) {
   const w = useMessages(warmupMessages)
-  const m = useMessages(accountMessages)
   const app = useMessages(appMessages)
   const { locale } = useI18n()
   const queryClient = useQueryClient()
@@ -135,7 +133,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
             model,
             ok: false,
             duration_ms: 0,
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
             request: '',
             before: [],
             after: [],
@@ -243,7 +241,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                             </span>
                           </span>
                           {run.result.error && (
-                            <p className="max-w-80 text-xs break-words text-error-text">
+                            <p className="text-xs break-words text-error-text">
                               {run.result.error}
                             </p>
                           )}
@@ -291,7 +289,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
               options={accounts.map((account) => ({
                 value: account.id,
                 label: account.label ? account.label + ' · ' + account.id : account.id,
-                badge: <Badge tone={statusTone[statusOf(account)]}>{m[statusOf(account)]}</Badge>,
+                badge: <AccountStatusBadge account={account} />,
               }))}
               picked={pickedAccounts}
               onChange={setPickedAccounts}
@@ -326,7 +324,7 @@ function Picker({
       {options.length === 0 ? (
         <p className="text-sm text-foreground-muted">{empty}</p>
       ) : (
-        <div className="max-h-80 flex flex-col overflow-y-auto rounded-md border border-border">
+        <div className="flex flex-col overflow-y-auto rounded-md border border-border">
           <label className="flex items-center gap-2 border-b border-border bg-muted px-3 py-2 text-sm">
             <Checkbox
               checked={chosen === 0 ? false : chosen === options.length ? true : 'indeterminate'}

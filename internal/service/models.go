@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"net/http"
@@ -86,11 +87,7 @@ func (s *Service) pending(ids []string) []string {
 		if !slices.ContainsFunc(s.catalogs[record.ID], func(model antigravity.CatalogModel) bool { return slices.Contains(ids, model.ID) }) {
 			continue
 		}
-		reason := s.failures[record.ID]
-		if reason == "" {
-			reason = "初始化中"
-		}
-		reasons = append(reasons, record.ID+": "+reason)
+		reasons = append(reasons, record.ID+": "+cmp.Or(s.failures[record.ID], "初始化中"))
 	}
 	return reasons
 }

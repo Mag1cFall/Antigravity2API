@@ -5,7 +5,7 @@ import { lastLocation } from '@/app/remember'
 import { Indicator } from '@/components/ui/indicator'
 
 // NavTab 是一个页内导航项
-export interface NavTab {
+interface NavTab {
   to: string
   label: string
   icon: LucideIcon

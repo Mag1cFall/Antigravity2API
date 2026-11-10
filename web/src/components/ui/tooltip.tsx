@@ -15,13 +15,11 @@ export function Tooltip({
   label,
   shortcut,
   disabledReason,
-  side = 'bottom',
   children,
 }: {
   label?: ReactNode
   shortcut?: string | undefined
   disabledReason?: string | false | undefined
-  side?: 'top' | 'bottom' | 'left' | 'right'
   children: ReactNode
 }) {
   const reason = disabledReason === false ? undefined : disabledReason
@@ -37,7 +35,7 @@ export function Tooltip({
       </Primitive.Trigger>
       <Primitive.Portal>
         <Primitive.Content
-          side={side}
+          side="bottom"
           sideOffset={8}
           collisionPadding={8}
           className="z-popover flex max-w-prose items-center gap-2 rounded-sm bg-surface px-3 py-2 text-xs text-foreground shadow-popover data-[side=top]:[--drop-from:4px] data-[state=closed]:animate-fade-out data-[state=delayed-open]:animate-drop-in data-[state=instant-open]:animate-drop-in"

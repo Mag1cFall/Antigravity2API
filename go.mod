@@ -8,6 +8,7 @@ require (
 	github.com/dlclark/regexp2/v2 v2.5.2
 	github.com/eliben/go-sentencepiece v0.7.0
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/compress v1.18.3
 	github.com/mewkiz/flac v1.0.14
 	github.com/minio/selfupdate v0.6.0
 	github.com/oov/audio v0.0.0-20171004131523-88a2be6dbe38
@@ -17,6 +18,7 @@ require (
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/sardanioss/qpack v0.6.3
 	github.com/tphakala/go-mp3 v0.1.0
+	github.com/vearutop/statigz v1.5.0
 	github.com/wailsapp/wails/v3 v3.0.0-beta.29
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/image v0.47.0
@@ -44,7 +46,6 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/gopacket v1.1.19 // indirect
 	github.com/icza/bitio v1.1.0 // indirect
-	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d // indirect

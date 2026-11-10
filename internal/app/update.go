@@ -12,11 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -265,6 +267,17 @@ func (u *selfUpdater) replaceExecutable(ctx context.Context, release *githubRele
 		return fmt.Errorf("替换可执行文件: %w", err)
 	}
 	return nil
+}
+
+// removeReplaced 删除在线更新替换后留在可执行文件旁的旧版本：Wails 更新器改名的 <文件名>.old.<时间> 与 selfupdate 隐藏的 .<文件名>.old
+func (u *selfUpdater) removeReplaced() {
+	directory, name := filepath.Split(u.executable)
+	files, _ := filepath.Glob(filepath.Join(directory, name+".old.*"))
+	for _, file := range append(files, filepath.Join(directory, "."+name+".old")) {
+		if err := os.Remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("删除在线更新留下的旧版本失败 | 错误="+err.Error(), "source", "service")
+		}
+	}
 }
 
 // executableName 返回发行包中可执行文件的文件名

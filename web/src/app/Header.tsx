@@ -1,14 +1,14 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Boxes,
-  Cable,
   Copy,
+  Gauge,
   History,
-  LayoutDashboard,
   LogOut,
   type LucideIcon,
   Minus,
   Moon,
+  Plug,
   Settings,
   Square,
   Sun,
@@ -172,9 +172,9 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
   })
   const canLogout = session.data?.enabled === true && session.data.authenticated
   const items: NavItem[] = [
-    { to: '/', label: m.dashboard, icon: LayoutDashboard },
+    { to: '/', label: m.dashboard, icon: Gauge },
     { to: '/accounts', label: m.accounts, icon: Users },
-    { to: '/connect', label: m.connect, icon: Cable },
+    { to: '/connect', label: m.connect, icon: Plug },
     { to: '/models', label: m.models, icon: Boxes },
     { to: '/requests', label: m.requests, icon: History },
     { to: '/settings', label: m.settings, icon: Settings },

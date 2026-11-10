@@ -82,10 +82,8 @@ func pbWalk(data []byte, fn func(n *pbNode)) []byte {
 	for i := range nodes {
 		node := &nodes[i]
 		fn(node)
-		if node.wire == 2 && len(node.raw) > 0 {
-			if sub := pbParse(node.raw); sub != nil && bytes.Equal(pbEncode(sub), node.raw) {
-				node.raw = pbWalk(node.raw, fn)
-			}
+		if node.wire == 2 && len(node.raw) > 0 && pbRoundTrips(node.raw) {
+			node.raw = pbWalk(node.raw, fn)
 		}
 	}
 	return pbEncode(nodes)

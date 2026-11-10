@@ -80,3 +80,18 @@ export function DropdownMenuCheckboxItem({
     </Primitive.CheckboxItem>
   )
 }
+
+// DropdownMenuLabel 是菜单中一组选项的小标题
+export function DropdownMenuLabel(props: ComponentProps<typeof Primitive.Label>) {
+  return (
+    <Primitive.Label
+      className="px-4 pt-2 pb-1 text-xs font-medium text-foreground-muted select-none"
+      {...props}
+    />
+  )
+}
+
+// DropdownMenuSeparator 是菜单中两组选项之间的分隔线
+export function DropdownMenuSeparator() {
+  return <Primitive.Separator className="my-1 h-px bg-border" />
+}

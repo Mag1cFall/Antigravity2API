@@ -10,7 +10,7 @@ const minimumLevels = ['all', 'INFO', 'WARN', 'ERROR'] as const
 export type MinimumLevel = (typeof minimumLevels)[number]
 
 // LogFilter 是日志页的筛选条件
-export interface LogFilter {
+interface LogFilter {
   level: MinimumLevel
   source: string
   q: string

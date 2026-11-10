@@ -50,7 +50,7 @@ export function NumberInput({
           const digits = event.target.value.replace(/\D/g, '')
           onChange(digits === '' ? Number.NaN : Number(digits))
         }}
-        className="w-16 text-center tabular-nums"
+        className="w-16 text-center"
         {...props}
       />
       <Tooltip disabledReason={atMax && maxReason}>

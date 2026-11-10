@@ -39,7 +39,7 @@ export function DialogContent({
   wide?: boolean
   closeLabel: string
   footer?: ReactNode
-  returnFocus?: HTMLElement | null
+  returnFocus?: HTMLElement
   children: ReactNode
 }) {
   const content = useRef<HTMLDivElement>(null)

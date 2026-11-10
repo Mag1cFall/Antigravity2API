@@ -13,7 +13,7 @@ export const languages: { value: Language; name: string; short: string }[] = [
 ]
 
 // Messages 是一组按语言区分的文案，英文与繁体中文必须覆盖简体中文的全部键
-export interface Messages<T extends Record<string, string>> {
+interface Messages<T extends Record<string, string>> {
   zh: T
   en: Record<keyof T, string>
   tw: Record<keyof T, string>
@@ -89,12 +89,14 @@ function browserLanguage(preferred: readonly string[]): Language {
   return 'en'
 }
 
+// I18nValue 是界面语言上下文的值
 interface I18nValue {
   language: Language
   locale: Locale
   setLanguage: (language: Language) => void
 }
 
+// I18nContext 向组件树提供当前界面语言
 const I18nContext = createContext<I18nValue | null>(null)
 
 // localeOf 是各界面语言对应的 Intl 区域

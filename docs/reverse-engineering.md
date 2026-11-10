@@ -9,7 +9,7 @@ Antigravity2API 的上游请求以官方客户端的现场为准。本文说明�
 | 组件 | 文件 | 发出的请求 | 产品中的对应实现 |
 | --- | --- | --- | --- |
 | Electron 外壳 | `Antigravity.exe`、`resources/app.asar` | 更新清单 `latest-x64-win.yml` | `internal/app` 的版本检查 |
-| language server | `resources/bin/language_server[.exe]` | OAuth 登录与刷新、cloudcode `v1internal`、userinfo、头像、unleash、clearcut、`aicode.googleapis.com` 的 `fetchConfig` 与 gRPC 语音转写 | `internal/antigravity` |
+| language server | `resources/bin/language_server[.exe]` | OAuth 登录与刷新、cloudcode `v1internal`、userinfo、头像、插件市场目录、clearcut、`aicode.googleapis.com` 的 `fetchConfig` 与 gRPC 语音转写 | `internal/antigravity` |
 | 界面 | LS 内嵌的网页包 | 只访问本机 LS | 管理端（`web/`） |
 
 LS 的出站请求全部使用 Go 标准库：cloudcode 请求为 HTTP/1.1；userinfo 使用 Go 默认 User-Agent；头像经 HTTP/2；gRPC 使用 grpc-go 1.86.0-dev。产品以同一套 Go 标准库发送这些请求，TLS ClientHello 与 HTTP 形态由 Go 版本决定，官方 LS 的 Go 工具链升级后需要重新对照（第 4 节）。
@@ -40,7 +40,7 @@ LS 的出站请求全部使用 Go 标准库：cloudcode 请求为 HTTP/1.1；use
 每个 HTTP 交换记录一行：
 
 ```json
-{"sequence": 59, "sender": "language_server", "client": ["127.0.0.1", 61486], "startedAt": 1791960442.96527, "endedAt": 1791960449.91067, "method": "POST", "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", "httpVersion": "HTTP/1.1", "tls": {"sni": "daily-cloudcode-pa.googleapis.com", "alpn": "", "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"}, "requestHeaders": [["Host", "daily-cloudcode-pa.googleapis.com"], ["User-Agent", "antigravity/hub/2.28.1 (aidev_client; os_type=windows; arch=amd64; cl=1009128362)"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer <token>"], ["Content-Type", "application/json"], ["Accept-Encoding", "gzip"]], "requestBody": "00059.request.bin", "status": 200, "responseHeaders": [["Content-Type", "text/event-stream"], ["Transfer-Encoding", "chunked"]], "responseBody": "00059.response.sse"}
+{"sequence": 59, "sender": "language_server", "client": ["127.0.0.1", 61486], "startedAt": 1791960442.96527, "endedAt": 1791960449.91067, "method": "POST", "url": "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", "httpVersion": "HTTP/1.1", "tls": {"sni": "daily-cloudcode-pa.googleapis.com", "alpn": "", "version": "TLSv1.3", "cipher": "TLS_AES_256_GCM_SHA384"}, "requestHeaders": [["Host", "daily-cloudcode-pa.googleapis.com"], ["User-Agent", "antigravity/hub/2.30.0 (aidev_client; os_type=windows; arch=amd64; cl=1017378744)"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer <token>"], ["Content-Type", "application/json"], ["Accept-Encoding", "gzip"]], "requestBody": "00059.request.bin", "status": 200, "responseHeaders": [["Content-Type", "text/event-stream"], ["Transfer-Encoding", "chunked"]], "responseBody": "00059.response.sse"}
 ```
 
 请求头保持发送顺序与重复项，正文保存原始字节。对照时比较头集合与顺序、正文字段顺序、分块方式与连接复用，压缩或重新序列化会隐藏这些差异。
@@ -154,7 +154,7 @@ ru sk sl sr sv sw ta te th tr uk ur vi zh-CN zh-TW
 响应中的 `version` 高于 `internal/antigravity` 的 `ClientVersion` 时，管理端提示有新版本。对齐步骤：
 
 1. 下载并安装新版本，记下 `package.json` 的版本与各系统 `language_server --stamp` 的 CL；灰度版本只对部分 `x-user-staging-id` 返回，换随机标识多次读取各系统的清单可得到下载地址
-2. 更新 `internal/antigravity/version.go`：`ClientVersion`、`ElectronVersion`、`ChromeVersion`、各系统的 `changelists` 与 `serverRuntimes`（unleash `platformVersion`，取自各系统 `go version -m` 的工具链行）
+2. 更新 `internal/antigravity/version.go`：`ClientVersion`、`ElectronVersion`、`ChromeVersion`、各系统与架构的 `changelists`
 3. 用 `go version -m` 比较 LS 的 Go 工具链；主版本变化时，用新版本现场的 ClientHello 与产品逐字节对照；Electron 版本变化时，用新版本的更新清单现场对照 `internal/app/updater.go` 的 ClientHello、HTTP/2 帧与 CONNECT 的 User-Agent，不经代理的现场对照 `updater_quic.go` 的 QUIC Initial 与 `updater_h3.go` 的 HTTP/3 帧
 4. 抓登录、冷启动、空闲与各模型最小请求（第 2 节）
 5. 逐项对照：初始化与冷启动序列、周期请求清单与间隔、信封字段与顺序、`labels`、系统提示各段原文、模型目录字段、伴随请求

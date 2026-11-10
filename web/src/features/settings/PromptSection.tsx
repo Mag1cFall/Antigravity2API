@@ -1,63 +1,149 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { ChevronDown, FileText } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { CodeBlock } from '@/components/ui/code-block'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Textarea } from '@/components/ui/input'
 import { RadioGroup } from '@/components/ui/radio-group'
 import { Segmented } from '@/components/ui/segmented'
 import { ErrorState, Loading } from '@/components/ui/states'
-import { Switch } from '@/components/ui/switch'
 import { settingsMessages } from '@/features/settings/messages'
 import type { SettingsForm } from '@/features/settings/schema'
 import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
-// Preview 对应 internal/prompt 的 Preview：以占位数据渲染的系统指令、首轮 user 消息与全部官方段
-interface Preview {
+type Tier = SettingsForm['SYSTEM_PROMPT']
+
+// Templates 对应 internal/prompt 的 Custom：一档的 system 模板与 user 模板
+interface Templates {
   system: string
   user: string
-  sections: { name: string; text: string }[]
 }
 
-type Tier = SettingsForm['SYSTEM_PROMPT']
-type Wrap = SettingsForm['SYSTEM_PROMPT_WRAP']
-// usePreview 读取档位的原文，自定义档按传入的段与包装方式渲染
-function usePreview(tier: Tier, sections: string[], wrap: Wrap) {
-  const params = new URLSearchParams({ tier })
-  if (tier === 'custom') {
-    params.set('sections', sections.join(','))
-    params.set('wrap', wrap)
-  }
+// Preview 对应 internal/prompt 的 Preview：以示例数据渲染的系统指令与首轮 user 消息
+type Preview = Templates
+
+// PromptTemplates 对应 GET /api/prompt/templates：内置三档的模板与全部官方段的原文
+interface PromptTemplates {
+  tiers: Record<Exclude<Tier, 'custom'>, Templates>
+  sections: { name: string; source: string }[]
+}
+
+// Insert 是插入菜单中的一项：显示名、等宽显示的标识与插入的文字
+interface Insert {
+  label: string
+  code: string
+  text: string
+}
+
+// usePreview 以示例数据渲染档位的原文，自定义档用传入的两个模板，enabled 为假时不发出请求
+function usePreview(tier: Tier, custom: Templates, enabled = true) {
+  const body = tier === 'custom' ? { tier, ...custom } : { tier }
   return useQuery({
-    queryKey: ['prompt-preview', params.toString()],
-    queryFn: () => api<Preview>('/api/prompt/preview?' + params.toString()),
+    queryKey: ['prompt-preview', body],
+    queryFn: () => api<Preview>('/api/prompt/preview', { method: 'POST', json: body }),
     placeholderData: keepPreviousData,
+    retry: false,
+    enabled,
   })
 }
 
-// PromptPreviewDialog 是查看各档位原文的对话框，打开时显示 tier，自定义档按表单中尚未保存的选择渲染
-export function PromptPreviewDialog({
-  tier,
-  sections,
-  wrap,
+// usePromptTemplates 读取内置三档的模板与官方段原文
+function usePromptTemplates() {
+  return useQuery({
+    queryKey: ['prompt-templates'],
+    queryFn: () => api<PromptTemplates>('/api/prompt/templates'),
+    staleTime: Infinity,
+  })
+}
+
+// useSettled 返回停止变化 400 ms 后的值
+function useSettled<T>(value: T) {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSettled(value)
+    }, 400)
+    return () => {
+      clearTimeout(timer)
+    }
+  }, [value])
+  return settled
+}
+
+// PromptTierField 是系统提示档位的单选，内置三档的说明带内置模板的段落数与取整到百位的字符数，模板读到之前说明不带数字
+export function PromptTierField({
+  value,
+  onChange,
 }: {
-  tier: Tier
-  sections: string[]
-  wrap: Wrap
+  value: Tier
+  onChange: (value: Tier) => void
 }) {
+  const m = useMessages(settingsMessages)
+  const { locale } = useI18n()
+  const templates = usePromptTemplates().data
+  const chars = (template: string) => formatNumber(Math.round(template.length / 100) * 100, locale)
+  const size = templates && {
+    full: fill(m.promptFullSize, {
+      count: templates.sections.length,
+      chars: chars(templates.tiers.full.system),
+    }),
+    medium: fill(m.promptSize, { chars: chars(templates.tiers.medium.system) }),
+    aggressive: fill(m.promptSize, { chars: chars(templates.tiers.aggressive.system) }),
+  }
+  return (
+    <RadioGroup
+      label={m.tier}
+      value={value}
+      onValueChange={onChange}
+      options={[
+        {
+          value: 'full',
+          label: m.promptFull,
+          description: fill(m.promptFullHint, { size: size?.full ?? '' }),
+        },
+        {
+          value: 'medium',
+          label: m.promptMedium,
+          description: fill(m.promptMediumHint, { size: size?.medium ?? '' }),
+        },
+        {
+          value: 'aggressive',
+          label: m.promptAggressive,
+          description: fill(m.promptAggressiveHint, { size: size?.aggressive ?? '' }),
+        },
+        { value: 'custom', label: m.promptCustom, description: m.promptCustomHint },
+      ]}
+    />
+  )
+}
+
+// PromptPreviewDialog 是查看各档位原文的对话框，打开时显示 tier，自定义档按表单中尚未保存的模板渲染
+export function PromptPreviewDialog({ tier, custom }: { tier: Tier; custom: Templates }) {
   const m = useMessages(settingsMessages)
   const app = useMessages(appMessages)
   const { locale } = useI18n()
   const [shown, setShown] = useState<Tier>(tier)
-  const preview = usePreview(shown, sections, wrap)
+  const [open, setOpen] = useState(false)
+  const preview = usePreview(shown, custom, open)
   return (
     <Dialog
-      onOpenChange={(open) => {
-        if (open) setShown(tier)
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setShown(tier)
+        setOpen(next)
       }}
     >
       <DialogTrigger asChild>
@@ -119,152 +205,263 @@ export function PromptPreviewDialog({
   )
 }
 
-// PromptSectionsField 勾选自定义档保留的官方段，每段可展开原文；value 按官方顺序排列
-export function PromptSectionsField({
+// TemplateEditor 是一个模板的编辑框：载入预设替换全文，插入菜单把官方段落或变量放到光标处，下方显示 status；locked 时各控件停用
+function TemplateEditor({
+  id,
+  label,
+  hint,
+  rows,
   value,
   onChange,
+  presets,
+  groups,
+  status,
+  error,
+  locked,
 }: {
-  value: string[]
-  onChange: (value: string[]) => void
+  id: string
+  label: string
+  hint: string
+  rows: number
+  value: string
+  onChange: (value: string) => void
+  presets: { label: string; text: string }[]
+  groups: { label: string; items: Insert[] }[]
+  status: string
+  error: string | undefined
+  locked: boolean
+}) {
+  const m = useMessages(settingsMessages)
+  const area = useRef<HTMLTextAreaElement>(null)
+  const caret = useRef<number>(undefined)
+  useEffect(() => {
+    if (caret.current === undefined || !area.current) return
+    area.current.focus()
+    area.current.setSelectionRange(caret.current, caret.current)
+    caret.current = undefined
+  }, [value])
+  const insert = (text: string) => {
+    const start = area.current?.selectionStart ?? value.length
+    const end = area.current?.selectionEnd ?? value.length
+    caret.current = start + text.length
+    onChange(value.slice(0, start) + text + value.slice(end))
+  }
+  return (
+    <fieldset disabled={locked} className="flex min-w-0 flex-col gap-2">
+      <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 flex-col gap-1">
+          <label htmlFor={id} className="text-base font-medium">
+            {label}
+          </label>
+          <p id={id + '-hint'} className="text-sm text-foreground-muted">
+            {hint}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm">
+                {m.templateLoad}
+                <ChevronDown size={16} aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              {presets.map((preset) => (
+                <DropdownMenuItem
+                  key={preset.label}
+                  onSelect={() => {
+                    caret.current = 0
+                    onChange(preset.text)
+                  }}
+                >
+                  {preset.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm">
+                {m.templateInsert}
+                <ChevronDown size={16} aria-hidden />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent>
+              {groups.map((group, index) => (
+                <div key={group.label}>
+                  {index > 0 && <DropdownMenuSeparator />}
+                  <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
+                  {group.items.map((item) => (
+                    <DropdownMenuItem
+                      key={item.code}
+                      onSelect={() => {
+                        insert(item.text)
+                      }}
+                    >
+                      {item.label}
+                      <span className="ml-auto pl-6 font-mono text-xs text-foreground-muted">
+                        {item.code}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </div>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+      <Textarea
+        ref={area}
+        id={id}
+        rows={rows}
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value)
+        }}
+        spellCheck={false}
+        autoComplete="off"
+        aria-invalid={error ? true : undefined}
+        aria-describedby={id + '-hint ' + id + '-status'}
+        className="resize-y font-mono text-xs leading-[20px] text-clip"
+      />
+      <p
+        id={id + '-status'}
+        role={error ? 'alert' : undefined}
+        className={'text-sm ' + (error ? 'text-error-text' : 'text-foreground-muted')}
+      >
+        {error ?? (status || '\u00a0')}
+      </p>
+    </fieldset>
+  )
+}
+
+// PromptTemplateFields 编辑自定义档的 system 模板与 user 模板，输入停下后以示例数据渲染并显示字符数或模板错误
+export function PromptTemplateFields({
+  system,
+  user,
+  systemLocked,
+  userLocked,
+  onSystemChange,
+  onUserChange,
+}: {
+  system: string
+  user: string
+  systemLocked: boolean
+  userLocked: boolean
+  onSystemChange: (value: string) => void
+  onUserChange: (value: string) => void
 }) {
   const m = useMessages(settingsMessages)
   const app = useMessages(appMessages)
   const { locale } = useI18n()
-  const [open, setOpen] = useState<string>()
-  const sections = useQuery({
-    queryKey: ['prompt-preview', 'tier=full'],
-    queryFn: () => api<Preview>('/api/prompt/preview?tier=full'),
-    select: (data) => data.sections,
-  })
-  if (sections.isPending) return <Loading label={app.loading} />
-  if (sections.isError) {
+  const templates = usePromptTemplates()
+  const preview = usePreview('custom', { system: useSettled(system), user: useSettled(user) })
+  if (templates.isPending) return <Loading label={app.loading} />
+  if (templates.isError) {
     return (
       <ErrorState
-        title={m.sectionsFailed}
-        error={sections.error}
+        title={m.templatesFailed}
+        error={templates.error}
         retryLabel={app.retry}
-        onRetry={() => void sections.refetch()}
+        onRetry={() => void templates.refetch()}
       />
     )
   }
-  const labels: Record<string, [string, string]> = {
-    identity: [m.secIdentity, m.secIdentityHint],
-    artifacts: [m.secArtifacts, m.secArtifactsHint],
-    conversation_transcript: [m.secTranscript, m.secTranscriptHint],
-    guidelines: [m.secGuidelines, m.secGuidelinesHint],
-    communication_style: [m.secStyle, m.secStyleHint],
-    slash_commands: [m.secSlash, m.secSlashHint],
-    messaging: [m.secMessaging, m.secMessagingHint],
-    subagents: [m.secSubagents, m.secSubagentsHint],
-    skills: [m.secSkills, m.secSkillsHint],
-    user_information: [m.secUser, m.secUserHint],
+  const { tiers, sections } = templates.data
+  const sectionLabels: Record<string, string> = {
+    identity: m.secIdentity,
+    artifacts: m.secArtifacts,
+    conversation_transcript: m.secTranscript,
+    guidelines: m.secGuidelines,
+    communication_style: m.secStyle,
+    slash_commands: m.secSlash,
+    messaging: m.secMessaging,
+    subagents: m.secSubagents,
+    skills: m.secSkills,
+    featured_plugins: m.secFeatured,
+    user_information: m.secUser,
   }
-  const chosen = sections.data.filter((section) => value.includes(section.name))
-  const chars = chosen.reduce((sum, section) => sum + section.text.length, 0)
+  const variable = (label: string, field: string): Insert => ({
+    label,
+    code: field,
+    text: '{{.' + field + '}}',
+  })
+  // failure 取模板错误中属于 name 模板的说明，Go 的错误以 template: <name>: 标出模板
+  const failure = (name: 'system' | 'user') => {
+    const message = preview.error?.message
+    const at = message?.indexOf('template: ' + name + ':') ?? -1
+    return message !== undefined && at >= 0
+      ? fill(m.templateError, { message: message.slice(at + 'template: '.length) })
+      : undefined
+  }
+  const chars = (text: string | undefined) =>
+    text === undefined ? '' : fill(m.templateChars, { chars: formatNumber(text.length, locale) })
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-col gap-1">
-        <span className="text-base font-medium">{m.sectionsLabel}</span>
-        <p className="text-sm text-foreground-muted">
-          {fill(m.sectionsHint, { count: chosen.length, chars: formatNumber(chars, locale) })}
-        </p>
-      </div>
-      <ul className="flex flex-col divide-y divide-border rounded-md border border-border">
-        {sections.data.map((section) => {
-          const [name, hint] = labels[section.name] ?? [section.name, '']
-          const id = 'section-' + section.name
-          return (
-            <li key={section.name} className="flex flex-col gap-3 px-4 py-3">
-              <div className="flex items-start gap-3">
-                <span className="flex h-control-sm items-center pointer-coarse:h-touch">
-                  <Switch
-                    id={id}
-                    aria-describedby={id + '-hint'}
-                    checked={value.includes(section.name)}
-                    onCheckedChange={(checked) => {
-                      onChange(
-                        sections.data
-                          .map((item) => item.name)
-                          .filter((item) =>
-                            item === section.name ? checked : value.includes(item),
-                          ),
-                      )
-                    }}
-                  />
-                </span>
-                <div className="flex min-w-0 flex-1 flex-col gap-1">
-                  <div className="flex flex-wrap items-center justify-between gap-x-3">
-                    <label
-                      htmlFor={id}
-                      className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm"
-                    >
-                      <span className="font-medium">{name}</span>
-                      <span className="font-mono text-xs break-all text-foreground-muted">
-                        {section.name}
-                      </span>
-                    </label>
-                    <span className="flex shrink-0 items-center gap-1 text-xs text-foreground-muted tabular-nums">
-                      {fill(m.sectionChars, { chars: formatNumber(section.text.length, locale) })}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        aria-expanded={open === section.name}
-                        aria-controls={id + '-text'}
-                        onClick={() => {
-                          setOpen(open === section.name ? undefined : section.name)
-                        }}
-                      >
-                        {m.sectionShow}
-                        <ChevronDown
-                          size={16}
-                          aria-hidden
-                          className={open === section.name ? 'rotate-180' : ''}
-                        />
-                      </Button>
-                    </span>
-                  </div>
-                  <p id={id + '-hint'} className="text-sm text-foreground-muted">
-                    {hint}
-                  </p>
-                </div>
-              </div>
-              {open === section.name && (
-                <pre
-                  id={id + '-text'}
-                  className="max-h-[320px] overflow-y-auto rounded-md bg-muted px-4 py-3 font-mono text-xs leading-[20px] break-words whitespace-pre-wrap select-text"
-                >
-                  {section.text}
-                </pre>
-              )}
-            </li>
-          )
-        })}
-      </ul>
-    </div>
-  )
-}
-
-// PromptWrapField 选择自定义档 user 轮的包装方式
-export function PromptWrapField({
-  value,
-  onChange,
-}: {
-  value: Wrap
-  onChange: (value: Wrap) => void
-}) {
-  const m = useMessages(settingsMessages)
-  return (
-    <div className="flex flex-col gap-3">
-      <span className="text-base font-medium">{m.wrap}</span>
-      <RadioGroup
-        label={m.wrap}
-        value={value}
-        onValueChange={onChange}
-        options={[
-          { value: 'full', label: m.wrapFull, description: m.wrapFullHint },
-          { value: 'time', label: m.wrapTime, description: m.wrapTimeHint },
-          { value: 'none', label: m.wrapNone, description: m.wrapNoneHint },
+    <div className="flex flex-col gap-6">
+      <TemplateEditor
+        id="SYSTEM_PROMPT_TEMPLATE"
+        label={m.templateSystem}
+        hint={m.templateSystemHint}
+        rows={14}
+        value={system}
+        onChange={onSystemChange}
+        presets={[
+          { label: m.promptFull, text: tiers.full.system },
+          { label: m.promptMedium, text: tiers.medium.system },
+          { label: m.promptAggressive, text: tiers.aggressive.system },
         ]}
+        groups={[
+          {
+            label: m.templateVariables,
+            items: [
+              variable(m.varClient, 'Client'),
+              variable(m.varConversation, 'ConversationID'),
+              variable(m.varModel, 'ModelDisplayName'),
+              variable(m.varOS, 'OS'),
+              variable(m.varAppData, 'AppDataDir'),
+              variable(m.varSeparator, 'Separator'),
+              variable(m.varPlugins, 'FeaturedPlugins'),
+            ],
+          },
+          {
+            label: m.templateSections,
+            items: sections.map((section) => ({
+              label: sectionLabels[section.name] ?? section.name,
+              code: section.name,
+              text: section.source,
+            })),
+          },
+        ]}
+        status={system.trim() === '' ? m.templateSystemEmpty : chars(preview.data?.system)}
+        error={failure('system')}
+        locked={systemLocked}
+      />
+      <TemplateEditor
+        id="SYSTEM_PROMPT_USER_TEMPLATE"
+        label={m.templateUser}
+        hint={m.templateUserHint}
+        rows={6}
+        value={user}
+        onChange={onUserChange}
+        presets={[
+          { label: m.wrapFull, text: tiers.full.user },
+          { label: m.wrapTime, text: tiers.medium.user },
+          { label: m.wrapNone, text: '' },
+        ]}
+        groups={[
+          {
+            label: m.templateVariables,
+            items: [
+              variable(m.varText, 'Text'),
+              variable(m.varTime, 'LocalTime'),
+              variable(m.varModel, 'ModelDisplayName'),
+              { label: m.varFirst, code: 'First', text: '{{if .First}}{{end}}' },
+            ],
+          },
+        ]}
+        status={chars(preview.data?.user)}
+        error={failure('user')}
+        locked={userLocked}
       />
     </div>
   )

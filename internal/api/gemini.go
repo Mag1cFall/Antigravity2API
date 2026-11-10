@@ -19,6 +19,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// geminiRequest 为 generateContent、streamGenerateContent 与 countTokens 请求中服务使用的字段
 type geminiRequest struct {
 	Contents          []geminiContent             `json:"contents"`
 	SystemInstruction *geminiContent              `json:"systemInstruction"`
@@ -31,27 +32,28 @@ type geminiRequest struct {
 	GenerateContentRequest *geminiRequest `json:"generateContentRequest"`
 }
 
+// geminiContent 为一条内容
 type geminiContent struct {
 	Role  string       `json:"role"`
 	Parts []geminiPart `json:"parts"`
 }
 
+// geminiBlobPart 为 inlineData，mimeType 接受驼峰与下划线两种字段名
 type geminiBlobPart struct {
 	MIMEType      string `json:"mimeType"`
 	MIMETypeSnake string `json:"mime_type"`
 	Data          string `json:"data"`
 }
 
+// MIME 返回 inlineData 的媒体类型
 func (b *geminiBlobPart) MIME() string {
-	if b == nil {
-		return ""
-	}
 	if b.MIMEType != "" {
 		return b.MIMEType
 	}
 	return b.MIMETypeSnake
 }
 
+// geminiPart 为内容中的一个 part，inlineData 与 fileData 接受驼峰与下划线两种字段名
 type geminiPart struct {
 	Text             *string         `json:"text"`
 	Thought          bool            `json:"thought"`
@@ -75,6 +77,7 @@ type geminiPart struct {
 	MediaResolution json.RawMessage `json:"mediaResolution"`
 }
 
+// inline 返回 part 携带的 inlineData
 func (p geminiPart) inline() *geminiBlobPart {
 	if p.InlineData != nil {
 		return p.InlineData
@@ -87,6 +90,7 @@ func (p geminiPart) hasFile() bool {
 	return rawJSONConfigured(p.FileData) || rawJSONConfigured(p.FileDataSnake)
 }
 
+// geminiGenerationConfig 为 generationConfig 中服务使用的字段
 type geminiGenerationConfig struct {
 	Temperature        *float64        `json:"temperature"`
 	TopP               *float64        `json:"topP"`
@@ -176,6 +180,7 @@ func geminiResponseFormatValue(value string) string {
 	return value
 }
 
+// geminiToolGroup 为 tools 的一项：函数声明与 Google 搜索
 type geminiToolGroup struct {
 	FunctionDeclarations []struct {
 		Name                 string          `json:"name"`
@@ -190,6 +195,7 @@ type geminiToolGroup struct {
 	GoogleSearchRetrieval json.RawMessage `json:"googleSearchRetrieval"`
 }
 
+// geminiToolConfig 为 toolConfig 的函数调用配置
 type geminiToolConfig struct {
 	FunctionCallingConfig struct {
 		Mode                 string   `json:"mode"`
@@ -197,6 +203,7 @@ type geminiToolConfig struct {
 	} `json:"functionCallingConfig"`
 }
 
+// handleGeminiModels 分页列出实时目录中的模型
 func (s *server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 	models, err := s.service.Models(r.Context())
 	if err != nil {
@@ -247,6 +254,7 @@ func geminiPage[T any](query url.Values, items []T, defaultSize int, maxSize int
 	return items[offset:end], "", nil
 }
 
+// handleGeminiModel 返回单个模型，目录中没有时为 404
 func (s *server) handleGeminiModel(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("model")
 	models, err := s.service.Models(r.Context())
@@ -263,6 +271,7 @@ func (s *server) handleGeminiModel(w http.ResponseWriter, r *http.Request) {
 	writeGeminiError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("model %q is unavailable", modelID))
 }
 
+// geminiModelObject 把目录模型投影为 Gemini Model 资源
 func geminiModelObject(model antigravity.Model) map[string]any {
 	item := map[string]any{
 		"name":                       "models/" + model.ID,
@@ -285,6 +294,7 @@ func geminiModelObject(model antigravity.Model) map[string]any {
 	return item
 }
 
+// handleGeminiAction 处理 models/{model}:{method} 的 generateContent、streamGenerateContent 与 countTokens
 func (s *server) handleGeminiAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	separator := strings.LastIndex(action, ":")
@@ -422,6 +432,7 @@ func geminiJSONName(name string) string {
 	return builder.String()
 }
 
+// toGenerateRequest 把 Gemini 请求转换为生成请求，systemInstruction 中的媒体移到首个 user 消息开头
 func (request geminiRequest) toGenerateRequest(id string, model string) (antigravity.GenerateRequest, error) {
 	if err := request.GenerationConfig.validate(); err != nil {
 		return antigravity.GenerateRequest{}, err
@@ -553,6 +564,7 @@ func (config geminiGenerationConfig) candidates() int {
 	return int(*config.CandidateCount)
 }
 
+// geminiRole 把内容角色换成上游角色，省略时为 user
 func geminiRole(role string) (antigravity.Role, error) {
 	switch role {
 	case "", "user":
@@ -566,6 +578,7 @@ func geminiRole(role string) (antigravity.Role, error) {
 	}
 }
 
+// mapGeminiParts 转换 part 列表并返回其中是否有函数结果，每个 part 只能有一种数据，没有数据的 part 只保留思考签名
 func mapGeminiParts(input []geminiPart) ([]antigravity.Part, bool, error) {
 	parts := make([]antigravity.Part, 0, len(input))
 	hasResult := false
@@ -683,6 +696,7 @@ func mapGeminiParts(input []geminiPart) ([]antigravity.Part, bool, error) {
 	return parts, hasResult, nil
 }
 
+// geminiJSONObject 校验字段为 JSON object，省略时为空对象
 func geminiJSONObject(raw json.RawMessage, field string) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return json.RawMessage(`{}`), nil
@@ -694,6 +708,7 @@ func geminiJSONObject(raw json.RawMessage, field string) (json.RawMessage, error
 	return raw, nil
 }
 
+// mapGeminiTools 转换函数声明、Google 搜索与函数调用配置
 func mapGeminiTools(groups []geminiToolGroup, config geminiToolConfig) (antigravity.Tools, error) {
 	var mapped antigravity.Tools
 	for _, group := range groups {
@@ -823,6 +838,7 @@ func buildGeminiResponse(request antigravity.GenerateRequest, results []generati
 	return response
 }
 
+// geminiOutputParts 按事件顺序构造候选的 part：相邻的同类文本合并，独立签名并入相邻的没有签名的 part，否则由空文本 part 承载
 func geminiOutputParts(result generationResult) []map[string]any {
 	parts := make([]map[string]any, 0)
 	var pendingSignature string
@@ -842,7 +858,7 @@ func geminiOutputParts(result generationResult) []map[string]any {
 		parts = append(parts, part)
 	}
 
-	for _, event := range result.events {
+	for _, event := range mergedTextEvents(result.events) {
 		switch event.Kind {
 		case antigravity.EventText, antigravity.EventReasoning:
 			thought := event.Kind == antigravity.EventReasoning
@@ -859,9 +875,7 @@ func geminiOutputParts(result generationResult) []map[string]any {
 			}
 			appendPart(part, event.ThoughtSignature)
 		case antigravity.EventToolCall:
-			if event.ToolCall != nil {
-				appendPart(geminiFunctionCallPart(*event.ToolCall), event.ThoughtSignature)
-			}
+			appendPart(geminiFunctionCallPart(*event.ToolCall), event.ThoughtSignature)
 		case antigravity.EventMedia:
 			appendPart(geminiInlinePart(*event.Media), event.ThoughtSignature)
 		case antigravity.EventThoughtSignature:
@@ -897,6 +911,7 @@ func geminiSignaturePart(signature string) map[string]any {
 	return map[string]any{"text": "", "thoughtSignature": signature}
 }
 
+// geminiFunctionCallPart 构造 functionCall part，带函数调用的思考签名
 func geminiFunctionCallPart(call antigravity.FunctionCall) map[string]any {
 	part := map[string]any{"functionCall": map[string]any{
 		"id": call.ID, "name": call.Name, "args": call.Arguments,
@@ -907,6 +922,7 @@ func geminiFunctionCallPart(call antigravity.FunctionCall) map[string]any {
 	return part
 }
 
+// geminiSignedPart 在签名不为空时给 part 加上 thoughtSignature
 func geminiSignedPart(part map[string]any, signature string) map[string]any {
 	if signature != "" {
 		part["thoughtSignature"] = signature
@@ -914,6 +930,7 @@ func geminiSignedPart(part map[string]any, signature string) map[string]any {
 	return part
 }
 
+// geminiFinishReason 把结束原因换成 Gemini 的 FinishReason，未知原因为 OTHER
 func geminiFinishReason(reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "", "stop", "stop_sequence":
@@ -968,6 +985,7 @@ func setGeminiCandidateEnd(candidate map[string]any, result generationResult) {
 	}
 }
 
+// geminiUsage 把用量投影为 usageMetadata
 func geminiUsage(usage *antigravity.Usage) map[string]any {
 	metadata := map[string]any{
 		"promptTokenCount":     usage.InputTokens,
@@ -1078,9 +1096,6 @@ func geminiStreamCandidate(event antigravity.Event, index int) map[string]any {
 	case antigravity.EventReasoning:
 		part = geminiSignedPart(map[string]any{"text": event.Text, "thought": true}, event.ThoughtSignature)
 	case antigravity.EventToolCall:
-		if event.ToolCall == nil {
-			return nil
-		}
 		part = geminiSignedPart(geminiFunctionCallPart(*event.ToolCall), event.ThoughtSignature)
 	case antigravity.EventThoughtSignature:
 		if event.ThoughtSignature == "" {

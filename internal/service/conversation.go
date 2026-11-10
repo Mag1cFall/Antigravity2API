@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -18,6 +19,9 @@ import (
 
 // conversationTTL 为会话记录在最后一次使用后的保留时长
 const conversationTTL = 24 * time.Hour
+
+// conversationTemp 为写入会话文件时同目录临时文件的名称前缀
+const conversationTemp = ".conversation-"
 
 // conversation 表示一个客户端会话的 cascade 与 trajectory 标识、最近一次请求在摘要链中的位置与其成功生成的回答指纹、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 的思考签名与各签名摘要对应的模型族
 type conversation struct {
@@ -51,7 +55,7 @@ type conversations struct {
 	now   func() time.Time
 }
 
-// openConversations 读取 dir 下未过期的会话记录，目录不存在时创建
+// openConversations 读取 dir 下未过期的会话记录并删除写入中断留下的临时文件，目录不存在时创建
 func openConversations(dir string) (*conversations, error) {
 	c := &conversations{dir: dir, items: make(map[string]*conversation), now: time.Now}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -62,6 +66,9 @@ func openConversations(dir string) (*conversations, error) {
 		return nil, err
 	}
 	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), conversationTemp) {
+			os.Remove(filepath.Join(dir, entry.Name()))
+		}
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -125,8 +132,10 @@ func answerKey(parts []antigravity.Part) string {
 
 // digest 返回上一项摘要与本项内容的 SHA-256
 func digest(previous string, data []byte) string {
-	sum := sha256.Sum256(append([]byte(previous), data...))
-	return hex.EncodeToString(sum[:])
+	hash := sha256.New()
+	io.WriteString(hash, previous)
+	hash.Write(data)
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 // begin 为生成请求取得会话：先找最近一次请求是本次严格前缀的会话，其次找本次与之相同但尚未成功生成的会话，都没有时新建；记下本次的链位置与新消息的时间并落盘，返回会话副本，新建时副本的 New 为真
@@ -242,7 +251,7 @@ func (c *conversations) save(item *conversation) error {
 		return err
 	}
 	path := filepath.Join(c.dir, item.Cascade+".json")
-	temp, err := os.CreateTemp(c.dir, ".conversation-*")
+	temp, err := os.CreateTemp(c.dir, conversationTemp+"*")
 	if err != nil {
 		return err
 	}

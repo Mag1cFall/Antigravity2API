@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,7 +52,7 @@ type storedFile struct {
 	Size      int64     `json:"bytes"`
 	CreatedAt time.Time `json:"created_at"`
 	// ExpiresAt 为到期时间，为空时不到期
-	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 // expired 判断文件在 now 是否已到期
@@ -59,9 +60,11 @@ func (file storedFile) expired(now time.Time) bool {
 	return file.ExpiresAt != nil && !file.ExpiresAt.After(now)
 }
 
-// fileStore 在目录中保存上传文件：内容文件名为文件 ID，元数据为同名 .json
+// fileStore 在目录中保存上传文件：内容文件名为文件 ID，元数据为同名 .json；limit 大于 0 时文件总字节数超过它即从最早上传的文件起删除
 type fileStore struct {
-	dir string
+	dir   string
+	limit int64
+	mu    sync.Mutex
 }
 
 // fileStoreContext 为请求上下文中文件存储的键
@@ -111,18 +114,20 @@ func (store *fileStore) save(name, mimeType, purpose string, lifetime time.Durat
 		err = &http.MaxBytesError{Limit: fileMaxBytes}
 	}
 	if err == nil {
-		var metadata []byte
-		metadata, _ = json.Marshal(file)
+		metadata, _ := json.Marshal(file)
 		err = os.WriteFile(filepath.Join(store.dir, file.ID+".json"), metadata, 0o644)
 	}
 	if err != nil {
 		os.Remove(filepath.Join(store.dir, file.ID))
 		return storedFile{}, err
 	}
+	if _, err := store.list(); err != nil {
+		slog.Warn("回收上传文件失败", "dir", store.dir, "error", err)
+	}
 	return file, nil
 }
 
-// get 返回文件元数据，已到期的文件删除后返回不存在
+// get 返回文件元数据，已到期的文件与元数据没有 expires_at 字段的文件删除后返回不存在
 func (store *fileStore) get(id string) (storedFile, error) {
 	if !fileIDPattern.MatchString(id) {
 		return storedFile{}, errFileNotFound
@@ -138,7 +143,7 @@ func (store *fileStore) get(id string) (storedFile, error) {
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return file, err
 	}
-	if file.expired(time.Now()) {
+	if file.expired(time.Now()) || !bytes.Contains(raw, []byte(`"expires_at"`)) {
 		return storedFile{}, errors.Join(errFileNotFound, store.delete(id))
 	}
 	return file, nil
@@ -154,8 +159,10 @@ func (store *fileStore) read(id string) (storedFile, []byte, error) {
 	return file, data, err
 }
 
-// list 按创建时间从新到旧返回全部未到期的文件，到期的文件随之删除
+// list 按创建时间从新到旧返回全部未到期的文件，get 判定不存在的文件与总量超过 limit 的最早文件随之删除
 func (store *fileStore) list() ([]storedFile, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	entries, err := os.ReadDir(store.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -177,6 +184,16 @@ func (store *fileStore) list() ([]storedFile, error) {
 		}
 	}
 	slices.SortFunc(files, func(a, b storedFile) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	var total int64
+	for index, file := range files {
+		if total += file.Size; store.limit > 0 && total > store.limit {
+			var errs []error
+			for _, old := range files[index:] {
+				errs = append(errs, store.delete(old.ID))
+			}
+			return files[:index], errors.Join(errs...)
+		}
+	}
 	return files, nil
 }
 
@@ -193,11 +210,11 @@ func (store *fileStore) delete(id string) error {
 	return errors.Join(os.Remove(filepath.Join(store.dir, id+".json")), os.Remove(filepath.Join(store.dir, id)))
 }
 
-// reclaim 立即并在之后每隔 fileReclaimInterval 删除到期的文件
+// reclaim 立即并在之后每隔 fileReclaimInterval 删除到期与超出总量上限的文件
 func (store *fileStore) reclaim() {
 	for {
 		if _, err := store.list(); err != nil {
-			slog.Warn("删除到期文件失败", "dir", store.dir, "error", err)
+			slog.Warn("回收上传文件失败", "dir", store.dir, "error", err)
 		}
 		time.Sleep(fileReclaimInterval)
 	}

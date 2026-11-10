@@ -163,7 +163,7 @@ export function QuotaHistory() {
         ) : (
           <div className="flex flex-col gap-2">
             <div className="flex gap-2">
-              <div className="flex h-chart w-8 shrink-0 flex-col justify-between text-right text-xs text-foreground-muted tabular-nums">
+              <div className="flex h-chart w-8 shrink-0 flex-col justify-between text-right text-xs text-foreground-muted">
                 <span>100%</span>
                 <span>50%</span>
                 <span>0%</span>
@@ -224,9 +224,7 @@ export function QuotaHistory() {
                     </svg>
                     <span>{nameOf(q, series.group) + ' · ' + nameOf(q, series.window)}</span>
                     {last !== null && (
-                      <span className="text-foreground-muted tabular-nums">
-                        {formatPercent(last, locale)}
-                      </span>
+                      <span className="text-foreground-muted">{formatPercent(last, locale)}</span>
                     )}
                   </li>
                 )

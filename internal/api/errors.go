@@ -16,10 +16,12 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// httpStatusError 为自带 HTTP 状态码的错误
 type httpStatusError interface {
 	HTTPStatus() int
 }
 
+// decodeJSON 把请求体解析为 target，请求体只能含一个 JSON 值
 func decodeJSON(r *http.Request, target any) error {
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(target); err != nil {
@@ -32,6 +34,7 @@ func decodeJSON(r *http.Request, target any) error {
 	return nil
 }
 
+// writeJSON 以指定状态码写出 JSON 响应
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -81,6 +84,7 @@ func writeSSEHeartbeat(w http.ResponseWriter) error {
 	return http.NewResponseController(w).Flush()
 }
 
+// statusFromError 返回错误对应的 HTTP 状态：客户端取消为 503，超时为 504，上游错误与带状态的错误取其 4xx、5xx 状态，其余为 502
 func statusFromError(err error) int {
 	if errors.Is(err, context.Canceled) {
 		return http.StatusServiceUnavailable
@@ -101,9 +105,10 @@ func statusFromError(err error) int {
 
 // shouldWriteRequestError 判断仍在线的客户端是否需要收到结构化错误
 func shouldWriteRequestError(r *http.Request, err error) bool {
-	return err != nil && (!errors.Is(err, context.Canceled) || r.Context().Err() == nil)
+	return !errors.Is(err, context.Canceled) || r.Context().Err() == nil
 }
 
+// validHTTPStatus 保留 400 至 599 的状态码，其余换成 502
 func validHTTPStatus(status int) int {
 	if status >= 400 && status <= 599 {
 		return status
@@ -182,6 +187,7 @@ func writeRouteNotFound(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// protocolForRequest 按路径与 Anthropic-Version 请求头返回请求所属协议：gemini、anthropic 或 openai
 func protocolForRequest(r *http.Request) string {
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/v1beta/"), strings.HasPrefix(r.URL.Path, "/upload/"), strings.HasPrefix(r.URL.Path, "/v1/interactions"):
@@ -216,6 +222,7 @@ func publicErrorMessage(status int, message string) string {
 	return message
 }
 
+// writeOpenAIError 写出 OpenAI 错误响应
 func writeOpenAIError(w http.ResponseWriter, status int, code string, message string) {
 	writeJSON(w, status, openAIErrorBody(status, code, message))
 }
@@ -237,6 +244,7 @@ func writeOpenAIStreamError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
+// openAIErrorType 返回状态码与错误码对应的 OpenAI 错误类型
 func openAIErrorType(status int, code string) string {
 	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusNotFound || code == "invalid_request" || code == "invalid_api_key" || code == "model_not_found" {
 		return "invalid_request_error"
@@ -285,6 +293,7 @@ func setRetryAfter(w http.ResponseWriter, err error) int64 {
 	return seconds
 }
 
+// writeAnthropicError 写出 Anthropic 错误响应
 func writeAnthropicError(w http.ResponseWriter, status int, errorType string, message string) {
 	message = publicErrorMessage(status, message)
 	writeJSON(w, status, map[string]any{
@@ -296,6 +305,7 @@ func writeAnthropicError(w http.ResponseWriter, status int, errorType string, me
 	})
 }
 
+// writeGeminiError 写出 Gemini 错误响应
 func writeGeminiError(w http.ResponseWriter, status int, statusName string, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{
 		"code":    status,
@@ -304,6 +314,7 @@ func writeGeminiError(w http.ResponseWriter, status int, statusName string, mess
 	}})
 }
 
+// openAIErrorCode 返回错误对应的 OpenAI 错误码
 func openAIErrorCode(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "request_canceled"

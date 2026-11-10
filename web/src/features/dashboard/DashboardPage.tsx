@@ -70,7 +70,7 @@ function BestAccounts({ accounts, now }: { accounts: Account[]; now: Date }) {
                       <span className="text-sm font-medium wrap-anywhere">{best.account.id}</span>
                       <TierBadge tier={best.account.tier} />
                     </div>
-                    <div className="mt-2 flex max-w-[360px] flex-col gap-1">
+                    <div className="mt-2 flex max-w-field flex-col gap-1">
                       {groupBuckets(best.account.quota, group).map((bucket) => (
                         <QuotaLine
                           key={bucket.bucket_id}
@@ -152,7 +152,7 @@ function RecentRequests({ now }: { now: Date }) {
                     {record.account || '—'}
                   </span>
                 </span>
-                <span className="text-right text-xs text-foreground-muted tabular-nums">
+                <span className="text-right text-xs text-foreground-muted">
                   <span className="block">
                     {formatDateTime(new Date(record.time), now, locale)}
                   </span>

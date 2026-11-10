@@ -36,6 +36,7 @@ import { exportURL, transferMessages } from '@/features/accounts/TransferDialog'
 import type { Account } from '@/features/accounts/types'
 import { WarmupDialog } from '@/features/warmup/WarmupDialog'
 import { fill, useMessages } from '@/lib/i18n'
+import { changeParams } from '@/lib/params'
 import { useNow } from '@/lib/time'
 
 // pageSize 是每页账户数
@@ -109,17 +110,7 @@ export function AccountsPage() {
 
   const setParam = useCallback(
     (changes: Record<string, string>) => {
-      setParams(
-        (current) => {
-          const next = new URLSearchParams(current)
-          for (const [key, value] of Object.entries(changes)) {
-            if (value && value !== 'all') next.set(key, value)
-            else next.delete(key)
-          }
-          return next
-        },
-        { replace: true },
-      )
+      changeParams(setParams, changes)
     },
     [setParams],
   )
@@ -220,7 +211,7 @@ export function AccountsPage() {
                 label={m.filter}
                 value={filter}
                 onValueChange={(value) => {
-                  setParam({ state: value, page: '' })
+                  setParam({ state: value === 'all' ? '' : value, page: '' })
                 }}
                 options={(['all', ...statuses] as const).map((value) => ({
                   value,

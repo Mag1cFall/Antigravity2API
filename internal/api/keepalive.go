@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// 流式响应的心跳帧：OpenAI 与 Interactions 为 SSE 注释，Anthropic 为官方 ping 事件，Gemini 为不触发事件的空行
+// 流式响应的心跳帧：OpenAI 与 Interactions 为 SSE 注释，Responses 写出开场事件后改用 progressFrame，Anthropic 为官方 ping 事件，Gemini 为不触发事件的空行
 const (
 	sseHeartbeat       = ": ping\n\n"
 	anthropicHeartbeat = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
@@ -43,6 +43,13 @@ func openStream(w http.ResponseWriter, frame string) (*streamKeepalive, error) {
 	return writer, nil
 }
 
+// setFrame 替换之后写出的心跳帧
+func (writer *streamKeepalive) setFrame(frame string) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.frame = frame
+}
+
 // open 写出流式响应头，已写出时不再写
 func (writer *streamKeepalive) open() error {
 	writer.mu.Lock()
@@ -50,6 +57,7 @@ func (writer *streamKeepalive) open() error {
 	return writer.openLocked()
 }
 
+// openLocked 在持有锁时写出流式响应头，已写出时不再写
 func (writer *streamKeepalive) openLocked() error {
 	if writer.opened {
 		return nil
@@ -100,6 +108,7 @@ func (writer *streamKeepalive) FlushError() error {
 	return http.NewResponseController(writer.ResponseWriter).Flush()
 }
 
+// Unwrap 返回底层 ResponseWriter
 func (writer *streamKeepalive) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
 }
@@ -172,11 +181,13 @@ func (writer *nonstreamKeepaliveWriter) WriteHeader(status int) {
 	}
 }
 
+// Write 停止保活后写出数据
 func (writer *nonstreamKeepaliveWriter) Write(data []byte) (int, error) {
 	writer.stop()
 	return writer.ResponseWriter.Write(data)
 }
 
+// Unwrap 返回底层 ResponseWriter
 func (writer *nonstreamKeepaliveWriter) Unwrap() http.ResponseWriter {
 	return writer.ResponseWriter
 }

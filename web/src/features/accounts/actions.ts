@@ -13,7 +13,7 @@ import { errorReason } from '@/features/accounts/status'
 import type { Account, SwitchResult } from '@/features/accounts/types'
 import { useUsage } from '@/features/usage/queries'
 import type { UsageStats } from '@/features/usage/types'
-import { api } from '@/lib/api'
+import { api, errorMessage } from '@/lib/api'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
 // accountPath 返回账户的管理 API 路径
@@ -200,7 +200,7 @@ export function useBatchAccounts() {
         try {
           replaceAccount(client, await batchRequest(kind, account))
         } catch (error) {
-          failed.push(account.id + ': ' + (error instanceof Error ? error.message : String(error)))
+          failed.push(account.id + ': ' + errorMessage(error))
         }
       }
       return { kind, total: accounts.length, failed }
@@ -390,7 +390,7 @@ export function useRefreshAll() {
             const result = await api<Account>(accountPath(id) + '/quota', { method: 'POST' })
             recordQuotaResult(client, account, { account: result })
           } catch (error) {
-            const message = error instanceof Error ? error.message : String(error)
+            const message = errorMessage(error)
             failures.push([id, message])
             recordQuotaResult(client, account, { error: message })
           }
@@ -482,10 +482,7 @@ export function useAccountRemoval() {
               show([account.id])
               toast({
                 tone: 'error',
-                title: fill(m.deleteFailed, {
-                  email: account.id,
-                  message: error instanceof Error ? error.message : String(error),
-                }),
+                title: fill(m.deleteFailed, { email: account.id, message: errorMessage(error) }),
               })
             })
         }

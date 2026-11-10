@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
-	"github.com/Mag1cFall/Antigravity2API/internal/auth"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
@@ -120,12 +119,11 @@ func cheapest(models []antigravity.CatalogModel, group string) string {
 
 // Prewarm 是管理端的手动预热：以账户与模型经生成路径发送一条 Hi 并读完回答，成功后重新读取该账户的额度，返回模型所属额度组；账户不存在、已停用、未就绪或模型目录中没有该模型时不发送并返回原因
 func (s *Service) Prewarm(ctx context.Context, id, name string) (string, error) {
-	records := s.store.Accounts()
-	index := slices.IndexFunc(records, func(record *auth.Account) bool { return record.ID == id })
+	record, ok := s.store.Account(id)
 	switch {
-	case index < 0:
+	case !ok:
 		return "", &Error{Status: http.StatusNotFound, Message: "账户不存在: " + id}
-	case !records[index].Enabled:
+	case !record.Enabled:
 		return "", &Error{Status: http.StatusConflict, Message: "账户已停用"}
 	case s.account(id) == nil:
 		s.mu.Lock()

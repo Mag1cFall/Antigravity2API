@@ -329,8 +329,11 @@ func latency(sum int64, count int64, distribution *dense) UsageLatency {
 type source int
 
 const (
+	// fromRequests 读取原始请求记录
 	fromRequests source = iota
+	// fromHours 读取小时汇总
 	fromHours
+	// fromDays 读取本地日汇总
 	fromDays
 )
 
@@ -504,8 +507,6 @@ func (store *Store) scan(ctx context.Context, part segment, filters map[string][
 		if value.firstEventMS > 0 {
 			firstEvent[0] = bucketCount{bucket: histogramBucket(value.firstEventMS), count: 1}
 			value.firstEvent, value.firstEvents = firstEvent[:], 1
-		} else {
-			value.firstEventMS = 0
 		}
 		visit(value)
 	}

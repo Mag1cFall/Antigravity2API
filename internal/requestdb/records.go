@@ -76,12 +76,17 @@ func recordFilter(query RecordQuery) (string, []any) {
 		args = append(args, query.Status)
 	}
 	if query.Search != "" {
-		pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query.Search) + "%"
+		pattern := likePattern(query.Search)
 		clause += ` AND (id LIKE ? ESCAPE '\' OR client_request_id LIKE ? ESCAPE '\' OR response_id LIKE ? ESCAPE '\'` +
 			` OR cascade_id LIKE ? ESCAPE '\' OR error LIKE ? ESCAPE '\')`
 		args = append(args, pattern, pattern, pattern, pattern, pattern)
 	}
 	return clause, args
+}
+
+// likePattern 返回匹配包含 search 的文本的 LIKE 模式，search 中的通配符以反斜杠转义
+func likePattern(search string) string {
+	return "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(search) + "%"
 }
 
 // Records 按完成时间倒序返回一页请求记录，next 为 nil 表示没有更早的记录
@@ -189,28 +194,48 @@ func (store *Store) Detail(ctx context.Context, id string) (Detail, error) {
 	if !found {
 		return Detail{}, ErrNotFound
 	}
-	body := &Body{}
-	err = store.db.QueryRowContext(ctx, `SELECT request, request_size, response, response_size FROM bodies WHERE id = ?`, id).
-		Scan(&body.Request, &body.RequestSize, &body.Response, &body.ResponseSize)
-	switch {
-	case err == nil:
-		detail.Body = body
-	case !errors.Is(err, sql.ErrNoRows):
+	rows, err = store.db.QueryContext(ctx, `SELECT request, request_size, response, response_size FROM request_bodies WHERE id = ?`, id)
+	if err != nil {
 		return Detail{}, err
 	}
-	upstream, err := store.db.QueryContext(ctx, `SELECT request, request_size, response, response_size FROM upstream WHERE id = ? ORDER BY attempt`, id)
+	if rows.Next() {
+		body, err := scanBody(rows)
+		if err != nil {
+			return Detail{}, errors.Join(err, rows.Close())
+		}
+		detail.Body = &body
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return Detail{}, err
+	}
+	rows, err = store.db.QueryContext(ctx, `SELECT request, request_size, response, response_size FROM upstream_bodies WHERE id = ? ORDER BY attempt`, id)
 	if err != nil {
 		return Detail{}, err
 	}
 	detail.Upstream = []Body{}
-	for upstream.Next() {
-		var body Body
-		if err := upstream.Scan(&body.Request, &body.RequestSize, &body.Response, &body.ResponseSize); err != nil {
-			return Detail{}, errors.Join(err, upstream.Close())
+	for rows.Next() {
+		body, err := scanBody(rows)
+		if err != nil {
+			return Detail{}, errors.Join(err, rows.Close())
 		}
 		detail.Upstream = append(detail.Upstream, body)
 	}
-	return detail, errors.Join(upstream.Err(), upstream.Close())
+	return detail, errors.Join(rows.Err(), rows.Close())
+}
+
+// scanBody 读取一行压缩的请求与响应正文并还原
+func scanBody(rows *sql.Rows) (Body, error) {
+	var body Body
+	var request, response []byte
+	err := rows.Scan(&request, &body.RequestSize, &response, &body.ResponseSize)
+	if err != nil {
+		return Body{}, err
+	}
+	if body.Request, err = decompress(request); err != nil {
+		return Body{}, err
+	}
+	body.Response, err = decompress(response)
+	return body, err
 }
 
 // scanRow 读取 rowColumns 对应的一行

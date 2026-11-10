@@ -75,7 +75,7 @@ export function DurationInput({
         onChange={(event) => {
           write(event.target.value.replace(/[^\d.]/g, ''), unit)
         }}
-        className="min-w-0 flex-1 tabular-nums"
+        className="min-w-0 flex-1"
         {...props}
       />
       <Select

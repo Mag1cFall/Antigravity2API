@@ -37,7 +37,8 @@ type recordingService struct {
 // Generate 记录首次生成，等待生成开始期间写进度日志，记下本次生成未能开始的错误或清除先前的错误，并经 relay 转发事件
 func (service recordingService) Generate(ctx context.Context, request antigravity.GenerateRequest) (<-chan antigravity.Event, error) {
 	trace := requestdb.TraceFrom(ctx)
-	request.Accounts = ctx.Value(activeKey{}).(*activeRequest).accounts
+	active := ctx.Value(activeKey{}).(*activeRequest)
+	request.Accounts = active.accounts
 	if trace.Begin(request.ID, request.Model) {
 		row := trace.Snapshot()
 		service.server.events.begin(row)
@@ -52,7 +53,6 @@ func (service recordingService) Generate(ctx context.Context, request antigravit
 	if err != nil {
 		return nil, err
 	}
-	active := ctx.Value(activeKey{}).(*activeRequest)
 	observed := make(chan antigravity.Event)
 	active.relays.Go(func() {
 		defer close(observed)
@@ -164,7 +164,7 @@ func parameters(config antigravity.GenerationConfig) string {
 		text(config.Temperature), text(config.TopP), cmp.Or(config.ReasoningEffort, "-"), integer(config.ThinkingBudget), integer(config.MaxOutputTokens))
 }
 
-// recordPublic 为通过 API key 校验的 POST 请求建立 Trace 与停止入口，结束后写入请求账本并推送请求事件与日志；Responses 后台请求的 context 不随客户端连接关闭而取消
+// recordPublic 为通过 API key 校验的 POST 请求建立 Trace 与停止入口，结束后写入请求账本并推送请求事件与日志；multipart 请求体由处理函数边读边记，其余请求体先读完以取得流式、模型与后台标记；Responses 后台请求的 context 不随客户端连接关闭而取消
 func (s *server) recordPublic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.live.Load()
@@ -180,11 +180,19 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 			APIKey: maskKey(key), ClientIP: clientIP(r), UserAgent: r.UserAgent(), PromptTier: cfg.SystemPrompt,
 		})
 		trace.Watch(s.events.begin)
-		body, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		trace.SetRequest(probe(r.URL.Path, body))
+		request := &recordReader{ReadCloser: r.Body}
+		r.Body = request
+		background := false
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+			body, _ := io.ReadAll(request)
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			var stream bool
+			var model string
+			stream, model, background = probe(r.URL.Path, body)
+			trace.SetRequest(stream, model)
+		}
 		base := r.Context()
-		if background(r.URL.Path, body) {
+		if background {
 			base = context.WithoutCancel(base)
 		}
 		ctx, cancel := context.WithCancelCause(base)
@@ -204,7 +212,7 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		entry := trace.Finish(time.Now(), status, cause, errorMessage(writer.data, status), capture)
 		if capture {
 			entry.Body = &requestdb.Body{
-				Request: string(body[:min(len(body), requestdb.BodyLimit)]), RequestSize: int64(len(body)),
+				Request: string(request.data), RequestSize: request.size,
 				Response: string(writer.data), ResponseSize: writer.size,
 			}
 		}
@@ -266,27 +274,19 @@ func protocolOf(path string) string {
 	return "other"
 }
 
-// probe 从路径或请求体读取客户端是否请求流式与请求的模型
-func probe(path string, body []byte) (bool, string) {
+// probe 从路径或请求体读取客户端是否请求流式、请求的模型与是否为 Responses 后台请求，后台请求的生成不随客户端断开而取消
+func probe(path string, body []byte) (stream bool, model string, background bool) {
 	if rest, ok := strings.CutPrefix(path, "/v1beta/models/"); ok {
 		model, action, _ := strings.Cut(rest, ":")
-		return action == "streamGenerateContent", model
+		return action == "streamGenerateContent", model, false
 	}
 	var request struct {
-		Stream bool   `json:"stream"`
-		Model  string `json:"model"`
+		Stream     bool   `json:"stream"`
+		Model      string `json:"model"`
+		Background bool   `json:"background"`
 	}
 	json.Unmarshal(body, &request)
-	return request.Stream, request.Model
-}
-
-// background 返回请求是否为 Responses 后台请求，后台请求的生成不随客户端断开而取消
-func background(path string, body []byte) bool {
-	var request struct {
-		Background bool `json:"background"`
-	}
-	json.Unmarshal(body, &request)
-	return path == "/v1/responses" && request.Background
+	return request.Stream, request.Model, path == "/v1/responses" && request.Background
 }
 
 // errorMessage 返回错误响应体中 error.message 的文本，四个公开协议的错误体都有该字段
@@ -318,6 +318,21 @@ func outcome(state string) (slog.Level, string) {
 		return slog.LevelWarn, "请求已取消"
 	}
 	return slog.LevelInfo, "请求完成"
+}
+
+// recordReader 统计读出的请求体字节数并复制前 64 KiB
+type recordReader struct {
+	io.ReadCloser
+	data []byte
+	size int64
+}
+
+// Read 读取请求体并复制
+func (reader *recordReader) Read(data []byte) (int, error) {
+	count, err := reader.ReadCloser.Read(data)
+	reader.size += int64(count)
+	reader.data = append(reader.data, data[:min(count, max(requestdb.BodyLimit-len(reader.data), 0))]...)
+	return count, err
 }
 
 // recordWriter 记录响应状态码，并在保存正文或响应为错误时复制前 64 KiB
@@ -356,6 +371,11 @@ func (writer *recordWriter) FlushError() error {
 		writer.status = http.StatusOK
 	}
 	return http.NewResponseController(writer.ResponseWriter).Flush()
+}
+
+// Flush 刷新底层响应，供经 http.Flusher 刷新的 gzip 写出器使用
+func (writer *recordWriter) Flush() {
+	_ = writer.FlushError()
 }
 
 // Unwrap 返回底层响应供 http.ResponseController 使用

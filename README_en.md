@@ -245,7 +245,7 @@ export ANTHROPIC_MODEL=claude-opus-5-5
 claude
 ```
 
-Map the small model name used by Claude Code background tasks to a catalog model with `MODEL_MAPPING`, for example `MODEL_MAPPING=claude-haiku-5-5:gemini-3.8-flash-low`.
+Map the small model name used by Claude Code background tasks to a catalog model with `MODEL_MAPPING`, for example `MODEL_MAPPING=claude-haiku-5-5:gemini-3.8-flash-low`. The "Model mapping" tab on the models page of the admin UI adds and edits entries row by row.
 
 Codex (`~/.codex/config.toml`):
 
@@ -269,9 +269,9 @@ The system instruction of every generation request combines the system prompt of
 | `full` | All sections, client system prompt appended | Wrapped in the official format with local time and model selection |
 | `medium` | identity, guidelines, communication_style | Wrapped in the official format with local time |
 | `aggressive` | identity only | Sent as is |
-| `custom` | Sections selected in `SYSTEM_PROMPT_SECTIONS` | Wrapped as set by `SYSTEM_PROMPT_WRAP` |
+| `custom` | The template in `SYSTEM_PROMPT_TEMPLATE` | The template in `SYSTEM_PROMPT_USER_TEMPLATE` |
 
-"View text" on the settings page of the admin UI shows the system instruction and first user message each system prompt tier sends upstream. For `custom`, the settings page lists the official sections to keep, each with its text, and the user message wrapper.
+"View text" on the settings page of the admin UI shows the system instruction and first user message each system prompt tier sends upstream. For `custom`, the settings page edits two texts directly: the system instruction and the user message wrapper. "Load preset" puts the full text of a built-in tier into the editor, and "Insert" places an official section or a variable at the cursor. `{{.Client}}` stands for the client's own system prompt and `{{.Text}}` for the original user message. Both texts are Go `text/template` templates, and the line under each editor shows the character count with sample data filled in, or the template error.
 
 ## Project Layout
 
@@ -308,8 +308,8 @@ docs/                 # protocol, development and logging docs
 | `RUNTIME_DIR` | Runtime data directory: the request ledger `requests.db`, logs in `logs/`, uploaded `files/`, generated `media/`, conversation records, model catalogs and other runtime state | `runtime` |
 | `PROXY` | Global HTTP, HTTPS or SOCKS5 proxy; the comma-separated items form a proxy pool; the system proxy is used when empty | empty |
 | `SYSTEM_PROMPT` | System prompt tier: `full`, `medium`, `aggressive`, `custom` | `full` |
-| `SYSTEM_PROMPT_SECTIONS` | Official section names the `custom` tier keeps, comma-separated, joined in the official order | `identity,guidelines,communication_style` |
-| `SYSTEM_PROMPT_WRAP` | User message wrapper of the `custom` tier: `full` full official wrapper, `time` request and local time, `none` no wrapper | `time` |
+| `SYSTEM_PROMPT_TEMPLATE` | System instruction template of the `custom` tier; write multi-line text as one double-quoted line with `\n` | System instruction of the `medium` tier |
+| `SYSTEM_PROMPT_USER_TEMPLATE` | User message template of the `custom` tier; empty sends messages as is | User message wrapper of the `medium` tier |
 | `MODEL_MAPPING` | Client model names mapped to catalog model IDs, each item `alias:model ID`, comma separated | empty |
 | `MEDIA_OUTPUT` | How generated media is given: `inline` or `url` | `inline` |
 | `MEDIA_BASE_URL` | Service address used in media links, for example `https://ai.example.com`; when empty, the address of each request is used, following `X-Forwarded-Proto` behind a reverse proxy | empty |

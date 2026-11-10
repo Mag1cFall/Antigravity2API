@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { Session, Status, UpdateStatus } from '@/features/service/types'
 import { api } from '@/lib/api'
 
-// statusKey 是服务状态的查询键，事件流推送时直接写入
+// statusKey 是服务状态的查询键
 const statusKey = ['status'] as const
 
 // sessionKey 是管理会话的查询键

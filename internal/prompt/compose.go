@@ -6,7 +6,6 @@ import (
 	"io"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -16,16 +15,10 @@ import (
 var (
 	//go:embed official.txt
 	official string
-	//go:embed templates/full.system.tmpl
-	fullSystem string
 	//go:embed templates/full.user.tmpl
 	fullUser string
-	//go:embed templates/medium.system.tmpl
-	mediumSystem string
 	//go:embed templates/medium.user.tmpl
 	mediumUser string
-	//go:embed templates/aggressive.system.tmpl
-	aggressiveSystem string
 )
 
 // clientIdentity 匹配客户端系统提示中行首带归属声明的身份句：You are 加以 agent、assistant 或 AI 结尾的身份短语，8 个字符内接 created by、built on、based on 等归属声明，到句号为止
@@ -34,24 +27,27 @@ var clientIdentity = regexp.MustCompile(`(?im)^([ \t]*)(?:you are|you're)\s+(?:a
 // neutralIdentity 为替换客户端身份句的中性身份句
 const neutralIdentity = "You are an AI Agent."
 
+// keywordsLine 匹配客户端系统提示中含 RFC 2119 keywords 的一行与行尾换行，不区分大小写；上游拒绝带这一写法的关键词说明句
+var keywordsLine = regexp.MustCompile(`(?im)^.*RFC 2119 keywords.*\n?`)
+
 // featuredSection 为推荐插件段的段名，没有推荐插件时该段为空
 const featuredSection = "featured_plugins"
 
-// funcs 为 system 模板可用的函数
-var funcs = template.FuncMap{"sections": joinSections}
+// clientSuffix 为 system 模板中接在官方段之后的客户端系统提示，与官方段隔一个空行
+const clientSuffix = "{{if .Client}}\n\n{{.Client}}{{end}}"
 
-// builtins 为内置三档的模板
-var builtins = map[Tier]templates{
-	TierFull:       {System: fullSystem, User: fullUser},
-	TierMedium:     {System: mediumSystem, User: mediumUser},
-	TierAggressive: {System: aggressiveSystem},
+// Sections 为按官方顺序排列的官方段模板原文，officialSections 为各段解析后的模板
+var Sections, officialSections = parseSections(official)
+
+// SectionNames 为官方原文中的段名顺序
+var SectionNames = sectionNames()
+
+// Builtins 为内置三档的模板
+var Builtins = map[Tier]Custom{
+	TierFull:       {System: join(SectionNames...), User: fullUser},
+	TierMedium:     {System: join("identity", "guidelines", "communication_style"), User: mediumUser},
+	TierAggressive: {System: join("identity")},
 }
-
-// wrapTemplates 为各包装方式的 user 模板
-var wrapTemplates = map[string]string{WrapFull: fullUser, WrapTime: mediumUser, WrapNone: ""}
-
-// officialSections 为按段名切分的官方段模板，SectionNames 为官方原文中的段名顺序
-var officialSections, SectionNames = parseSections(official)
 
 // previewData 为预览使用的会话、设备与模型，客户端系统提示与用户消息为占位文字
 var previewData = systemData{
@@ -64,22 +60,20 @@ var previewData = systemData{
 	FeaturedPlugins:  "<featured plugins>\n\n",
 }
 
-// Section 为一个官方段的段名与以预览数据渲染的原文
+// Section 为一个官方段的段名与可放进 system 模板的原文，推荐插件段的原文只在有货架正文时输出
 type Section struct {
-	Name string `json:"name"`
-	Text string `json:"text"`
+	Name   string `json:"name"`
+	Source string `json:"source"`
 }
 
-// Preview 为一档以预览数据渲染的系统指令、首轮 user 消息与全部官方段
+// Preview 为一档以预览数据渲染的系统指令与首轮 user 消息
 type Preview struct {
-	System   string    `json:"system"`
-	User     string    `json:"user"`
-	Sections []Section `json:"sections"`
+	System string `json:"system"`
+	User   string `json:"user"`
 }
 
 // systemData 为 system 模板与官方段模板的数据，Separator 为设备系统的路径分隔符，FeaturedPlugins 为推荐插件段的货架正文
 type systemData struct {
-	Sections         map[string]string
 	Client           string
 	ConversationID   string
 	AppDataDir       string
@@ -104,14 +98,11 @@ type Composer struct {
 	user   *template.Template
 }
 
-// New 返回档位对应的 Composer，内置三档用内嵌模板，自定义档按 custom 选中的段与包装方式生成模板
+// New 返回档位对应的 Composer，内置三档用 Builtins 的模板，自定义档用 custom 的模板
 func New(tier Tier, custom Custom) (*Composer, error) {
-	source, ok := builtins[tier]
+	source, ok := Builtins[tier]
 	if tier == TierCustom {
-		var err error
-		if source, err = custom.templates(); err != nil {
-			return nil, err
-		}
+		source = custom
 	} else if !ok {
 		return nil, fmt.Errorf("unknown prompt tier %q", tier)
 	}
@@ -131,43 +122,21 @@ func New(tier Tier, custom Custom) (*Composer, error) {
 	return c, nil
 }
 
-// templates 按官方顺序以 sections 拼接选中的段，客户端系统提示接在最后，user 模板取包装方式对应的模板
-func (c Custom) templates() (templates, error) {
-	user, ok := wrapTemplates[c.Wrap]
-	if !ok {
-		return templates{}, fmt.Errorf("user 轮包装方式必须是 %s", strings.Join(Wraps, "、"))
-	}
-	var parts []string
-	for _, name := range c.Sections {
-		if !slices.Contains(SectionNames, name) {
-			return templates{}, fmt.Errorf("没有名为 %s 的官方段，可选 %s", name, strings.Join(SectionNames, "、"))
-		}
-	}
-	for _, name := range SectionNames {
-		if slices.Contains(c.Sections, name) {
-			parts = append(parts, strconv.Quote(name))
-		}
-	}
-	if len(parts) == 0 {
-		return templates{System: "{{.Client}}", User: user}, nil
-	}
-	return templates{System: "{{sections .Sections " + strings.Join(parts, " ") + "}}{{if .Client}}\n\n{{.Client}}{{end}}", User: user}, nil
-}
-
-// Render 以预览数据渲染档位的系统指令与首轮 user 消息，并列出全部官方段的原文
+// Render 以预览数据渲染档位的系统指令与首轮 user 消息
 func Render(tier Tier, custom Custom) (Preview, error) {
 	c, err := New(tier, custom)
 	if err != nil {
 		return Preview{}, err
 	}
-	data := previewData
-	data.Sections = renderSections(data)
-	preview := Preview{System: execute(c.system, data), User: "<user message>"}
-	if c.user != nil {
-		preview.User = execute(c.user, userData{Text: preview.User, LocalTime: "2026-10-15T14:00:00+08:00", First: true, ModelDisplayName: data.ModelDisplayName})
+	system, err := execute(c.system, previewData)
+	if err != nil {
+		return Preview{}, err
 	}
-	for _, name := range SectionNames {
-		preview.Sections = append(preview.Sections, Section{Name: name, Text: data.Sections[name]})
+	preview := Preview{System: system, User: "<user message>"}
+	if c.user != nil {
+		if preview.User, err = execute(c.user, userData{Text: preview.User, LocalTime: "2026-10-15T14:00:00+08:00", First: true, ModelDisplayName: previewData.ModelDisplayName}); err != nil {
+			return Preview{}, err
+		}
 	}
 	return preview, nil
 }
@@ -177,16 +146,18 @@ func (c *Composer) Tier() Tier {
 	return c.tier
 }
 
-// Compose 以会话 ID、账户设备档案与推荐插件段的货架正文渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，工具声明保持不变
-func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string) antigravity.GenerateRequest {
+// Compose 以会话 ID、账户设备档案与推荐插件段的货架正文渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，含 RFC 2119 keywords 的行删去，工具声明保持不变；模板执行出错时返回该错误
+func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string) (antigravity.GenerateRequest, error) {
 	data := deviceData(model, conversation, device, plugins)
-	data.Client = clientIdentity.ReplaceAllString(request.System, "${1}"+neutralIdentity+"${2}")
-	data.Sections = renderSections(data)
-	request.System = execute(c.system, data)
-	if c.user != nil {
-		request.Contents = c.wrap(request.Contents, times, model.DisplayName)
+	data.Client = keywordsLine.ReplaceAllString(clientIdentity.ReplaceAllString(request.System, "${1}"+neutralIdentity+"${2}"), "")
+	var err error
+	if request.System, err = execute(c.system, data); err != nil {
+		return request, err
 	}
-	return request
+	if c.user != nil {
+		request.Contents, err = c.wrap(request.Contents, times, model.DisplayName)
+	}
+	return request, err
 }
 
 // deviceData 返回以会话、设备档案与推荐插件段的货架正文填写的 system 模板数据
@@ -207,17 +178,22 @@ func deviceData(model antigravity.CatalogModel, conversation string, device anti
 
 // SectionTokens 返回以会话、设备档案与推荐插件段的货架正文渲染的各官方段按 ceil(UTF-8 字节数/3) 计的 token 数，键为段名
 func SectionTokens(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string) map[string]int {
+	data := deviceData(model, conversation, device, plugins)
 	tokens := make(map[string]int, len(officialSections))
-	for name, text := range renderSections(deviceData(model, conversation, device, plugins)) {
+	for name, section := range officialSections {
+		if name == featuredSection && plugins == "" {
+			tokens[name] = 0
+			continue
+		}
+		text, _ := execute(section, data)
 		tokens[name] = (len(text) + 2) / 3
 	}
 	return tokens
 }
 
-// validate 以各字段都有值的数据试渲染模板，提前暴露字段名与段名错误
+// validate 以各字段都有值的数据试渲染模板，提前暴露字段名错误
 func (c *Composer) validate() error {
-	data := systemData{Client: "client", ConversationID: "00000000-0000-0000-0000-000000000000", AppDataDir: "app", Separator: "/", OS: "os", ModelDisplayName: "model"}
-	data.Sections = renderSections(data)
+	data := systemData{Client: "client", ConversationID: "00000000-0000-0000-0000-000000000000", AppDataDir: "app", Separator: "/", OS: "os", ModelDisplayName: "model", FeaturedPlugins: "plugins"}
 	if err := c.system.Execute(io.Discard, data); err != nil {
 		return err
 	}
@@ -228,7 +204,7 @@ func (c *Composer) validate() error {
 }
 
 // wrap 用 user 模板包装每个含文本且不含工具结果的 user 轮，文本块以换行相连，其余 part 排在其后
-func (c *Composer) wrap(contents []antigravity.Content, times []string, model string) []antigravity.Content {
+func (c *Composer) wrap(contents []antigravity.Content, times []string, model string) ([]antigravity.Content, error) {
 	wrapped := slices.Clone(contents)
 	first := true
 	for index, content := range contents {
@@ -244,11 +220,14 @@ func (c *Composer) wrap(contents []antigravity.Content, times []string, model st
 				rest = append(rest, part)
 			}
 		}
-		text := execute(c.user, userData{Text: strings.Join(texts, "\n"), LocalTime: times[index], First: first, ModelDisplayName: model})
+		text, err := execute(c.user, userData{Text: strings.Join(texts, "\n"), LocalTime: times[index], First: first, ModelDisplayName: model})
+		if err != nil {
+			return nil, err
+		}
 		wrapped[index].Parts = append([]antigravity.Part{{Text: text}}, rest...)
 		first = false
 	}
-	return wrapped
+	return wrapped, nil
 }
 
 // userTurn 判断消息是否为需要包装的 user 轮
@@ -266,62 +245,62 @@ func userTurn(content antigravity.Content) bool {
 	return text
 }
 
-// parse 解析模板，引用不存在的段名时执行报错
+// parse 解析模板
 func parse(name, text string) (*template.Template, error) {
-	t, err := template.New(name).Option("missingkey=error").Funcs(funcs).Parse(text)
+	t, err := template.New(name).Parse(text)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s template: %w", name, err)
 	}
 	return t, nil
 }
 
-// parseSections 把官方原文切成以段名为键的模板并按出现顺序返回段名，各段以 <段名> 开头、</段名> 结尾、段间以换行相连
-func parseSections(text string) (map[string]*template.Template, []string) {
-	sections := map[string]*template.Template{}
-	var names []string
+// parseSections 把官方原文切成各段的原文与模板，各段以 <段名> 开头、</段名> 结尾、段间以换行相连；推荐插件段的原文包在 FeaturedPlugins 的条件中
+func parseSections(text string) ([]Section, map[string]*template.Template) {
+	var sections []Section
+	parsed := map[string]*template.Template{}
 	for text != "" {
 		name := text[1:strings.IndexByte(text, '>')]
 		end := strings.Index(text, "</"+name+">") + len(name) + 3
-		sections[name] = template.Must(template.New(name).Parse(text[:end]))
-		names = append(names, name)
+		source := text[:end]
+		parsed[name] = template.Must(template.New(name).Parse(source))
+		if name == featuredSection {
+			source = "{{if .FeaturedPlugins}}" + source + "{{end}}"
+		}
+		sections = append(sections, Section{Name: name, Source: source})
 		text = strings.TrimPrefix(text[end:], "\n")
 	}
-	return sections, names
+	return sections, parsed
 }
 
-// renderSections 以运行时字段渲染全部官方段，没有推荐插件时推荐插件段为空
-func renderSections(data systemData) map[string]string {
-	rendered := make(map[string]string, len(officialSections))
-	for name, section := range officialSections {
-		if name == featuredSection && data.FeaturedPlugins == "" {
-			rendered[name] = ""
-			continue
-		}
-		rendered[name] = execute(section, data)
+// sectionNames 返回 Sections 的段名
+func sectionNames() []string {
+	names := make([]string, len(Sections))
+	for index, section := range Sections {
+		names[index] = section.Name
 	}
-	return rendered
+	return names
 }
 
-// joinSections 按 names 的顺序以换行连接已渲染的非空官方段，段名不存在时报错
-func joinSections(rendered map[string]string, names ...string) (string, error) {
-	var parts []string
-	for _, name := range names {
-		text, ok := rendered[name]
-		if !ok {
-			return "", fmt.Errorf("没有名为 %s 的官方段", name)
-		}
-		if text != "" {
-			parts = append(parts, text)
-		}
-	}
-	return strings.Join(parts, "\n"), nil
-}
-
-// execute 渲染模板，模板已在 New 中以完整数据试渲染
-func execute(t *template.Template, data any) string {
+// join 返回按 names 的顺序以换行连接各官方段原文、末尾接客户端系统提示的 system 模板，推荐插件段与它之前的换行只在有货架正文时输出
+func join(names ...string) string {
 	var out strings.Builder
-	if err := t.Execute(&out, data); err != nil {
-		panic(err)
+	for index, name := range names {
+		source := Sections[slices.Index(SectionNames, name)].Source
+		switch {
+		case index == 0:
+			out.WriteString(source)
+		case name == featuredSection:
+			out.WriteString(strings.Replace(source, "}}", "}}\n", 1))
+		default:
+			out.WriteString("\n" + source)
+		}
 	}
-	return out.String()
+	return out.String() + clientSuffix
+}
+
+// execute 渲染模板
+func execute(t *template.Template, data any) (string, error) {
+	var out strings.Builder
+	err := t.Execute(&out, data)
+	return out.String(), err
 }

@@ -1,5 +1,5 @@
 // UsageLatency 对应 internal/requestdb 的 UsageLatency
-export interface UsageLatency {
+interface UsageLatency {
   avg_ms: number
   p50_ms: number
   p95_ms: number
@@ -27,31 +27,17 @@ export interface UsageStats {
 }
 
 // UsageBucket 对应 internal/requestdb 的 UsageBucket
-export interface UsageBucket extends UsageStats {
+interface UsageBucket extends UsageStats {
   at: string
 }
 
 // UsageGroup 对应 internal/requestdb 的 UsageGroup
-export interface UsageGroup extends UsageStats {
+interface UsageGroup extends UsageStats {
   key: string
-}
-
-// UsagePair 对应 internal/requestdb 的 UsagePair
-export interface UsagePair extends UsageStats {
-  account: string
-  model: string
-}
-
-// UsageSeries 对应 internal/requestdb 的 UsageSeries
-export interface UsageSeries {
-  key: string
-  other?: boolean
-  requests: number[]
-  tokens: number[]
 }
 
 // UsageRecent 对应 internal/requestdb 的 UsageRecent
-export interface UsageRecent {
+interface UsageRecent {
   minutes: number
   requests: number
   tokens: number
@@ -68,9 +54,6 @@ export interface UsageReport {
   previous: UsageStats
   recent: UsageRecent
   buckets: UsageBucket[]
-  stack_by: string
-  series: UsageSeries[]
   groups: Record<string, UsageGroup[]>
-  pairs: UsagePair[]
   options: Record<string, string[] | null>
 }

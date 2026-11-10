@@ -10,8 +10,7 @@ import { NumberInput } from '@/components/ui/number-input'
 import { Switch } from '@/components/ui/switch'
 import { Tooltip } from '@/components/ui/tooltip'
 import { AccountReason, AccountStatusBadge } from '@/features/accounts/AccountStatus'
-import type { RowActions } from '@/features/accounts/AccountTable'
-import { QuotaCell } from '@/features/accounts/AccountTable'
+import { QuotaCell, type RowActions } from '@/features/accounts/AccountTable'
 import {
   quotaFailure,
   useClearCooldown,
@@ -385,7 +384,7 @@ export function AccountDetailSheet({
                 ].map(([label, value]) => (
                   <div key={label} className="flex flex-col gap-1 bg-surface px-4 py-3">
                     <dt className="text-xs text-foreground-muted">{label}</dt>
-                    <dd className="text-md font-semibold tabular-nums">{value}</dd>
+                    <dd className="text-md font-semibold">{value}</dd>
                   </div>
                 ))}
               </dl>

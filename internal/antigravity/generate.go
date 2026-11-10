@@ -665,22 +665,22 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 // DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；不带 role 的输入过滤提示以 PromptBlockedError 结束
 func DecodeStream(reader io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1<<20), 64<<20)
+	scanner.Buffer(nil, 64<<20)
 	var usage *Usage
 	finish := Event{Kind: EventFinish}
 	for scanner.Scan() {
-		line, ok := strings.CutPrefix(scanner.Text(), "data: ")
+		line, ok := bytes.CutPrefix(scanner.Bytes(), []byte("data: "))
 		if !ok {
 			continue
 		}
 		var chunk streamChunk
-		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+		if err := json.Unmarshal(line, &chunk); err != nil {
 			events <- Event{Kind: EventError, Err: err, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
 			return
 		}
 		finish.TraceID = cmp.Or(chunk.TraceID, finish.TraceID)
 		if chunk.Error != nil {
-			events <- Event{Kind: EventError, Err: &UpstreamError{Status: chunk.Error.Code, Body: []byte(line)}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+			events <- Event{Kind: EventError, Err: &UpstreamError{Status: chunk.Error.Code, Body: bytes.Clone(line)}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
 			return
 		}
 		finish.ResponseID = cmp.Or(chunk.Response.ResponseID, finish.ResponseID)

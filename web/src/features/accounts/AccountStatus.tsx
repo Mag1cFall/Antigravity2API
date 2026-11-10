@@ -16,7 +16,7 @@ export function AccountStatusBadge({ account }: { account: Account }) {
   return <Badge tone={statusTone[status]}>{m[status]}</Badge>
 }
 
-// AccountReason 说明账户当前状态的原因：冷却到何时、为何异常、验证入口或进行中的请求数；列表中待验证账户只显示验证入口，原因在提示中
+// AccountReason 说明账户当前状态的原因：冷却到何时、为何异常、验证入口或进行中的请求数；待验证账户只显示验证入口，原因在提示中；full 时异常账户另显示错误码
 export function AccountReason({
   account,
   now,
@@ -31,27 +31,20 @@ export function AccountReason({
   const { locale } = useI18n()
   const status = statusOf(account)
   if (status === 'verify') {
-    const link = (
+    return (
       <a
         href={account.verify_url}
         target="_blank"
         rel="noopener noreferrer"
-        title={full ? undefined : m.verifyReason}
+        title={m.verifyReason}
         className="rounded-sm text-xs text-primary hover:underline"
       >
-        {full ? m.openVerify : m.verifyShort}
+        {m.verifyShort}
         <span className="whitespace-nowrap">
           {'\u2060'}
           <ExternalLink size={12} aria-hidden className="ml-1 inline align-[-1px]" />
         </span>
       </a>
-    )
-    if (!full) return link
-    return (
-      <span className="flex flex-col items-start gap-1 text-xs text-foreground-muted">
-        <span>{m.verifyReason}</span>
-        {link}
-      </span>
     )
   }
   if (status === 'error') {
@@ -94,5 +87,5 @@ export function AccountReason({
       </span>
     )
   }
-  return full ? <span className="text-xs text-foreground-muted">{m.readyReason}</span> : null
+  return null
 }

@@ -24,7 +24,7 @@ export const statusTone: Record<Status, BadgeTone> = {
 }
 
 // Tier 是套餐档位
-export type Tier = 'ultra' | 'ultraLite' | 'pro' | 'free' | 'unknown'
+type Tier = 'ultra' | 'ultraLite' | 'pro' | 'free' | 'unknown'
 
 // tierOf 按套餐 ID 返回档位，例如 g1-ultra-tier、g1-pro-tier、free-tier
 export function tierOf(tier: string): Tier {

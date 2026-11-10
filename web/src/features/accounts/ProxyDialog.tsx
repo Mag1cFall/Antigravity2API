@@ -8,7 +8,7 @@ import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
-import { replaceAccount } from '@/features/accounts/actions'
+import { accountPath, replaceAccount } from '@/features/accounts/actions'
 import { accountMessages } from '@/features/accounts/messages'
 import type { Account } from '@/features/accounts/types'
 import { validProxy } from '@/features/settings/schema'
@@ -22,7 +22,7 @@ export function ProxyDialog({
   onClose,
 }: {
   account: Account
-  trigger: HTMLElement | null
+  trigger: HTMLElement
   onClose: () => void
 }) {
   const m = useMessages(accountMessages)
@@ -33,11 +33,7 @@ export function ProxyDialog({
   const valid = proxy === 'direct' || validProxy(proxy)
   const changed = proxy !== (account.proxy ?? '')
   const save = useMutation({
-    mutationFn: () =>
-      api<Account>('/api/accounts/' + encodeURIComponent(account.id), {
-        method: 'PATCH',
-        json: { proxy },
-      }),
+    mutationFn: () => api<Account>(accountPath(account.id), { method: 'PATCH', json: { proxy } }),
     onSuccess: (result) => {
       replaceAccount(client, result)
       toast({ tone: 'success', title: fill(m.proxySaved, { email: account.id }) })

@@ -18,6 +18,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// responsesRequest 为 Responses 创建请求
 type responsesRequest struct {
 	Model              string            `json:"model"`
 	Input              json.RawMessage   `json:"input"`
@@ -62,6 +63,7 @@ func (request responsesRequest) compactThreshold() int64 {
 	return 0
 }
 
+// responsesTool 为 Responses 与 Interactions 请求声明的工具
 type responsesTool struct {
 	Type              string          `json:"type"`
 	Name              string          `json:"name,omitempty"`
@@ -78,6 +80,7 @@ type responsesTool struct {
 	Quality           string          `json:"quality,omitempty"`
 }
 
+// responsesInputItem 为 Responses 输入中的一项
 type responsesInputItem struct {
 	Type             string          `json:"type"`
 	ID               string          `json:"id"`
@@ -102,6 +105,7 @@ type responsesInputItem struct {
 	} `json:"reasoning"`
 }
 
+// responseState 是一个续接节点：续接起点 ID、本次上下文与内联指令，以及保存的响应或交互资源
 type responseState struct {
 	ParentID           string
 	Contents           []antigravity.Content
@@ -128,6 +132,7 @@ type storedItem struct {
 	Raw json.RawMessage
 }
 
+// responseStateCapacity 是保存的续接节点上限，超过时淘汰最早保存的节点
 const responseStateCapacity = 256
 
 // responseHistory 是续接起点的响应 ID 及其按顺序展开的完整上下文
@@ -151,6 +156,7 @@ type SavedState struct {
 	Data []byte
 }
 
+// responseStateStore 按保存顺序保存续接节点
 type responseStateStore struct {
 	mu      sync.Mutex
 	states  map[string]responseState
@@ -174,7 +180,7 @@ func newResponseStateStore(persist StateStore) *responseStateStore {
 	return store
 }
 
-// persistLocked 把仍存在且已结束的节点写入 persist，并删除已移除的节点；进行中的后台响应在服务重启后不能继续，只保存终态
+// persistLocked 把仍存在且已结束的节点写入 persist，并删除已移除的节点
 func (store *responseStateStore) persistLocked(saved, removed []string) {
 	if store.persist == nil {
 		return
@@ -201,6 +207,7 @@ func (state responseState) finished() bool {
 	return status.Status != "queued" && status.Status != "in_progress"
 }
 
+// Load 沿续接链展开 id 对应的完整上下文，链上缺少节点时返回 false
 func (store *responseStateStore) Load(id string) (responseHistory, bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -391,6 +398,7 @@ func (store *responseStateStore) ResolveItems(raw json.RawMessage) (json.RawMess
 	return json.Marshal(items)
 }
 
+// cloneResponseContents 复制内容列表及各内容的 part 列表
 func cloneResponseContents(contents []antigravity.Content) []antigravity.Content {
 	cloned := append([]antigravity.Content(nil), contents...)
 	for index := range cloned {
@@ -399,6 +407,7 @@ func cloneResponseContents(contents []antigravity.Content) []antigravity.Content
 	return cloned
 }
 
+// handleResponses 把 Responses 请求接入规范生成链路，按请求分到压缩、后台、流式或非流式处理
 func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	var request responsesRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -684,7 +693,7 @@ func responseHistoryOutput(result generationResult) antigravity.Content {
 		}
 		output.Parts = append(output.Parts, antigravity.Part{Text: text, Thought: thought, ThoughtSignature: signature})
 	}
-	for _, event := range result.events {
+	for _, event := range mergedTextEvents(result.events) {
 		switch event.Kind {
 		case antigravity.EventText:
 			if event.Text != "" {
@@ -693,15 +702,11 @@ func responseHistoryOutput(result generationResult) antigravity.Content {
 		case antigravity.EventReasoning:
 			appendText(event.Text, true, event.ThoughtSignature)
 		case antigravity.EventToolCall:
-			if event.ToolCall != nil {
-				call := *event.ToolCall
-				call.Arguments = append(json.RawMessage(nil), call.Arguments...)
-				output.Parts = append(output.Parts, antigravity.Part{FunctionCall: &call, ThoughtSignature: event.ThoughtSignature})
-			}
+			call := *event.ToolCall
+			call.Arguments = append(json.RawMessage(nil), call.Arguments...)
+			output.Parts = append(output.Parts, antigravity.Part{FunctionCall: &call, ThoughtSignature: event.ThoughtSignature})
 		case antigravity.EventThoughtSignature:
-			if event.ThoughtSignature != "" {
-				output.Parts = append(output.Parts, antigravity.Part{ThoughtSignature: event.ThoughtSignature})
-			}
+			output.Parts = append(output.Parts, antigravity.Part{ThoughtSignature: event.ThoughtSignature})
 		case antigravity.EventMedia:
 			media := *event.Media
 			output.Parts = append(output.Parts, antigravity.Part{InlineData: &media, ThoughtSignature: event.ThoughtSignature})
@@ -710,6 +715,7 @@ func responseHistoryOutput(result generationResult) antigravity.Content {
 	return output
 }
 
+// toGenerateRequest 转换输入、指令、工具与生成参数，另外返回输入中的内联指令
 func (request responsesRequest) toGenerateRequest(id string) (antigravity.GenerateRequest, []string, error) {
 	switch request.Truncation {
 	case "", "disabled", "auto":
@@ -1032,6 +1038,7 @@ func responsesHostedItem(kind string, raw json.RawMessage) (antigravity.Content,
 	return content, nil
 }
 
+// mapResponsesTools 转换 Responses 工具声明与 tool_choice，函数名重复时报错
 func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravity.Tools, error) {
 	var mapped antigravity.Tools
 	names := make(map[string]bool)
@@ -1140,6 +1147,14 @@ type responsesOutput struct {
 	grounding *antigravity.Grounding
 }
 
+// outputText 是输出项中逐事件累积的文本，编码为 JSON 字符串
+type outputText struct{ strings.Builder }
+
+// MarshalJSON 把累积的文本编码为 JSON 字符串
+func (text *outputText) MarshalJSON() ([]byte, error) {
+	return json.Marshal(text.String())
+}
+
 // itemID 返回新输出项的 ID：同类首项为前缀加响应 ID，之后的项再加序号
 func (o *responsesOutput) itemID(prefix string) string {
 	if !slices.ContainsFunc(o.items, func(item map[string]any) bool { return item["id"] == prefix+o.id }) {
@@ -1175,30 +1190,26 @@ func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) 
 	switch event.Kind {
 	case antigravity.EventReasoning:
 		if o.reasoning == nil || !isLast(o.reasoning) {
-			o.reasoning = map[string]any{"id": o.itemID("rs_"), "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": ""}}}
+			o.reasoning = map[string]any{"id": o.itemID("rs_"), "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": &outputText{}}}}
 			o.items = append(o.items, o.reasoning)
 			added = append(added, o.reasoning)
 		}
-		summary := o.reasoning["summary"].([]any)[0].(map[string]any)
-		summary["text"] = summary["text"].(string) + event.Text
+		o.reasoning["summary"].([]any)[0].(map[string]any)["text"].(*outputText).WriteString(event.Text)
 		signed(fmt.Sprintf("rs_%s_%d", o.id, len(o.items)), event.ThoughtSignature)
 	case antigravity.EventThoughtSignature:
 		signed(fmt.Sprintf("rs_%s_%d", o.id, len(o.items)), event.ThoughtSignature)
 	case antigravity.EventText:
 		if o.message == nil || !isLast(o.message) {
-			o.message = map[string]any{"id": o.itemID("msg_"), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "", "annotations": []any{}}}}
+			o.message = map[string]any{"id": o.itemID("msg_"), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": &outputText{}, "annotations": []any{}}}}
 			o.items = append(o.items, o.message)
 			added = append(added, o.message)
 		}
-		part := o.message["content"].([]any)[0].(map[string]any)
-		part["text"] = part["text"].(string) + event.Text
+		o.message["content"].([]any)[0].(map[string]any)["text"].(*outputText).WriteString(event.Text)
 	case antigravity.EventToolCall:
-		if event.ToolCall != nil {
-			signed("rs_"+event.ToolCall.ID, event.ToolCall.ThoughtSignature)
-			item := responseFunctionCall(*event.ToolCall, o.request.Tools)
-			o.items = append(o.items, item)
-			added = append(added, item)
-		}
+		signed("rs_"+event.ToolCall.ID, event.ToolCall.ThoughtSignature)
+		item := responseFunctionCall(*event.ToolCall, o.request.Tools)
+		o.items = append(o.items, item)
+		added = append(added, item)
 	case antigravity.EventMedia:
 		id := fmt.Sprintf("ig_%s_%d", o.id, o.images)
 		o.images++
@@ -1232,7 +1243,7 @@ func (o *responsesOutput) annotate(message map[string]any) []any {
 		return nil
 	}
 	part := message["content"].([]any)[0].(map[string]any)
-	part["annotations"] = responsesAnnotations(part["text"].(string), o.grounding)
+	part["annotations"] = responsesAnnotations(part["text"].(*outputText).String(), o.grounding)
 	return part["annotations"].([]any)
 }
 
@@ -1287,6 +1298,7 @@ func buildResponsesObject(id string, created int64, request responsesRequest, re
 	return response
 }
 
+// responseShell 返回回显请求字段、不含输出的响应对象
 func responseShell(id string, created int64, status string, request responsesRequest) map[string]any {
 	parallelToolCalls := true
 	if request.ParallelToolCalls != nil {
@@ -1339,6 +1351,7 @@ func responseShell(id string, created int64, status string, request responsesReq
 	}
 }
 
+// rawJSONValue 解码 JSON 值，未给出时返回 defaultValue
 func rawJSONValue(raw json.RawMessage, defaultValue any) any {
 	if len(raw) == 0 || string(raw) == "null" {
 		return defaultValue
@@ -1348,6 +1361,7 @@ func rawJSONValue(raw json.RawMessage, defaultValue any) any {
 	return value
 }
 
+// rawJSONConfigured 判断 JSON 字段是否给出了非 null 的值
 func rawJSONConfigured(raw json.RawMessage) bool {
 	value := strings.TrimSpace(string(raw))
 	return value != "" && value != "null"
@@ -1393,9 +1407,10 @@ func responsesNamespace(tools []responsesTool, name string) string {
 	return ""
 }
 
+// responsesUsage 返回 Responses 的 usage 对象
 func responsesUsage(usage *antigravity.Usage) map[string]any {
 	return map[string]any{
-		"input_tokens":  inputTokens(usage),
+		"input_tokens":  usage.InputTokens,
 		"output_tokens": outputTokens(usage),
 		"total_tokens":  usage.TotalTokens,
 		"input_tokens_details": map[string]any{
@@ -1420,6 +1435,7 @@ type responsesStreamWriter struct {
 	base     int
 }
 
+// streamResponses 写出 response.created 与 response.in_progress 后流式输出生成结果
 func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request responsesRequest, prepared responsesPreparation, id string, created int64, events <-chan antigravity.Event, compaction map[string]any) {
 	stream, err := openStream(w, sseHeartbeat)
 	defer stream.stop()
@@ -1433,6 +1449,7 @@ func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request
 	if err := writer.emit("response.in_progress", map[string]any{"response": responseShell(id, created, "in_progress", request)}); err != nil {
 		return
 	}
+	stream.setFrame(writer.progressFrame())
 	s.streamOutput(r.Context(), writer, prepared, events, compaction, func(err error) bool { return shouldWriteRequestError(r, err) })
 }
 
@@ -1475,6 +1492,14 @@ func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter
 	return nil
 }
 
+// progressFrame 返回流静默时重发的 response.in_progress 帧，序号沿用开场事件，外壳不回显请求字段
+func (writer *responsesStreamWriter) progressFrame() string {
+	shell := responseShell(writer.id, writer.created, "in_progress", responsesRequest{Model: writer.request.Model})
+	data, _ := json.Marshal(map[string]any{"type": "response.in_progress", "sequence_number": 1, "response": shell})
+	return "event: response.in_progress\ndata: " + string(data) + "\n\n"
+}
+
+// emit 以递增的 sequence_number 写出一个事件
 func (writer *responsesStreamWriter) emit(eventType string, payload map[string]any) error {
 	payload["type"] = eventType
 	payload["sequence_number"] = writer.sequence

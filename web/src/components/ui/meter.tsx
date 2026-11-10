@@ -13,7 +13,7 @@ const fillVariants = cva('h-full rounded-full transition-[width] duration-200 ea
 })
 
 // MeterTone 是比例条的语气
-export type MeterTone = 'info' | 'success' | 'warning' | 'error'
+type MeterTone = 'info' | 'success' | 'warning' | 'error'
 
 // Meter 是全圆角比例条，value 为 0 到 1，thin 时高 6px，否则 8px
 export function Meter({

@@ -33,6 +33,7 @@ import {
 import { useModels } from '@/features/models/queries'
 import { kindOf, type Model } from '@/features/models/types'
 import { fill, useMessages } from '@/lib/i18n'
+import { changeParams } from '@/lib/params'
 
 // clients 是提供配置的客户端
 const clients = ['claude-code', 'codex', 'opencode', 'cherry-studio', 'curl'] as const
@@ -215,14 +216,7 @@ export function ClientConfigs() {
     <Tabs
       value={client}
       onValueChange={(value) => {
-        setParams(
-          (current) => {
-            const next = new URLSearchParams(current)
-            next.set('client', value)
-            return next
-          },
-          { replace: true },
-        )
+        changeParams(setParams, { client: value })
       }}
     >
       <TabsList aria-label={m.clientLabel} className="max-sm:grid max-sm:w-full max-sm:grid-cols-2">

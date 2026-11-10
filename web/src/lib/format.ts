@@ -16,7 +16,7 @@ function numberFormat(locale: Locale, options: Intl.NumberFormatOptions = {}) {
 }
 
 // dateFormat 返回缓存的 Intl.DateTimeFormat
-function dateFormat(locale: Locale, options: Intl.DateTimeFormatOptions) {
+export function dateFormat(locale: Locale, options: Intl.DateTimeFormatOptions) {
   const key = 'd' + locale + JSON.stringify(options)
   let format = formatters.get(key) as Intl.DateTimeFormat | undefined
   if (!format) {

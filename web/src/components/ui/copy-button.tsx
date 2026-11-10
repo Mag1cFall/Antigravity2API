@@ -4,18 +4,16 @@ import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 
-// CopyButton 把文本写入剪贴板，成功后图标短暂变为对勾；text 非空时显示文字按钮，onCopy 在复制成功后调用
+// CopyButton 是把文本写入剪贴板的图标按钮，成功后图标短暂变为对勾，onCopy 在复制成功后调用
 export function CopyButton({
   value,
   label,
   copiedLabel,
-  text,
   onCopy,
 }: {
   value: string
   label: string
   copiedLabel: string
-  text?: string | undefined
   onCopy?: (() => void) | undefined
 }) {
   const [copied, setCopied] = useState(false)
@@ -34,19 +32,6 @@ export function CopyButton({
       onCopy?.()
     })
   }
-  const icon = copied ? (
-    <Check size={16} aria-hidden className="text-success-text" />
-  ) : (
-    <Copy size={16} aria-hidden />
-  )
-  if (text) {
-    return (
-      <Button size="sm" aria-label={label} onClick={copy}>
-        {icon}
-        {copied ? copiedLabel : text}
-      </Button>
-    )
-  }
   return (
     <Tooltip label={copied ? copiedLabel : label}>
       <Button
@@ -56,7 +41,11 @@ export function CopyButton({
         className="size-control-sm shrink-0"
         onClick={copy}
       >
-        {icon}
+        {copied ? (
+          <Check size={16} aria-hidden className="text-success-text" />
+        ) : (
+          <Copy size={16} aria-hidden />
+        )}
       </Button>
     </Tooltip>
   )

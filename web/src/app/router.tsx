@@ -43,8 +43,22 @@ export const router = createBrowserRouter([
           {
             path: 'models',
             lazy: async () => ({
-              Component: (await import('@/features/models/ModelsPage')).ModelsPage,
+              Component: (await import('@/features/models/ModelsLayout')).ModelsLayout,
             }),
+            children: [
+              {
+                index: true,
+                lazy: async () => ({
+                  Component: (await import('@/features/models/ModelsPage')).ModelsPage,
+                }),
+              },
+              {
+                path: 'mapping',
+                lazy: async () => ({
+                  Component: (await import('@/features/models/ModelMapping')).ModelMapping,
+                }),
+              },
+            ],
           },
           {
             path: 'requests',

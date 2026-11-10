@@ -64,7 +64,7 @@ export function Th({ className, ...props }: ComponentProps<'th'>) {
   )
 }
 
-// Td 是数据单元格，数字列用等宽数字；label 是窄屏卡片中显示在内容上方的列名
+// Td 是数据单元格，label 是窄屏卡片中显示在内容上方的列名
 export function Td({
   className,
   label,
@@ -74,7 +74,7 @@ export function Td({
   return (
     <td
       className={twMerge(
-        'border-t border-border px-3 py-3 align-middle tabular-nums first:pl-(--edge) last:pr-(--edge) max-sm:in-data-stack:min-w-0 max-sm:in-data-stack:border-0 max-sm:in-data-stack:p-0',
+        'border-t border-border px-3 py-3 align-middle first:pl-(--edge) last:pr-(--edge) max-sm:in-data-stack:min-w-0 max-sm:in-data-stack:border-0 max-sm:in-data-stack:p-0',
         className,
       )}
       {...props}

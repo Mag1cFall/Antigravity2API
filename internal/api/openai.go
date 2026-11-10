@@ -12,6 +12,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// chatRequest 为 Chat Completions 请求
 type chatRequest struct {
 	Model               string            `json:"model"`
 	Messages            []chatMessage     `json:"messages"`
@@ -54,10 +55,12 @@ type chatExtraBody struct {
 	} `json:"google"`
 }
 
+// chatStreamOptions 为流式请求的 stream_options
 type chatStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
 }
 
+// chatMessage 为 Chat 请求中的一条消息
 type chatMessage struct {
 	Role             string           `json:"role"`
 	Content          json.RawMessage  `json:"content"`
@@ -71,6 +74,7 @@ type chatMessage struct {
 	} `json:"function_call"`
 }
 
+// openAIToolCall 为 assistant 消息中的一个工具调用
 type openAIToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
@@ -89,6 +93,7 @@ type openAIToolCall struct {
 	} `json:"extra_content"`
 }
 
+// openAITool 为 Chat 请求声明的 function 或 custom 工具，legacy 表示来自旧式 functions
 type openAITool struct {
 	Type     string `json:"type"`
 	Function struct {
@@ -142,6 +147,7 @@ func lookupPublicModel(models []antigravity.Model, id string) (antigravity.Model
 	return antigravity.Model{}, false
 }
 
+// handleOpenAIModels 列出实时目录中的模型，带 Anthropic-Version 头时按 Anthropic 格式返回
 func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	models, err := s.service.Models(r.Context())
 	if err != nil {
@@ -195,6 +201,7 @@ func (s *server) handleOpenAIModel(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleChatCompletions 把 Chat Completions 请求接入规范生成链路，n 大于 1 时并行生成多个 choice
 func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var request chatRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -362,6 +369,7 @@ func (request chatRequest) toGenerateRequest(id string) (antigravity.GenerateReq
 	}, nil
 }
 
+// chatMessageContent 转换一条非系统消息：tool 消息为函数结果，assistant 消息带思考与工具调用
 func chatMessageContent(message chatMessage) (antigravity.Content, error) {
 	role, err := openAIRole(message.Role)
 	if err != nil {
@@ -413,6 +421,7 @@ func chatMessageContent(message chatMessage) (antigravity.Content, error) {
 	return antigravity.Content{Role: role, Parts: parts}, nil
 }
 
+// openAIRole 把消息角色映射为规范角色
 func openAIRole(role string) (antigravity.Role, error) {
 	switch role {
 	case "user":
@@ -474,6 +483,7 @@ func openAIContentParts(raw json.RawMessage) ([]antigravity.Part, error) {
 	return parts, nil
 }
 
+// openAIContentPart 转换一个文本、图片、文件、音频或视频内容块
 func openAIContentPart(raw json.RawMessage) (antigravity.Part, error) {
 	var block struct {
 		Type     string          `json:"type"`
@@ -547,6 +557,7 @@ func openAIContentPart(raw json.RawMessage) (antigravity.Part, error) {
 	}
 }
 
+// imageURLString 读取字符串或 {url} 对象形式的媒体地址
 func imageURLString(raw json.RawMessage) (string, error) {
 	var value string
 	if err := json.Unmarshal(raw, &value); err == nil {
@@ -561,6 +572,7 @@ func imageURLString(raw json.RawMessage) (string, error) {
 	return object.URL, nil
 }
 
+// mapOpenAITools 转换 Chat 工具声明与 tool_choice
 func mapOpenAITools(tools []openAITool, choice json.RawMessage) (antigravity.Tools, error) {
 	var mapped antigravity.Tools
 	for _, tool := range tools {
@@ -704,6 +716,7 @@ func (reference toolReference) functionName() string {
 	return ""
 }
 
+// generationConfig 转换采样、停止序列、思考与返回格式参数
 func (request chatRequest) generationConfig() (antigravity.GenerationConfig, error) {
 	if request.N != nil && (*request.N < 1 || *request.N > maxChatChoices) {
 		return antigravity.GenerationConfig{}, fmt.Errorf("n must be between 1 and %d", maxChatChoices)
@@ -775,6 +788,7 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 	return config, nil
 }
 
+// decodeStopSequences 读取字符串或字符串数组形式的 stop
 func decodeStopSequences(raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
@@ -801,6 +815,7 @@ func normalizeStopSequences(values []string) []string {
 	return normalized
 }
 
+// buildChatCompletion 构造非流式 chat.completion 响应
 func buildChatCompletion(id string, created int64, model string, results []generationResult, tools []openAITool, media mediaOutput) map[string]any {
 	choices := make([]any, 0, len(results))
 	response := map[string]any{
@@ -851,6 +866,7 @@ func chatCompletionChoice(index int, result generationResult, tools []openAITool
 	}
 }
 
+// streamChatCompletion 写出各 choice 的 chunk、可选的 usage chunk 与 [DONE]
 func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, request chatRequest, id string, created int64, choices *chatChoices) {
 	stream, err := openStream(w, sseHeartbeat)
 	defer stream.stop()
@@ -933,9 +949,6 @@ func (choice *chatStreamChoice) emit(event antigravity.Event) error {
 		choice.openLine = false
 		return choice.write(choice.index, map[string]any{"content": content}, nil)
 	case antigravity.EventToolCall:
-		if event.ToolCall == nil {
-			return nil
-		}
 		call := event.ToolCall
 		if legacyFunctionTools(choice.tools) {
 			return choice.write(choice.index, map[string]any{"function_call": legacyFunctionCall(*call)}, nil)
@@ -948,6 +961,7 @@ func (choice *chatStreamChoice) emit(event antigravity.Event) error {
 	return nil
 }
 
+// writeChatChunk 写出一个 chat.completion.chunk，include_usage 时带值为 null 的 usage
 func writeChatChunk(w http.ResponseWriter, id string, created int64, model string, index int, delta map[string]any, finish *string, includeUsage bool) error {
 	choice := map[string]any{
 		"index":         index,
@@ -967,6 +981,7 @@ func writeChatChunk(w http.ResponseWriter, id string, created int64, model strin
 	return writeSSE(w, "", chunk)
 }
 
+// openAIFinishReason 把上游结束原因映射为 OpenAI finish_reason
 func openAIFinishReason(reason string, hasTools bool) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "max_tokens", "max_output_tokens", "length":
@@ -1013,6 +1028,7 @@ func contentFilterFinishReason(reason string) bool {
 	return false
 }
 
+// openAIToolCallOutput 把函数调用投影为 Chat tool_calls 列表
 func openAIToolCallOutput(calls []antigravity.FunctionCall, tools []openAITool) []map[string]any {
 	output := make([]map[string]any, 0, len(calls))
 	for _, call := range calls {
@@ -1036,13 +1052,15 @@ func openAIToolCallItem(call antigravity.FunctionCall, tools []openAITool) map[s
 	return item
 }
 
+// openAIGoogleThoughtSignature 返回携带思考签名的 extra_content
 func openAIGoogleThoughtSignature(signature string) map[string]any {
 	return map[string]any{"google": map[string]string{"thought_signature": signature}}
 }
 
+// openAIUsage 返回 Chat 与 Completions 的 usage 对象
 func openAIUsage(usage *antigravity.Usage) map[string]any {
 	return map[string]any{
-		"prompt_tokens":     inputTokens(usage),
+		"prompt_tokens":     usage.InputTokens,
 		"completion_tokens": outputTokens(usage),
 		"total_tokens":      usage.TotalTokens,
 		"prompt_tokens_details": map[string]any{

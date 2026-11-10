@@ -9,6 +9,12 @@ export class ApiError extends Error {
   }
 }
 
+// errorMessage 返回错误的说明文字
+export function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+// ErrorBody 是管理 API 错误响应的正文
 interface ErrorBody {
   error?: { code?: string; message?: string }
 }
@@ -31,7 +37,7 @@ export async function api<T>(
       credentials: 'same-origin',
     })
   } catch (error) {
-    throw new ApiError(0, 'network', error instanceof Error ? error.message : String(error))
+    throw new ApiError(0, 'network', errorMessage(error))
   }
   if (response.status === 204) return undefined as T
   const text = await response.text()

@@ -19,6 +19,8 @@ type Options struct {
 	APIKeys func() []string
 	// FilesDir 为 Files API 上传文件的保存目录
 	FilesDir string
+	// FilesLimit 为上传文件目录的总字节上限，超过时从最早上传的文件起删除
+	FilesLimit int64
 	// MediaDir 为以本服务链接输出时生成媒体的保存目录
 	MediaDir string
 	// MediaLimit 为媒体目录的总字节上限，超过时删除最久未使用的文件
@@ -42,6 +44,7 @@ type ResponseModes struct {
 	FakeStream bool
 }
 
+// server 是公开协议层的处理函数共用的状态
 type server struct {
 	service        antigravity.Service
 	responseStates *responseStateStore
@@ -55,11 +58,12 @@ type server struct {
 	background sync.Map
 }
 
+// idSequence 是 newID 的进程内序号
 var idSequence atomic.Uint64
 
 // NewHandler 返回挂载四个公开协议与目录端点的 http.Handler
 func NewHandler(service antigravity.Service, options Options) http.Handler {
-	s := &server{service: service, responseStates: newResponseStateStore(options.ResponseStates), interactions: newResponseStateStore(options.InteractionStates), files: &fileStore{dir: options.FilesDir}, uploads: &geminiUploads{sessions: make(map[string]*geminiUpload)}, media: &mediaStore{dir: options.MediaDir, limit: options.MediaLimit}, mediaLinks: options.MediaLinks, responseModes: options.ResponseModes}
+	s := &server{service: service, responseStates: newResponseStateStore(options.ResponseStates), interactions: newResponseStateStore(options.InteractionStates), files: &fileStore{dir: options.FilesDir, limit: options.FilesLimit}, uploads: &geminiUploads{sessions: make(map[string]*geminiUpload)}, media: &mediaStore{dir: options.MediaDir, limit: options.MediaLimit}, mediaLinks: options.MediaLinks, responseModes: options.ResponseModes}
 	if options.FilesDir != "" {
 		go s.files.reclaim()
 	}
@@ -137,6 +141,7 @@ func waitLaunchMiddleware(wait func(context.Context), next http.Handler) http.Ha
 	})
 }
 
+// newID 返回带前缀、纳秒时间与序号的 ID
 func newID(prefix string) string {
 	return fmt.Sprintf("%s_%d_%d", prefix, time.Now().UnixNano(), idSequence.Add(1))
 }

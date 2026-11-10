@@ -2,6 +2,7 @@ import { CircleAlert } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { errorMessage } from '@/lib/api'
 
 // useDelayedFlag 让加载指示延迟 200ms 出现，出现后至少保持 300ms
 function useDelayedFlag(active: boolean) {
@@ -104,9 +105,7 @@ export function ErrorState({
       </span>
       <div className="flex max-w-prose flex-col gap-1">
         <p className="text-md font-semibold">{title}</p>
-        <p className="text-sm break-words text-foreground-muted">
-          {error instanceof Error ? error.message : String(error)}
-        </p>
+        <p className="text-sm break-words text-foreground-muted">{errorMessage(error)}</p>
       </div>
       {onRetry && <Button onClick={onRetry}>{retryLabel}</Button>}
     </div>

@@ -1,23 +1,25 @@
-// Package requestdb 在本地 SQLite 中保存公开 API 的请求记录、小时与本地日汇总、正文、上游尝试正文、额度快照与 WARN 以上的服务日志
+// Package requestdb 在本地 SQLite 中保存公开 API 的请求记录、小时与本地日汇总、gzip 压缩的正文与上游尝试正文、额度快照与 WARN 以上的服务日志
 package requestdb
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/klauspost/compress/gzip"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/sqlitedb"
 )
 
 // Retention 是请求记录、汇总、额度快照与日志的保留时长
@@ -47,6 +49,7 @@ const rollupColumns = `
  cost_usd REAL NOT NULL, unpriced INTEGER NOT NULL, duration_hist BLOB NOT NULL, first_event_hist BLOB NOT NULL, last_time INTEGER NOT NULL,
  PRIMARY KEY (start, model, account, api_key, protocol, state, quota_group, status)`
 
+// schema 是账本数据库的建表语句
 const schema = `
 CREATE TABLE IF NOT EXISTS requests (
  id TEXT PRIMARY KEY, time INTEGER NOT NULL, client_request_id TEXT NOT NULL, response_id TEXT NOT NULL,
@@ -64,17 +67,18 @@ CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
 CREATE INDEX IF NOT EXISTS requests_state_time ON requests(state, time);
 CREATE TABLE IF NOT EXISTS hours (` + rollupColumns + `) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS days (` + rollupColumns + `) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS bodies (
+CREATE TABLE IF NOT EXISTS request_bodies (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, time INTEGER NOT NULL,
- request TEXT NOT NULL, request_size INTEGER NOT NULL, response TEXT NOT NULL, response_size INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS upstream (
+ request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS upstream_bodies (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, attempt INTEGER NOT NULL, time INTEGER NOT NULL,
- request TEXT NOT NULL, request_size INTEGER NOT NULL, response TEXT NOT NULL, response_size INTEGER NOT NULL,
+ request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL,
  UNIQUE (id, attempt));
 CREATE TABLE IF NOT EXISTS quota_snapshots (
  time INTEGER NOT NULL, account TEXT NOT NULL, bucket_id TEXT NOT NULL, window TEXT NOT NULL,
  remaining_fraction REAL NOT NULL, reset_time INTEGER);
 CREATE INDEX IF NOT EXISTS quota_snapshots_account_time ON quota_snapshots(account, time);
+CREATE INDEX IF NOT EXISTS quota_snapshots_time ON quota_snapshots(time);
 CREATE TABLE IF NOT EXISTS logs (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, level TEXT NOT NULL, source TEXT NOT NULL,
  event TEXT NOT NULL, message TEXT NOT NULL, request_id TEXT NOT NULL, model TEXT NOT NULL, data TEXT NOT NULL);
@@ -217,15 +221,11 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	options := url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)"}}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?"+options.Encode())
+	db, err := sqlitedb.Open(path, schema)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("初始化请求账本: %w", err)
 	}
 	db.SetMaxOpenConns(4)
-	if _, err := db.Exec(schema); err != nil {
-		return nil, errors.Join(fmt.Errorf("初始化请求账本: %w", err), db.Close())
-	}
 	store := &Store{db: db, writes: make(chan write, queueLimit), done: make(chan struct{})}
 	if err := store.alignDays(); err != nil {
 		return nil, errors.Join(fmt.Errorf("重建本地日汇总: %w", err), db.Close())
@@ -394,16 +394,16 @@ func (store *Store) write(batch []write) (err error) {
 		}
 		row := item.entry.Row
 		if body := item.entry.Body; body != nil {
-			trimmed["bodies"] = true
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
-				row.ID, row.Time.UnixMilli(), body.Request, body.RequestSize, body.Response, body.ResponseSize); err != nil {
+			trimmed["request_bodies"] = true
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO request_bodies (id,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?)`,
+				row.ID, row.Time.UnixMilli(), compress(body.Request), body.RequestSize, compress(body.Response), body.ResponseSize); err != nil {
 				return err
 			}
 		}
 		for index, body := range item.entry.Upstream {
-			trimmed["upstream"] = true
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO upstream (id,attempt,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?,?)`,
-				row.ID, index, row.Time.UnixMilli(), body.Request, body.RequestSize, body.Response, body.ResponseSize); err != nil {
+			trimmed["upstream_bodies"] = true
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO upstream_bodies (id,attempt,time,request,request_size,response,response_size) VALUES (?,?,?,?,?,?,?)`,
+				row.ID, index, row.Time.UnixMilli(), compress(body.Request), body.RequestSize, compress(body.Response), body.ResponseSize); err != nil {
 				return err
 			}
 		}
@@ -480,20 +480,44 @@ func mergeRollup(tx *sql.Tx, table string, key rollupKey, value *entry) error {
 	return err
 }
 
-// prune 删除超过保留期的数据，记录与汇总都从截止时间所在本地日的起点开始保留，使三层数据覆盖同一范围
+// gzipWriters 复用正文的 gzip 压缩器
+var gzipWriters = sync.Pool{New: func() any { return gzip.NewWriter(nil) }}
+
+// compress 以 gzip 压缩一段正文
+func compress(text string) []byte {
+	var buffer bytes.Buffer
+	writer := gzipWriters.Get().(*gzip.Writer)
+	defer gzipWriters.Put(writer)
+	writer.Reset(&buffer)
+	io.WriteString(writer, text)
+	writer.Close()
+	return buffer.Bytes()
+}
+
+// decompress 还原 gzip 压缩的正文
+func decompress(data []byte) (string, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	text, err := io.ReadAll(reader)
+	return string(text), err
+}
+
+// prune 删除超过保留期的数据并把空闲页交还文件系统，记录与汇总都从截止时间所在本地日的起点开始保留，使三层数据覆盖同一范围
 func (store *Store) prune() {
 	day, _ := localDay(time.Now().Add(-Retention).UnixMilli())
 	hour := floorDiv(day, hourMS) * hourMS
 	var errs []error
 	for _, statement := range []string{
-		`DELETE FROM requests WHERE time < ?`, `DELETE FROM hours WHERE start < ?`, `DELETE FROM bodies WHERE time < ?`,
-		`DELETE FROM upstream WHERE time < ?`, `DELETE FROM quota_snapshots WHERE time < ?`, `DELETE FROM logs WHERE time < ?`,
+		`DELETE FROM requests WHERE time < ?`, `DELETE FROM hours WHERE start < ?`, `DELETE FROM request_bodies WHERE time < ?`,
+		`DELETE FROM upstream_bodies WHERE time < ?`, `DELETE FROM quota_snapshots WHERE time < ?`, `DELETE FROM logs WHERE time < ?`,
 	} {
 		_, err := store.db.Exec(statement, hour)
 		errs = append(errs, err)
 	}
 	_, err := store.db.Exec(`DELETE FROM days WHERE start < ?`, day)
-	if err := errors.Join(append(errs, err)...); err != nil {
+	if err := errors.Join(append(errs, err, sqlitedb.Reclaim(context.Background(), store.db))...); err != nil {
 		slog.Error("请求账本清理失败 | 错误="+err.Error(), "source", "service")
 	}
 }

@@ -7,7 +7,7 @@ import { Field } from '@/components/ui/field'
 import { Textarea } from '@/components/ui/input'
 import { keepAccounts } from '@/features/accounts/actions'
 import { accountsKey } from '@/features/accounts/queries'
-import { api } from '@/lib/api'
+import { api, errorMessage } from '@/lib/api'
 import { defineMessages, fill, useMessages } from '@/lib/i18n'
 
 // transferMessages 是账户文件导入与导出的文案
@@ -106,10 +106,7 @@ export function ImportAccountFiles() {
           merged.accounts.push(...response.accounts)
           merged.failed.push(...response.failed)
         } catch (error) {
-          merged.failed.push({
-            account: source.name,
-            error: error instanceof Error ? error.message : String(error),
-          })
+          merged.failed.push({ account: source.name, error: errorMessage(error) })
         }
       }
       return merged
@@ -215,7 +212,7 @@ export function ImportAccountFiles() {
       {result && result.failed.length > 0 ? (
         <div role="status" className="flex flex-col gap-1 text-sm">
           <p>{fill(m.partial, { count: result.accounts.length, failed: result.failed.length })}</p>
-          <ul className="max-h-32 overflow-y-auto text-xs text-error-text">
+          <ul className="overflow-y-auto text-xs text-error-text">
             {result.failed.map((item) => (
               <li key={item.account + item.error} className="break-words">
                 {fill(m.failure, { account: item.account, error: item.error })}

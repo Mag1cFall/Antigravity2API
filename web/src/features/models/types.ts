@@ -15,7 +15,7 @@ export interface Model {
 }
 
 // ModelKind 是模型的用途：对话、生图、语音转写或代码补全
-export type ModelKind = 'chat' | 'image' | 'transcription' | 'completion'
+type ModelKind = 'chat' | 'image' | 'transcription' | 'completion'
 
 // kindOf 按目录能力返回模型用途
 export function kindOf(model: Model): ModelKind {

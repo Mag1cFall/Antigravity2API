@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
+
+	"github.com/Mag1cFall/Antigravity2API/internal/sqlitedb"
 )
 
 // logData 是 logs 表 data 列中的请求记录与其余属性
@@ -30,9 +31,9 @@ type LogQuery struct {
 	Limit  int
 }
 
-// Logs 按写入顺序倒序返回一页日志，next 为 0 表示没有更早的日志
+// Logs 按写入顺序倒序返回一页日志，next 为 0 表示没有更早的日志；时间条件不走索引，使查询按序号倒序读到一页为止
 func (store *Store) Logs(ctx context.Context, query LogQuery) ([]Log, int64, error) {
-	clause := ` WHERE time >= ? AND time < ?`
+	clause := ` WHERE +time >= ? AND +time < ?`
 	args := []any{query.From.UnixMilli(), query.To.UnixMilli()}
 	for column, value := range map[string]string{"source": query.Source, "request_id": query.RequestID, "model": query.Model} {
 		if value != "" {
@@ -44,7 +45,7 @@ func (store *Store) Logs(ctx context.Context, query LogQuery) ([]Log, int64, err
 		clause += ` AND level = 'ERROR'`
 	}
 	if query.Search != "" {
-		pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query.Search) + "%"
+		pattern := likePattern(query.Search)
 		clause += ` AND (message LIKE ? ESCAPE '\' OR data LIKE ? ESCAPE '\')`
 		args = append(args, pattern, pattern)
 	}
@@ -82,8 +83,10 @@ func (store *Store) Logs(ctx context.Context, query LogQuery) ([]Log, int64, err
 	return items, items[len(items)-1].Seq, nil
 }
 
-// ClearLogs 删除全部已保存的日志
+// ClearLogs 删除全部已保存的日志并把空闲页交还文件系统
 func (store *Store) ClearLogs(ctx context.Context) error {
-	_, err := store.db.ExecContext(ctx, `DELETE FROM logs`)
-	return err
+	if _, err := store.db.ExecContext(ctx, `DELETE FROM logs`); err != nil {
+		return err
+	}
+	return sqlitedb.Reclaim(ctx, store.db)
 }

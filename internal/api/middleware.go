@@ -12,6 +12,7 @@ import (
 // maxPublicBodyBytes 为公开接口请求体上限
 const maxPublicBodyBytes int64 = 512<<20/3*4 + 1<<20
 
+// corsMiddleware 允许任意来源的跨域请求并直接响应预检请求
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -93,9 +94,6 @@ func requestAPIKey(r *http.Request) string {
 // matchedAPIKey 返回请求头或 URL 中与配置相同的 API key
 func matchedAPIKey(r *http.Request, keys []string) (string, bool) {
 	for _, candidate := range apiKeyCandidates(r) {
-		if candidate == "" {
-			continue
-		}
 		for _, key := range keys {
 			if subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
 				return key, true

@@ -73,27 +73,33 @@ func dispatch(ctx context.Context, args []string) (bool, error) {
 	return true, fmt.Errorf("未知子命令 %q，可用：serve、login、import、switch、accounts、status、version", args[0])
 }
 
-// options 是各子命令共用的启动参数
-type options struct {
-	overrides config.Overrides
-}
-
-// bind 在 flags 上注册 --listen、--auth、--runtime 与 --proxy
-func (o *options) bind(flags *flag.FlagSet) {
-	o.overrides.BindFlags(flags)
-}
-
-// load 读取当前目录的 .env 并应用命令行覆盖
-func (o options) load() (config.Config, error) {
+// load 读取当前目录的 .env 并应用启动参数
+func load(overrides config.Overrides) (config.Config, error) {
 	cfg, err := config.Load(config.File)
 	if err != nil {
 		return config.Config{}, err
 	}
-	if err := config.ValidateProxies(o.overrides.Proxy); err != nil {
+	if err := config.ValidateProxies(overrides.Proxy); err != nil {
 		return config.Config{}, err
 	}
-	o.overrides.Apply(&cfg)
+	overrides.Apply(&cfg)
 	return cfg, nil
+}
+
+// openStore 解析只带启动参数的子命令并打开本地账户库，返回账户库与其余参数
+func openStore(name string, args []string) (*auth.Store, []string, error) {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	var overrides config.Overrides
+	overrides.BindFlags(flags)
+	if err := flags.Parse(args); err != nil {
+		return nil, nil, err
+	}
+	cfg, err := load(overrides)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := auth.Open(cfg.AuthDir, proxyOf(liveOf(cfg)))
+	return store, flags.Args(), err
 }
 
 // liveOf 把配置放进运行期可替换的指针
@@ -113,13 +119,13 @@ func proxyOf(live *atomic.Pointer[config.Config]) antigravity.Proxy {
 // serveCommand 解析 serve 的参数并运行服务，openDefault 为 --open-ui 的默认值；在线更新完成后以原参数启动新版本
 func serveCommand(ctx context.Context, args []string, openDefault bool) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-	var o options
-	o.bind(flags)
+	var overrides config.Overrides
+	overrides.BindFlags(flags)
 	openUI := flags.Bool("open-ui", openDefault, "启动后用系统浏览器打开管理端，不带任何参数启动时默认打开")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := o.load()
+	cfg, err := load(overrides)
 	if err != nil {
 		return err
 	}
@@ -130,7 +136,7 @@ func serveCommand(ctx context.Context, args []string, openDefault bool) error {
 	if *openUI {
 		ready = func(address string) { go openAdmin("http://" + loopback(address) + "/") }
 	}
-	err = serve(ctx, "web", cfg, o.overrides, ready, func() { updated.Store(true); cancel() })
+	err = serve(ctx, "web", cfg, overrides, ready, func() { updated.Store(true); cancel() })
 	if !updated.Load() {
 		return err
 	}
@@ -189,8 +195,8 @@ func openAdmin(link string) {
 // loginCommand 完成 Google 登录并把账户加入本地账户库或远程服务
 func loginCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
-	var o options
-	o.bind(flags)
+	var overrides config.Overrides
+	overrides.BindFlags(flags)
 	code := flags.Bool("code", false, "打印授权链接并粘贴授权码，用于没有浏览器的环境")
 	cloud := flags.Bool("cloud", false, "以 Continue with Google Cloud 的企业 WIF 方式登录")
 	provider := flags.String("provider", "", "企业 WIF 登录的 provider 名")
@@ -205,7 +211,7 @@ func loginCommand(ctx context.Context, args []string) error {
 	if *remote != "" && *token == "" {
 		return errors.New("--remote 需要同时提供 --token")
 	}
-	cfg, err := o.load()
+	cfg, err := load(overrides)
 	if err != nil {
 		return err
 	}
@@ -322,17 +328,7 @@ func pair(ctx context.Context, remote, token string, upload app.PairingUpload) e
 
 // importCommand 从本机官方客户端导入账户
 func importCommand(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("import", flag.ContinueOnError)
-	var o options
-	o.bind(flags)
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	cfg, err := o.load()
-	if err != nil {
-		return err
-	}
-	store, err := auth.Open(cfg.AuthDir, proxyOf(liveOf(cfg)))
+	store, _, err := openStore("import", args)
 	if err != nil {
 		return err
 	}
@@ -348,43 +344,23 @@ func importCommand(ctx context.Context, args []string) error {
 
 // switchCommand 把账户写入本机官方客户端并重新启动官方客户端
 func switchCommand(args []string) error {
-	flags := flag.NewFlagSet("switch", flag.ContinueOnError)
-	var o options
-	o.bind(flags)
-	if err := flags.Parse(args); err != nil {
+	store, rest, err := openStore("switch", args)
+	if err != nil {
 		return err
 	}
-	if flags.NArg() != 1 {
+	if len(rest) != 1 {
 		return errors.New("用法: antigravity2api switch [参数] <账户邮箱>")
 	}
-	cfg, err := o.load()
-	if err != nil {
+	if err := auth.SwitchOfficial(store, rest[0]); err != nil {
 		return err
 	}
-	store, err := auth.Open(cfg.AuthDir, proxyOf(liveOf(cfg)))
-	if err != nil {
-		return err
-	}
-	if err := auth.SwitchOfficial(store, flags.Arg(0)); err != nil {
-		return err
-	}
-	fmt.Printf("官方客户端已切换到账户 %s\n", flags.Arg(0))
+	fmt.Printf("官方客户端已切换到账户 %s\n", rest[0])
 	return nil
 }
 
 // accountsCommand 列出本地账户库中的账户
 func accountsCommand(args []string) error {
-	flags := flag.NewFlagSet("accounts", flag.ContinueOnError)
-	var o options
-	o.bind(flags)
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	cfg, err := o.load()
-	if err != nil {
-		return err
-	}
-	store, err := auth.Open(cfg.AuthDir, proxyOf(liveOf(cfg)))
+	store, _, err := openStore("accounts", args)
 	if err != nil {
 		return err
 	}
@@ -403,18 +379,17 @@ func accountsCommand(args []string) error {
 // statusCommand 读取运行中服务的状态与账户额度
 func statusCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
-	var o options
-	o.bind(flags)
+	var overrides config.Overrides
+	overrides.BindFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := o.load()
+	cfg, err := load(overrides)
 	if err != nil {
 		return err
 	}
 	base := "http://" + loopback(cfg.Listen)
 	var status struct {
-		Host      string    `json:"host"`
 		Version   string    `json:"version"`
 		Listen    string    `json:"listen"`
 		StartedAt time.Time `json:"started_at"`
@@ -431,9 +406,7 @@ func statusCommand(ctx context.Context, args []string) error {
 			Error string `json:"error"`
 			Quota []struct {
 				BucketID          string  `json:"bucket_id"`
-				Window            string  `json:"window"`
 				RemainingFraction float64 `json:"remaining_fraction"`
-				ResetTime         string  `json:"reset_time"`
 			} `json:"quota"`
 		} `json:"accounts"`
 	}
@@ -476,10 +449,7 @@ func getJSON(ctx context.Context, target string, out any) error {
 
 // loopback 把监听地址换成本机可访问的地址
 func loopback(listen string) string {
-	host, port, err := net.SplitHostPort(listen)
-	if err != nil {
-		return listen
-	}
+	host, port, _ := net.SplitHostPort(listen)
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}

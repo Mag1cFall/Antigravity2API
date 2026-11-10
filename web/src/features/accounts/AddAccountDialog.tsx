@@ -110,9 +110,7 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
         <p role="status" className="flex items-center gap-2 text-sm text-foreground-muted">
           <LoaderCircle size={16} aria-hidden className="animate-spin" />
           {m.waiting}
-          <span className="tabular-nums">
-            · {fill(m.expiresIn, { time: countdown(remaining) })}
-          </span>
+          <span>· {fill(m.expiresIn, { time: countdown(remaining) })}</span>
         </p>
       )}
       <form noValidate onSubmit={onSubmit} className="flex flex-col gap-3">
@@ -137,7 +135,7 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
         </Field>
         <div className="flex items-center justify-between gap-3">
           {login.mode === 'code' ? (
-            <span className="text-sm text-foreground-muted tabular-nums">
+            <span className="text-sm text-foreground-muted">
               {fill(m.expiresIn, { time: countdown(remaining) })}
             </span>
           ) : (
@@ -191,7 +189,7 @@ function RemotePairing() {
         <CopyButton value={command} label={m.pairingCopy} copiedLabel={m.copied} />
       </div>
       <div className="flex items-center justify-between gap-3">
-        <span className="text-sm text-foreground-muted tabular-nums">
+        <span className="text-sm text-foreground-muted">
           {remaining > 0 ? fill(m.expiresIn, { time: countdown(remaining) }) : m.pairingExpired}
         </span>
         {remaining <= 0 && (
@@ -209,7 +207,7 @@ function RemotePairing() {
 }
 
 // Method 是添加账户的方式
-export type Method = 'browser' | 'code' | 'remote' | 'import' | 'json'
+type Method = 'browser' | 'code' | 'remote' | 'import' | 'json'
 
 // methodIcons 是各添加方式的图标
 export const methodIcons: Record<Method, LucideIcon> = {

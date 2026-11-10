@@ -29,14 +29,14 @@ func run(ctx context.Context, args []string) error {
 		}
 	}
 	flags := flag.NewFlagSet(title, flag.ContinueOnError)
-	var o options
-	o.bind(flags)
+	var overrides config.Overrides
+	overrides.BindFlags(flags)
 	hidden := flags.Bool(desktop.HiddenFlag, false, "启动后只显示托盘")
 	if err := flags.Parse(args); err != nil {
 		alert(err)
 		return err
 	}
-	cfg, err := o.load()
+	cfg, err := load(overrides)
 	if err != nil {
 		alert(err)
 		return err
@@ -46,7 +46,7 @@ func run(ctx context.Context, args []string) error {
 		DataDir: filepath.Join(cfg.RuntimeDir, "webview"),
 		Hidden:  *hidden,
 		Serve: func(ctx context.Context, ready func(string)) error {
-			return serve(ctx, "desktop", cfg, o.overrides, func(address string) { ready(loopback(address)) }, func() {
+			return serve(ctx, "desktop", cfg, overrides, func(address string) { ready(loopback(address)) }, func() {
 				go func() {
 					if err := desktop.Restart(); err != nil {
 						slog.Error("在线更新重启失败 | 错误="+err.Error(), "source", "service")

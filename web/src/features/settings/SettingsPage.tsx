@@ -38,8 +38,8 @@ import { AboutSection } from '@/features/settings/AboutSection'
 import { settingsMessages } from '@/features/settings/messages'
 import {
   PromptPreviewDialog,
-  PromptSectionsField,
-  PromptWrapField,
+  PromptTemplateFields,
+  PromptTierField,
 } from '@/features/settings/PromptSection'
 import { ProxyPool } from '@/features/settings/ProxyPool'
 import { splitList, useSaveSettings, useSettings } from '@/features/settings/queries'
@@ -80,8 +80,8 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   MEDIA_BASE_URL: 'service',
   PROXY: 'network',
   SYSTEM_PROMPT: 'prompt',
-  SYSTEM_PROMPT_SECTIONS: 'prompt',
-  SYSTEM_PROMPT_WRAP: 'prompt',
+  SYSTEM_PROMPT_TEMPLATE: 'prompt',
+  SYSTEM_PROMPT_USER_TEMPLATE: 'prompt',
   ACCOUNT_CONCURRENCY: 'scheduling',
   ROUTING_STRATEGY: 'scheduling',
   PREFER_LOWER_TIER_MODELS: 'scheduling',
@@ -291,10 +291,16 @@ function SettingsEditor({
   })
   const errors = form.formState.errors
   const dirty = Object.keys(form.formState.dirtyFields).length
-  const values = useWatch({ control: form.control })
-  const [tier, promptSections, wrap] = useWatch({
+  const [tier, systemTemplate, userTemplate, mediaOutput, logFile, adminAuth] = useWatch({
     control: form.control,
-    name: ['SYSTEM_PROMPT', 'SYSTEM_PROMPT_SECTIONS', 'SYSTEM_PROMPT_WRAP'],
+    name: [
+      'SYSTEM_PROMPT',
+      'SYSTEM_PROMPT_TEMPLATE',
+      'SYSTEM_PROMPT_USER_TEMPLATE',
+      'MEDIA_OUTPUT',
+      'LOG_FILE',
+      'ADMIN_AUTH_ENABLED',
+    ],
   })
   const [remoteShown, setRemoteShown] = useState(false)
   const save = useSaveSettings()
@@ -526,7 +532,7 @@ function SettingsEditor({
         )}
         {text('MEDIA_BASE_URL', m.mediaBase, m.mediaBaseHint, {
           placeholder: 'https://ai.example.com',
-          disabledReason: values.MEDIA_OUTPUT !== 'url' && m.mediaBaseDisabled,
+          disabledReason: mediaOutput !== 'url' && m.mediaBaseDisabled,
         })}
       </>
     ),
@@ -562,53 +568,30 @@ function SettingsEditor({
               control={form.control}
               name="SYSTEM_PROMPT"
               render={({ field }) => (
-                <RadioGroup
-                  label={m.tier}
-                  value={field.value}
-                  onValueChange={field.onChange}
-                  options={[
-                    { value: 'full', label: m.promptFull, description: m.promptFullHint },
-                    { value: 'medium', label: m.promptMedium, description: m.promptMediumHint },
-                    {
-                      value: 'aggressive',
-                      label: m.promptAggressive,
-                      description: m.promptAggressiveHint,
-                    },
-                    { value: 'custom', label: m.promptCustom, description: m.promptCustomHint },
-                  ]}
-                />
+                <PromptTierField value={field.value} onChange={field.onChange} />
               )}
             />,
           )}
-          <PromptPreviewDialog tier={tier} sections={promptSections} wrap={wrap} />
+          <PromptPreviewDialog
+            tier={tier}
+            custom={{ system: systemTemplate, user: userTemplate }}
+          />
         </div>
         {tier === 'custom' && (
-          <>
-            <div className="border-t border-border py-4">
-              {lock(
-                'SYSTEM_PROMPT_SECTIONS',
-                <Controller
-                  control={form.control}
-                  name="SYSTEM_PROMPT_SECTIONS"
-                  render={({ field }) => (
-                    <PromptSectionsField value={field.value} onChange={field.onChange} />
-                  )}
-                />,
-              )}
-            </div>
-            <div className="border-t border-border py-4">
-              {lock(
-                'SYSTEM_PROMPT_WRAP',
-                <Controller
-                  control={form.control}
-                  name="SYSTEM_PROMPT_WRAP"
-                  render={({ field }) => (
-                    <PromptWrapField value={field.value} onChange={field.onChange} />
-                  )}
-                />,
-              )}
-            </div>
-          </>
+          <div className="border-t border-border py-4">
+            <PromptTemplateFields
+              system={systemTemplate}
+              user={userTemplate}
+              systemLocked={environment.has('SYSTEM_PROMPT_TEMPLATE')}
+              userLocked={environment.has('SYSTEM_PROMPT_USER_TEMPLATE')}
+              onSystemChange={(value) => {
+                form.setValue('SYSTEM_PROMPT_TEMPLATE', value, { shouldDirty: true })
+              }}
+              onUserChange={(value) => {
+                form.setValue('SYSTEM_PROMPT_USER_TEMPLATE', value, { shouldDirty: true })
+              }}
+            />
+          </div>
         )}
       </>
     ),
@@ -657,7 +640,7 @@ function SettingsEditor({
           label={m.mapping}
           hint={m.mappingHint}
           status={mappingCount ? fill(m.mappingCount, { count: mappingCount }) : m.mappingNone}
-          to="/models"
+          to="/models/mapping"
           action={m.mappingManage}
         />
       </>
@@ -713,7 +696,7 @@ function SettingsEditor({
           m.logTotalHint,
           20,
           100_000,
-          !values.LOG_FILE && m.logTotalDisabled,
+          !logFile && m.logTotalDisabled,
         )}
         {toggle('REQUEST_LOG_BODIES', m.bodies, m.bodiesHint)}
       </>
@@ -737,7 +720,7 @@ function SettingsEditor({
           {toggle('ADMIN_AUTH_ENABLED', m.adminAuth, m.adminAuthHint)}
           {text('ADMIN_USERNAME', m.adminUser, m.adminUserHint, {
             autoComplete: 'username',
-            disabledReason: !values.ADMIN_AUTH_ENABLED && m.adminDisabled,
+            disabledReason: !adminAuth && m.adminDisabled,
           })}
           {lock(
             'ADMIN_PASSWORD',
@@ -747,13 +730,13 @@ function SettingsEditor({
               hint={m.adminPasswordHint}
               error={errors.ADMIN_PASSWORD?.message}
             >
-              <Tooltip disabledReason={!values.ADMIN_AUTH_ENABLED && m.adminDisabled}>
+              <Tooltip disabledReason={!adminAuth && m.adminDisabled}>
                 <Input
                   {...describe('ADMIN_PASSWORD')}
                   {...form.register('ADMIN_PASSWORD')}
                   type="password"
                   autoComplete="new-password"
-                  disabled={!values.ADMIN_AUTH_ENABLED}
+                  disabled={!adminAuth}
                   placeholder={settings.admin_password_set ? m.adminPasswordSet : ''}
                 />
               </Tooltip>
@@ -811,7 +794,7 @@ export function SettingsPage() {
       {settings.data && settings.data.invalid.length > 0 && (
         <Callout tone="warning" role="status">
           {m.invalidNotice}
-          <ul className="pl-5 mt-1 list-disc">
+          <ul className="mt-1 list-disc">
             {settings.data.invalid.map((item) => (
               <li key={item.key}>
                 <code className="font-mono">

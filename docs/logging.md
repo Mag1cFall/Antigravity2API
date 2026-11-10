@@ -75,7 +75,7 @@ JSON 格式每行一条事件：
 INFO  service  服务就绪 | 地址=127.0.0.1:8017
 INFO  account@example.com  token 已刷新 | 到期=2026-10-15T10:08:15+08:00
 INFO  account@example.com  上游请求 | POST daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist | 状态=200 | 耗时=412ms
-INFO  service  官方客户端最新版本 | 版本=2.29.0 当前=2.28.1
+INFO  service  官方客户端最新版本 | 版本=2.31.0 当前=2.30.0
 INFO  service  账户池刷新完成 | 耗时=40.272s
 ```
 
@@ -192,7 +192,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 | `周额度唤醒完成 \| 额度桶=... \| 模型=... \| 耗时=...` | INFO |
 | `周额度唤醒失败 \| 额度桶=... \| 模型=... \| 错误=...` | WARN |
 
-`上游请求 | 方法 主机路径 | 状态=... | 耗时=...ms` 记录生成以外的每次上游请求（初始化、目录、额度、unleash、clearcut 上报、遥测设置），失败时为 WARN 并带 `错误=`。DEBUG 级别另记录每次上游连接：`上游连接 | 主机=... | 复用=... | 空闲=... | 代理=...`。
+`上游请求 | 方法 主机路径 | 状态=... | 耗时=...ms` 记录生成以外的每次上游请求（初始化、目录、额度、插件市场目录、clearcut 上报、遥测设置），失败时为 WARN 并带 `错误=`。DEBUG 级别另记录每次上游连接：`上游连接 | 主机=... | 复用=... | 空闲=... | 代理=...`。
 
 管理端与命令行的账户操作：
 
@@ -359,7 +359,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 | 其余（`/v1/completions`、`/v1/images/*`、`/v1/audio/*`、`/v1/files`、`/v1/interactions`、`/upload/v1beta/files`） | `other` |
 | 管理端手动预热 `/api/warmup` | `warmup` |
 
-上游尝试的请求与响应正文：失败的请求不论 `REQUEST_LOG_BODIES` 取值都保存，成功的请求只在 `REQUEST_LOG_BODIES=true` 时保存。公开协议的请求与响应正文只在 `REQUEST_LOG_BODIES=true` 时保存。正文为明文，各截断到 64 KiB 并记录原始字节数，公开正文与上游正文各保留最近 1000 条。
+上游尝试的请求与响应正文：失败的请求不论 `REQUEST_LOG_BODIES` 取值都保存，成功的请求只在 `REQUEST_LOG_BODIES=true` 时保存。公开协议的请求与响应正文只在 `REQUEST_LOG_BODIES=true` 时保存。正文为明文，各截断到 64 KiB 并记录原始字节数，以 gzip 压缩后写入账本，公开正文与上游正文各保留最近 1000 条。
 
 汇总与保留：
 
@@ -367,6 +367,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 - 读取：用量报告何时读取汇总、何时读取原始记录见“用量报告”的分桶规则
 - 时区变化：每次打开账本时检查 `days` 表中各个不同的 `start`，任一值不是当前服务器时区的本地零点时，删除全部本地日汇总，从最早的小时汇总起到当前时间按天重建，并写 `请求账本已按服务器时区重建本地日汇总`
 - 保留：请求记录、汇总、正文、额度快照与日志保留 90 天；服务启动时与之后每 24 小时清理一次；截止时刻为当前时间减 90 天所在本地日的零点，`days` 按它删除，其余表按它向下取整到 UTC 整点后的时刻删除
+- 文件大小：账本为增量收缩（`auto_vacuum=INCREMENTAL`），每次过期清理与清空日志之后把全部空闲页交还文件系统并把 WAL 文件截短为 0；检查点之后 WAL 文件不超过 512 KiB
 
 费用按上游模型 ID（去掉思考档位后缀）对应的官方 API 文本单价逐条计算：缓存命中的输入按缓存单价，输出单价包含思考 token，输入超过 200,000 token 的请求按长上下文单价。
 
@@ -437,17 +438,18 @@ CREATE TABLE IF NOT EXISTS hours (
  cost_usd REAL NOT NULL, unpriced INTEGER NOT NULL, duration_hist BLOB NOT NULL, first_event_hist BLOB NOT NULL, last_time INTEGER NOT NULL,
  PRIMARY KEY (start, model, account, api_key, protocol, state, quota_group, status)) WITHOUT ROWID;
 -- days 与 hours 的列和主键相同
-CREATE TABLE IF NOT EXISTS bodies (
+CREATE TABLE IF NOT EXISTS request_bodies (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, time INTEGER NOT NULL,
- request TEXT NOT NULL, request_size INTEGER NOT NULL, response TEXT NOT NULL, response_size INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS upstream (
+ request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS upstream_bodies (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL, attempt INTEGER NOT NULL, time INTEGER NOT NULL,
- request TEXT NOT NULL, request_size INTEGER NOT NULL, response TEXT NOT NULL, response_size INTEGER NOT NULL,
+ request BLOB NOT NULL, request_size INTEGER NOT NULL, response BLOB NOT NULL, response_size INTEGER NOT NULL,
  UNIQUE (id, attempt));
 CREATE TABLE IF NOT EXISTS quota_snapshots (
  time INTEGER NOT NULL, account TEXT NOT NULL, bucket_id TEXT NOT NULL, window TEXT NOT NULL,
  remaining_fraction REAL NOT NULL, reset_time INTEGER);
 CREATE INDEX IF NOT EXISTS quota_snapshots_account_time ON quota_snapshots(account, time);
+CREATE INDEX IF NOT EXISTS quota_snapshots_time ON quota_snapshots(time);
 CREATE TABLE IF NOT EXISTS logs (
  seq INTEGER PRIMARY KEY AUTOINCREMENT, time INTEGER NOT NULL, level TEXT NOT NULL, source TEXT NOT NULL,
  event TEXT NOT NULL, message TEXT NOT NULL, request_id TEXT NOT NULL, model TEXT NOT NULL, data TEXT NOT NULL);
@@ -455,16 +457,18 @@ CREATE INDEX IF NOT EXISTS logs_time ON logs(time);
 CREATE INDEX IF NOT EXISTS logs_request_id ON logs(request_id);
 ```
 
-账本经 `modernc.org/sqlite` 打开，连接参数为 `busy_timeout(10000)`、`journal_mode(WAL)`、`synchronous(NORMAL)`，最多 4 个连接。写入协程把连续到达的条目合并为一个事务，每个事务最多 256 条。
+账本经 `modernc.org/sqlite` 打开，连接参数为 `auto_vacuum(INCREMENTAL)`、`busy_timeout(10000)`、`journal_mode(WAL)`、`journal_size_limit(524288)`、`synchronous(NORMAL)`，最多 4 个连接。写入协程把连续到达的条目合并为一个事务，每个事务最多 256 条。
+
+打开账本时（`internal/sqlitedb` 的 `Open`，`states.db` 相同）依次：执行建表语句；删除建表语句中没有的表、索引、视图与触发器；库不是增量收缩时执行一次 `VACUUM` 转为增量收缩；交还空闲页并截短 WAL 文件。库文件自身的状态决定后两步是否有事可做，同一个库再次打开时不重复整理。
 
 | 表 | 一行内容 | 主要列 | 键与索引 |
 | --- | --- | --- | --- |
 | `requests` | 一条请求记录 | 上文请求记录的全部字段 | 主键 `id`；索引 `requests_time(time)`、`requests_model_time(model, time)`、`requests_account_time(account, time)`、`requests_state_time(state, time)` |
 | `hours` | 一个 UTC 小时内同键请求的汇总 | `start`、7 个维度列、累计列 | 主键 `start` 加 7 个维度列，`WITHOUT ROWID` |
 | `days` | 一个服务器本地日内同键请求的汇总 | 同 `hours` | 同 `hours` |
-| `bodies` | 一个请求的公开协议正文 | `seq`、`id`、`time`、`request`、`request_size`、`response`、`response_size` | 自增主键 `seq`；`id` 唯一 |
-| `upstream` | 一次上游尝试的正文 | `seq`、`id`、`attempt`、`time`、正文四列 | 自增主键 `seq`；`(id, attempt)` 唯一 |
-| `quota_snapshots` | 一个额度桶某一时刻的剩余比例 | `time`、`account`、`bucket_id`、`window`、`remaining_fraction`、`reset_time` | 索引 `quota_snapshots_account_time(account, time)` |
+| `request_bodies` | 一个请求的公开协议正文 | `seq`、`id`、`time`、`request`、`request_size`、`response`、`response_size` | 自增主键 `seq`；`id` 唯一 |
+| `upstream_bodies` | 一次上游尝试的正文 | `seq`、`id`、`attempt`、`time`、正文四列 | 自增主键 `seq`；`(id, attempt)` 唯一 |
+| `quota_snapshots` | 一个额度桶某一时刻的剩余比例 | `time`、`account`、`bucket_id`、`window`、`remaining_fraction`、`reset_time` | 索引 `quota_snapshots_account_time(account, time)`、`quota_snapshots_time(time)` |
 | `logs` | 一条 WARN 以上日志 | `seq`、`time`、`level`、`source`、`event`、`message`、`request_id`、`model`、`data` | 自增主键 `seq`；索引 `logs_time(time)`、`logs_request_id(request_id)` |
 
 - 汇总的 7 个维度列：`model`（公开模型名）、`account`、`api_key`、`protocol`、`state`、`quota_group`、`status`
@@ -474,7 +478,7 @@ CREATE INDEX IF NOT EXISTS logs_request_id ON logs(request_id);
 - `requests.attempts` 为上游尝试的 JSON 数组，字段同上文，不含正文；没有尝试时为 `[]`
 - `logs.data` 为 JSON 对象 `{"request": 请求记录, "attrs": 其余属性}`，没有的键省略
 - 耗时分布列按分桶序号升序，每个非空分桶依次写两个无符号 varint：与前一个非空分桶的序号差、请求数；分桶规则见“用量报告”
-- 正文列为 TEXT，按字节截断到 64 KiB，`request_size` 与 `response_size` 为原始字节数；`bodies.time` 与 `upstream.time` 为所属请求的完成时间；`upstream.attempt` 从 0 开始，与 `attempts` 的下标对应，上游正文按尝试计数保留最近 1000 条
+- 正文列为 BLOB，内容是按字节截断到 64 KiB 的正文的 gzip 数据，`request_size` 与 `response_size` 为原始字节数；`request_bodies.time` 与 `upstream_bodies.time` 为所属请求的完成时间；`upstream_bodies.attempt` 从 0 开始，与 `attempts` 的下标对应，上游正文按尝试计数保留最近 1000 条
 
 ### 记录查询与导出
 

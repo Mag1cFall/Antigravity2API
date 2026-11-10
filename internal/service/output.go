@@ -73,9 +73,6 @@ func (o *output) process(event antigravity.Event) []antigravity.Event {
 
 // reply 返回已转发回答的指纹
 func (o *output) reply() string {
-	if o == nil {
-		return ""
-	}
 	return answerKey(o.answer)
 }
 
@@ -209,9 +206,6 @@ func sourceIn(web antigravity.GroundingWeb, domains []string) bool {
 
 // signatures 返回本次输出中的思考签名
 func (o *output) signatures() signatureRecord {
-	if o == nil {
-		return signatureRecord{}
-	}
 	return o.signed
 }
 

@@ -20,8 +20,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// preloginErrorOffset 为登录前错误上报相对虚拟进程启动的时刻，官方新安装现场为 5.6–6.6 s
-const preloginErrorOffset = 5600 * time.Millisecond
+// preloginErrorOffset 为登录前错误上报相对虚拟进程启动的最早时刻，官方新安装现场为 5.1–5.7 s
+const preloginErrorOffset = 5100 * time.Millisecond
 
 //go:embed prelogin_windows_src327.bin.gz
 var preloginWindows327 []byte
@@ -241,10 +241,9 @@ func shiftAddresses(text []byte, imgDelta, heapDelta uint64) []byte {
 	})
 }
 
-// Prelogin 代登录开始时生成的设备在拿到 token 前发出官方 language_server 的登录前请求：unleash、一次不带 Bearer 的 clearcut 错误上报与其后的 clearcut 批次；browser、imgDelta、heapDelta 为本进程改写模板用的界面会话标识与地址偏移
+// Prelogin 代登录开始时生成的设备在拿到 token 前发出官方 language_server 的登录前请求：一次不带 Bearer 的 clearcut 错误上报与其后的 clearcut 批次；browser、imgDelta、heapDelta 为本进程改写模板用的界面会话标识与地址偏移
 type Prelogin struct {
 	client              *Client
-	companion           *Companion
 	browser             []byte
 	imgDelta, heapDelta uint64
 }
@@ -253,19 +252,18 @@ type Prelogin struct {
 func NewPrelogin(device Device, proxy Proxy) *Prelogin {
 	client := NewClient("login", staticToken{}, device, proxy)
 	client.SetHub(HubState{}, nil)
-	return &Prelogin{client: client, companion: NewCompanion(client), browser: []byte(uuid.NewString()), imgDelta: uint64(rand.N(0x1000)) * 0x10000, heapDelta: uint64(rand.N(0x40)) * 0x4000000}
+	return &Prelogin{client: client, browser: []byte(uuid.NewString()), imgDelta: uint64(rand.N(0x1000)) * 0x10000, heapDelta: uint64(rand.N(0x40)) * 0x4000000}
 }
 
-// Run 立即开始 unleash，在启动后约 5.6 s 用设备 installation_id 发出一次登录前错误上报，之后按模板中的上报时刻继续发出该系统的后续批次；ctx 结束时返回
+// Run 在启动后 5.1–5.7 s 用设备 installation_id 发出一次登录前错误上报，之后按模板中的上报时刻继续发出该系统的后续批次；ctx 结束时返回
 func (p *Prelogin) Run(ctx context.Context) {
-	go p.companion.Unleash(ctx)
 	template, ok := preloginTemplates[p.client.device.OS]
 	if !ok {
 		<-ctx.Done()
 		return
 	}
 	select {
-	case <-time.After(preloginErrorOffset + rand.N(time.Second)):
+	case <-time.After(preloginErrorOffset + rand.N(600*time.Millisecond)):
 	case <-ctx.Done():
 		return
 	}
@@ -301,7 +299,7 @@ func (p *Prelogin) send(ctx context.Context, data []byte, sent uint64) {
 	p.client.discard(p.client.web, request)
 }
 
-// staticToken 是登录前虚拟进程用的空 token 源，unleash 与不带 Bearer 的 clearcut 不读取它
+// staticToken 是登录前虚拟进程用的空 token 源，不带 Bearer 的 clearcut 不读取它
 type staticToken struct{}
 
 // Token 返回空 token

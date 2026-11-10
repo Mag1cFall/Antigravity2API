@@ -1,15 +1,16 @@
-import { ArrowRight, Plus, Shuffle, Trash2 } from 'lucide-react'
+import { ArrowRight, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
 import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
-import { Card, CardBody, CardHeader } from '@/components/ui/card'
+import { Card, CardBody } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { modelMessages } from '@/features/models/messages'
+import { useModels } from '@/features/models/queries'
 import { useSaveSettings, useSettings } from '@/features/settings/queries'
 import { parseMapping } from '@/features/settings/schema'
 import { fill, useMessages } from '@/lib/i18n'
@@ -154,21 +155,20 @@ function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[]
   )
 }
 
-// ModelMapping 是模型映射卡片，targets 是目录中可作为目标的模型 ID
-export function ModelMapping({ targets }: { targets: string[] }) {
+// ModelMapping 是模型页的映射子页面，目录中不是别名的模型可作为映射目标
+export function ModelMapping() {
   const m = useMessages(modelMessages)
   const app = useMessages(appMessages)
   const settings = useSettings()
+  const models = useModels()
   const value = settings.data?.values.MODEL_MAPPING ?? ''
+  const saved = parseMapping(value)
+  const aliases = new Set(saved.map((item) => item.alias))
   return (
     <Card>
-      <CardHeader
-        icon={<Shuffle size={16} aria-hidden />}
-        title={m.mapping}
-        description={m.mappingHint}
-      />
-      <CardBody>
-        {settings.isPending ? (
+      <CardBody className="flex flex-col gap-4 pt-4">
+        <p className="text-sm text-foreground-muted">{m.mappingHint}</p>
+        {settings.isPending || models.isPending ? (
           <Loading label={app.loading} />
         ) : settings.isError ? (
           <ErrorState
@@ -177,8 +177,19 @@ export function ModelMapping({ targets }: { targets: string[] }) {
             retryLabel={app.retry}
             onRetry={() => void settings.refetch()}
           />
+        ) : models.isError ? (
+          <ErrorState
+            title={m.loadFailed}
+            error={models.error}
+            retryLabel={app.retry}
+            onRetry={() => void models.refetch()}
+          />
         ) : (
-          <MappingEditor key={value} saved={parseMapping(value)} targets={targets} />
+          <MappingEditor
+            key={value}
+            saved={saved}
+            targets={models.data.models.map((model) => model.id).filter((id) => !aliases.has(id))}
+          />
         )}
       </CardBody>
     </Card>

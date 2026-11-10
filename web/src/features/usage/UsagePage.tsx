@@ -20,6 +20,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { filterQuery, rangeQuery, useUsage } from '@/features/usage/queries'
 import type { UsageReport, UsageStats } from '@/features/usage/types'
 import {
+  dateFormat,
   formatCompact,
   formatCost,
   formatDuration,
@@ -27,6 +28,7 @@ import {
   formatPercent,
 } from '@/lib/format'
 import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
+import { changeParams } from '@/lib/params'
 
 // usageMessages 是用量页的文案
 const usageMessages = defineMessages(
@@ -238,7 +240,7 @@ function TrendCard({ data }: { data: UsageReport }) {
     })
   }
   const peak = Math.max(1, ...bars.map((bar) => bar.requests))
-  const axisFormat = new Intl.DateTimeFormat(locale, {
+  const axisFormat = dateFormat(locale, {
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -282,7 +284,7 @@ function TrendCard({ data }: { data: UsageReport }) {
             />
           ))}
         </div>
-        <div className="mt-2 flex justify-between text-xs text-foreground-muted tabular-nums">
+        <div className="mt-2 flex justify-between text-xs text-foreground-muted">
           <span>{axisFormat.format(new Date(data.from))}</span>
           <span>{m.trendNow}</span>
         </div>
@@ -363,17 +365,7 @@ export function UsagePage() {
   const filtered = filterDimensions.some((dimension) => filters[dimension].length > 0)
   const usage = useUsage(ranges[range], grouping === 'day' ? '86400' : 'auto', filters)
   const update = (changes: Record<string, string>) => {
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current)
-        for (const [key, value] of Object.entries(changes)) {
-          if (value) next.set(key, value)
-          else next.delete(key)
-        }
-        return next
-      },
-      { replace: true },
-    )
+    changeParams(setParams, changes)
   }
   const csv = '/api/usage/records.csv?' + filterQuery(rangeQuery(ranges[range]), filters).toString()
   const rangeLabels: Record<RangeKey, string> = {
@@ -483,7 +475,7 @@ export function UsagePage() {
     )
   }
   const data = usage.data
-  const dayFormat = new Intl.DateTimeFormat(locale, {
+  const dayFormat = dateFormat(locale, {
     month: '2-digit',
     day: '2-digit',
     weekday: 'short',

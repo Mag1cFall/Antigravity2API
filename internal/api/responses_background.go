@@ -165,7 +165,7 @@ func (l *streamLog) finish() {
 	l.mu.Unlock()
 }
 
-// follow 把序号 after 之后的事件帧写给客户端并跟随到事件写完、客户端断开或写出失败，等待新事件时按心跳间隔写注释帧
+// follow 把序号 after 之后的事件帧写给客户端并跟随到事件写完、客户端断开或写出失败，等待新事件时按心跳间隔写心跳帧
 func (l *streamLog) follow(ctx context.Context, w http.ResponseWriter, after int) error {
 	next := max(after+1, 0)
 	heartbeat := time.NewTimer(streamHeartbeatInterval)
@@ -194,9 +194,28 @@ func (l *streamLog) follow(ctx context.Context, w http.ResponseWriter, after int
 			return ctx.Err()
 		case <-wake:
 		case <-heartbeat.C:
-			if err := writeSSEHeartbeat(w); err != nil {
+			if err := l.heartbeat(w); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+// heartbeat 写出一个心跳帧：重发开场事件中最近的 response.queued 或 response.in_progress 帧，还没有时写 SSE 注释
+func (l *streamLog) heartbeat(w http.ResponseWriter) error {
+	l.mu.Lock()
+	var status []byte
+	for _, frame := range l.frames[:min(len(l.frames), 3)] {
+		if bytes.HasPrefix(frame, []byte("event: response.queued")) || bytes.HasPrefix(frame, []byte("event: response.in_progress")) {
+			status = frame
+		}
+	}
+	l.mu.Unlock()
+	if status == nil {
+		return writeSSEHeartbeat(w)
+	}
+	if _, err := w.Write(status); err != nil {
+		return err
+	}
+	return http.NewResponseController(w).Flush()
 }

@@ -48,6 +48,7 @@ type Error struct {
 	Message string
 }
 
+// Error 返回错误说明
 func (e *Error) Error() string {
 	return e.Message
 }
@@ -207,7 +208,11 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 				anchor = current.client.LoadMarketplace(deadline)
 			}
 			plugins := current.client.Plugins()
-			composed := composer.Compose(request, lease.Model, session.Cascade, localTimes(times, current.device), current.device, plugins)
+			composed, err := composer.Compose(request, lease.Model, session.Cascade, localTimes(times, current.device), current.device, plugins)
+			if err != nil {
+				lease.Release()
+				return nil, &Error{Status: http.StatusInternalServerError, Message: "系统提示模板: " + err.Error()}
+			}
 			envelope, err := antigravity.BuildEnvelope(current.client.Project(), lease.Model, conversation, composed.System, composed.Contents, composed.Tools, composed.Config, time.Now())
 			if err != nil {
 				lease.Release()
@@ -432,12 +437,10 @@ func quotaExhausted(reason string) bool {
 
 // disable 把账户写为停用并移出调度，记下原因
 func (s *Service) disable(id, reason string) {
-	for _, record := range s.store.Accounts() {
-		if record.ID == id {
-			record.Enabled = false
-			if err := s.store.Save(record); err != nil {
-				reason += "；写回账户失败：" + err.Error()
-			}
+	if record, ok := s.store.Account(id); ok {
+		record.Enabled = false
+		if err := s.store.Save(&record); err != nil {
+			reason += "；写回账户失败：" + err.Error()
 		}
 	}
 	s.mu.Lock()
@@ -470,7 +473,10 @@ func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateReq
 		times = append(times, time.Now().Unix())
 	}
 	device, plugins := s.countProfile(request.AccountID)
-	composed := composer.Compose(request, model, session.Cascade, localTimes(times, device), device, plugins)
+	composed, err := composer.Compose(request, model, session.Cascade, localTimes(times, device), device, plugins)
+	if err != nil {
+		return 0, &Error{Status: http.StatusInternalServerError, Message: "系统提示模板: " + err.Error()}
+	}
 	envelope, err := antigravity.BuildEnvelope("", model, antigravity.NewConversation(session.Cascade, session.Trajectory, request.Contents), composed.System, composed.Contents, composed.Tools, composed.Config, time.Now())
 	if err != nil {
 		return 0, &Error{Status: http.StatusBadRequest, Message: err.Error()}

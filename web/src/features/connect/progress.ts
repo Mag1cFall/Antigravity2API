@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
 // Progress 是首次使用引导中后两步的完成记录与是否隐藏引导
-export interface Progress {
+interface Progress {
   endpoint: boolean
   client: boolean
   dismissed: boolean

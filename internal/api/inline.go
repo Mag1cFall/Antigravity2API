@@ -162,10 +162,7 @@ func normalizeImagePayload(mimeType string, data []byte) (string, []byte) {
 	lowerMIME := strings.ToLower(strings.TrimSpace(mimeType))
 	if lowerMIME == "image/gif" || (len(data) >= 3 && string(data[:3]) == "GIF") {
 		if img, err := gif.Decode(bytes.NewReader(data)); err == nil {
-			config, err := gif.DecodeConfig(bytes.NewReader(data))
-			if err != nil {
-				return mimeType, data
-			}
+			config, _ := gif.DecodeConfig(bytes.NewReader(data))
 			canvas := image.NewNRGBA(image.Rect(0, 0, config.Width, config.Height))
 			transparent := false
 			for _, entry := range img.(*image.Paletted).Palette {
@@ -173,7 +170,7 @@ func normalizeImagePayload(mimeType string, data []byte) (string, []byte) {
 				transparent = transparent || alpha == 0
 			}
 			// GIF 背景色来自全局色表，透明首帧保留透明画布
-			if palette, ok := config.ColorModel.(color.Palette); ok && !transparent && int(data[11]) < len(palette) {
+			if palette := config.ColorModel.(color.Palette); !transparent && int(data[11]) < len(palette) {
 				draw.Draw(canvas, canvas.Bounds(), image.NewUniform(palette[data[11]]), image.Point{}, draw.Src)
 			}
 			draw.Draw(canvas, img.Bounds(), img, img.Bounds().Min, draw.Over)

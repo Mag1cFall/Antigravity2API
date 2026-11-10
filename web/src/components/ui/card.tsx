@@ -20,24 +20,20 @@ export function CardHeader({
   description,
   icon,
   actions,
-  id,
 }: {
   title: ReactNode
   description?: ReactNode
   icon?: ReactNode
   actions?: ReactNode
-  id?: string
 }) {
   return (
-    <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 pt-3 pb-3">
+    <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 py-3">
       <div className="flex min-w-0 flex-[1_1_160px] items-start gap-2">
         {icon && (
           <span className="flex h-6 shrink-0 items-center text-foreground-muted">{icon}</span>
         )}
         <div className="min-w-0">
-          <h2 id={id} className="text-md font-semibold break-words">
-            {title}
-          </h2>
+          <h2 className="text-md font-semibold break-words">{title}</h2>
           {description && <p className="text-xs text-foreground-muted">{description}</p>}
         </div>
       </div>

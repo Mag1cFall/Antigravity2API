@@ -77,7 +77,7 @@ function AccountsCell({ accounts }: { accounts: Account[] }) {
   return (
     <>
       <dt className="text-xs text-foreground-muted">{m.accounts}</dt>
-      <dd className="flex items-baseline gap-1 tabular-nums">
+      <dd className="flex items-baseline gap-1">
         <span className="text-2xl font-semibold">{formatNumber(ready, locale)}</span>
         <span className="text-sm text-foreground-muted">
           {'/ ' + formatNumber(accounts.length, locale)}
@@ -126,7 +126,7 @@ function QuotaRow({ accounts, group }: { accounts: Account[]; group: QuotaGroup 
       <span className="truncate text-sm">{nameOf(q, group)}</span>
       <span
         className={
-          'text-right text-lg font-semibold tabular-nums ' +
+          'text-right text-lg font-semibold ' +
           (value === null ? 'text-foreground-subtle' : quotaText(value))
         }
       >
@@ -148,7 +148,7 @@ function QuotaRow({ accounts, group }: { accounts: Account[]; group: QuotaGroup 
                   tone={quotaTone(fraction)}
                   label={nameOf(q, group) + ' ' + nameOf(q, window)}
                 />
-                <span className="text-right tabular-nums">{formatPercent(fraction, locale)}</span>
+                <span className="text-right">{formatPercent(fraction, locale)}</span>
               </span>
             )
           })
@@ -207,7 +207,7 @@ function RequestsCell({ usage }: { usage: UsageReport | undefined }) {
   return (
     <>
       <dt className="text-xs text-foreground-muted">{m.requests}</dt>
-      <dd className="text-2xl font-semibold tabular-nums">
+      <dd className="text-2xl font-semibold">
         {totals ? formatNumber(totals.requests, locale) : '—'}
       </dd>
       {totals && (

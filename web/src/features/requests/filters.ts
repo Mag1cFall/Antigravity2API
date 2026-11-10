@@ -38,7 +38,7 @@ export function protocolName(protocol: string) {
 }
 
 // RequestFilter 是请求记录页的筛选条件，全部来自 URL
-export interface RequestFilter {
+interface RequestFilter {
   range: RangeKey
   state: string
   protocol: string

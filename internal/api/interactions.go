@@ -517,9 +517,6 @@ func interactionStep(event antigravity.Event) (map[string]any, map[string]any) {
 		}
 		return step, map[string]any{"type": "thought_summary", "content": content}
 	case antigravity.EventThoughtSignature:
-		if event.ThoughtSignature == "" {
-			return nil, nil
-		}
 		return map[string]any{"type": "thought", "signature": event.ThoughtSignature}, map[string]any{"type": "thought_signature", "signature": event.ThoughtSignature}
 	case antigravity.EventToolCall:
 		call := event.ToolCall
@@ -562,7 +559,7 @@ func interactionEvents(event antigravity.Event, summaries bool) []antigravity.Ev
 // interactionSteps 汇总完整步骤，相邻同类的模型输出与思考合并，搜索来源写入正文 text 内容的 annotations
 func interactionSteps(result generationResult, summaries bool) []map[string]any {
 	steps := make([]map[string]any, 0)
-	for _, original := range result.events {
+	for _, original := range mergedTextEvents(result.events) {
 		for _, event := range interactionEvents(original, summaries) {
 			step, _ := interactionStep(event)
 			if step == nil {

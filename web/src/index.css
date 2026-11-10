@@ -23,10 +23,6 @@
   --color-primary-soft: rgb(0 83 226 / 0.1);
   --color-primary-soft-strong: rgb(0 83 226 / 0.2);
   --color-primary-border: rgb(0 83 226 / 0.4);
-  --color-destructive: #d1433b;
-  --color-destructive-hover: #c23a33;
-  --color-destructive-active: #b3332c;
-  --color-destructive-soft: rgb(234 94 86 / 0.1);
   --color-destructive-border: rgb(234 94 86 / 0.4);
   --color-success: #32aa70;
   --color-success-text: #1d7a4d;
@@ -67,8 +63,6 @@
   --text-xl--line-height: 28px;
   --text-2xl: 24px;
   --text-2xl--line-height: 32px;
-  --text-3xl: 30px;
-  --text-3xl--line-height: 36px;
 
   --font-weight-*: initial;
   --font-weight-normal: 400;
@@ -103,7 +97,6 @@
   --container-sheet: 720px;
   --container-page: 1360px;
   --container-field: 360px;
-  --container-prose: 640px;
   --container-login: 380px;
   --container-toast: 360px;
 
@@ -214,9 +207,6 @@
 @utility z-sticky {
   z-index: 10;
 }
-@utility z-dropdown {
-  z-index: 20;
-}
 @utility z-overlay {
   z-index: 30;
 }
@@ -268,10 +258,6 @@
     --color-primary-soft: rgb(34 107 238 / 0.16);
     --color-primary-soft-strong: rgb(34 107 238 / 0.28);
     --color-primary-border: rgb(34 107 238 / 0.6);
-    --color-destructive: #c9433b;
-    --color-destructive-hover: #b93b34;
-    --color-destructive-active: #a9342e;
-    --color-destructive-soft: rgb(234 94 86 / 0.16);
     --color-destructive-border: rgb(234 94 86 / 0.6);
     --color-success-text: #5fcf98;
     --color-success-soft: #15291f;

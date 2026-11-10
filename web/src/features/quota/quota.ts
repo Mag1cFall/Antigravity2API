@@ -6,22 +6,9 @@ export const groups = ['gemini', '3p'] as const
 // QuotaGroup 是额度组
 export type QuotaGroup = (typeof groups)[number]
 
-// windows 是额度窗口
-export const windows = ['5h', 'weekly'] as const
-
-// BucketSummary 是账户池在一个额度桶上的汇总
-export interface BucketSummary {
-  group: string
-  window: string
-  accounts: number
-  average: number
-  exhausted: number
-  earliestReset?: string
-}
-
 // groupOrder 与 windowOrder 决定额度桶的显示顺序
 const groupOrder: string[] = [...groups]
-const windowOrder: string[] = [...windows]
+const windowOrder = ['5h', 'weekly']
 
 // bucketParts 把 gemini-5h 这类 bucket_id 拆成额度组与窗口
 export function bucketParts(bucketId: string) {
@@ -73,35 +60,6 @@ export function available(quota: QuotaBucket[], group: string): number | null {
   const buckets = groupBuckets(quota, group)
   if (buckets.length === 0) return null
   return Math.min(...buckets.map((bucket) => bucket.remaining_fraction))
-}
-
-// summarizeBuckets 按额度组与窗口汇总各账户的剩余比例、耗尽账户数与最早重置时间
-export function summarizeBuckets(buckets: QuotaBucket[]): BucketSummary[] {
-  const summaries = new Map<string, BucketSummary & { total: number }>()
-  for (const bucket of buckets) {
-    const { group, window } = bucketParts(bucket.bucket_id)
-    const summary = summaries.get(bucket.bucket_id) ?? {
-      group,
-      window,
-      accounts: 0,
-      average: 0,
-      exhausted: 0,
-      total: 0,
-    }
-    summary.accounts++
-    summary.total += bucket.remaining_fraction
-    if (bucket.remaining_fraction <= 0) summary.exhausted++
-    if (
-      bucket.reset_time &&
-      (!summary.earliestReset || Date.parse(bucket.reset_time) < Date.parse(summary.earliestReset))
-    ) {
-      summary.earliestReset = bucket.reset_time
-    }
-    summaries.set(bucket.bucket_id, summary)
-  }
-  return [...summaries.values()]
-    .map(({ total, ...summary }) => ({ ...summary, average: total / summary.accounts }))
-    .sort(compareBuckets)
 }
 
 // nameOf 返回额度组或窗口的显示名，未知取值原样显示

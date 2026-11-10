@@ -11,7 +11,7 @@ Antigravity2API 是单个 Go 进程：公开协议适配、账户池、上游客
 | 桌面版源码构建 | 另需 Wails v3 CLI `v3.0.0-beta.29`；macOS 与 Linux 需要 CGO |
 | Linux 桌面版 | `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`，构建标签另加 `gtk3` |
 
-Go 程序以 `go:embed` 内嵌 `internal/webui/dist`，构建 Go 之前先构建前端：
+Go 程序以 `go:embed` 内嵌 `internal/webui/dist`，构建 Go 之前先构建前端；前端构建产物除 `index.html` 与图片外只保留 gzip 文件（`vite-plugin-compression2`，level 9）：
 
 ```bash
 cd web
@@ -29,17 +29,25 @@ Windows 上构建前用 `wails3 generate syso` 生成图标、清单与版本信
 ```bash
 pnpm run lint
 pnpm run typecheck
+pnpm run format:check
 ```
 
 ### CI 与发布
 
-`.github/workflows/build.yml` 在推送 `main`、推送 `v*` 标签、PR 与手动触发时运行：
+`.github/workflows/checks.yml` 在 PR 与推送 `main` 时运行，并由 `build.yml` 经 `workflow_call` 复用：
 
 | 作业 | 内容 | 产物 |
 | --- | --- | --- |
-| `web` | 前端构建，解析版本 | `internal/webui/dist` |
-| `web-checks` | 前端 lint 与类型检查 | — |
+| `web` | 前端构建 | `internal/webui/dist` |
+| `web-checks` | 前端类型检查、lint 与格式检查 | — |
 | `checks` | `go test` 与 `go vet` 两个并行任务 | — |
+
+`.github/workflows/build.yml` 在推送 `v*` 标签与手动触发时运行，检查通过后构建各平台包：
+
+| 作业 | 内容 | 产物 |
+| --- | --- | --- |
+| `checks` | 复用 `checks.yml` | `internal/webui/dist` |
+| `version` | 解析版本 | — |
 | `headless` | 每个目标一个并行任务交叉编译 | Linux 与 macOS 共 4 个命令行包 |
 | `desktop-windows` | `desktop,production` 构建，GUI 子系统，带图标、清单与版本信息 | `<版本>-windows-amd64.zip` |
 | `desktop-macos` | arm64 与 amd64 合并为通用二进制，ad-hoc 签名的 `Antigravity2API.app` | `desktop-<版本>-darwin-universal.tar.gz` |
@@ -48,7 +56,7 @@ pnpm run typecheck
 | `docker` | 只在推送标签时运行 | `ghcr.io/mag1cfall/antigravity2api` |
 
 - 工具链：全部作业设 `GOTOOLCHAIN=local`。`web` 作业用 Node.js 22.23.3 与 `web/package.json` 的 `packageManager` 指定的 pnpm 11.10.0；`checks` 作业以 `go.mod` 的 Go 1.26.0 运行 `go test`、`go vet` 与构建；`headless`、`desktop-windows`、`desktop-macos`、`desktop-linux` 以最新稳定版 Go 构建；macOS 的最低系统版本经 `CGO_CPPFLAGS` 与 `CGO_LDFLAGS` 传入，cgo 保留默认的 `-O2 -g`
-- 编译缓存：各 Go 作业以 `actions/cache` 按作业、Go 版本与 `go.sum` 恢复模块与编译缓存，只在 `main` 构建结束时保存
+- 编译缓存：各 Go 作业以 `actions/cache` 按作业、Go 版本与 `go.sum` 恢复模块与编译缓存；`checks` 只在 `main` 上保存，各平台包的作业每次构建结束时保存，在 `main` 上手动触发的构建所保存的缓存可被之后的标签构建恢复
 - 包版本：标签构建为标签名，其余构建为提交号前 7 位，用于包名与可执行文件资源；资源与桌面包的数字版本去掉 `v` 与 `-` 之后的部分，非标签构建为 `0.0.0`。程序报告的版本取 Go 构建信息中的模块版本（见[在线更新](#在线更新)）
 - 命令行包：`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`，`CGO_ENABLED=0`、`-trimpath -ldflags='-s -w'`，tar.gz 中只有 `antigravity2api`
 - Windows 包：zip 中只有桌面版 `antigravity2api.exe`（`-H windowsgui`）；带子命令启动时附加启动它的控制台，没有控制台时新建一个，重定向的标准输入输出保持不变
@@ -75,6 +83,8 @@ internal/
   prompt/              # 各系统提示档位的官方段与 user 轮模板
   requestdb/           # SQLite 请求账本、汇总、额度快照、日志与费用估算
   service/             # 生成服务：模型解析、会话记录、请求改写、输出核对、换号与账户生命周期
+  sqlitedb/            # SQLite 库的打开：连接参数、按建表语句整理表结构、空闲页回收
+  statedb/             # Responses 与 Interactions 续接节点的 SQLite 存储
   tokencount/          # Gemma 3、cl100k_base 与 o200k_base 分词的本地 token 估算
   webui/               # 内嵌管理端静态资源
 web/                   # 管理端源码（React 19、Vite、Tailwind CSS）
@@ -110,6 +120,7 @@ cmd ──► app ──► api ──► antigravity
 ```
 
 - `recordPublic` 位于 api 层之前：满足条件的 POST 都写入请求账本，包括随后被浏览器来源检查或请求体上限拒绝的请求；API key 不匹配的请求不入账
+- `recordPublic` 读取请求体：`Content-Type` 为 `multipart/*` 的请求由处理函数边读边记下字节数与前 64 KiB；其余请求先整体读入，从中取流式、模型与 Responses 后台标记，再交给 api 层
 - `antigravity` 不依赖其他内部包；`api` 只依赖 `antigravity` 的类型与 `Service` 接口（`Models`、`Generate`、`CountTokens`）
 - `service.Service` 实现 `antigravity.Service`；`app` 用 `recordingService` 包装它，在生成开始时写请求日志并转发事件给请求记录
 - `logging` 只依赖 `config` 的日志文件大小常量
@@ -167,7 +178,8 @@ api 层的公开接口规则：
 | 单引号值 | 原文 |
 | 双引号值 | 按 Go 字符串字面量解码 |
 | 裸值 | 去掉 ` #` 之后的行尾注释 |
-| 列表项（`API_KEYS`、`API_KEY_ACCOUNTS`、`PROXY`、`SYSTEM_PROMPT_SECTIONS`、`PREFER_LOWER_TIER_MODELS`、`MODEL_MAPPING`） | 按逗号切分，见表下 |
+| 列表项（`API_KEYS`、`API_KEY_ACCOUNTS`、`PROXY`、`PREFER_LOWER_TIER_MODELS`、`MODEL_MAPPING`） | 按逗号切分，见表下 |
+| `SYSTEM_PROMPT_TEMPLATE`、`SYSTEM_PROMPT_USER_TEMPLATE` | 解码后的原文，首尾空白与换行保留 |
 | `MODEL_MAPPING` | 每项以最后一个 `:` 分成别名与模型 ID，两边各去掉首尾空白 |
 | `API_KEY_ACCOUNTS` | 每项以最后一个 `:` 分成 API key 与账户，账户以 `\|` 分隔、去重 |
 | `REQUEST_TIMEOUT`、`QUOTA_REFRESH_INTERVAL` | Go 时长，例如 `30s`、`5m`；`QUOTA_REFRESH_INTERVAL` 另接受 `0` |
@@ -188,8 +200,7 @@ api 层的公开接口规则：
 | `AUTH_DIR`、`RUNTIME_DIR` | 非空 |
 | `PROXY` | 带主机的 `http`、`https` 或 `socks5` URL，逗号分隔 |
 | `SYSTEM_PROMPT` | `full`、`medium`、`aggressive`、`custom` |
-| `SYSTEM_PROMPT_SECTIONS` | 官方段名 |
-| `SYSTEM_PROMPT_WRAP` | `full`、`time`、`none` |
+| `SYSTEM_PROMPT_TEMPLATE`、`SYSTEM_PROMPT_USER_TEMPLATE` | 能解析的 Go `text/template` 模板，只引用[模板字段](protocol.md#系统提示与-user-轮)中的字段 |
 | `MODEL_MAPPING` | 每项为 `别名:模型 ID`，两边非空 |
 | `API_KEY_ACCOUNTS` | 每项为 `API key:账户\|账户`，账户非空 |
 | `MEDIA_OUTPUT` | `inline`、`url` |
@@ -318,13 +329,13 @@ api 层的公开接口规则：
 
 | 档案字段 | 使用位置 |
 | --- | --- |
-| `os`、`arch` | User-Agent、JSON 风格、unleash、Hub 事件、系统提示、主机名 |
-| `user_name` | unleash `instanceId`；macOS 与 Linux 主机名 |
+| `os`、`arch` | User-Agent、JSON 风格、Hub 事件、系统提示、主机名 |
+| `user_name` | macOS 与 Linux 主机名 |
 | `app_data_dir` | 系统提示中的路径 |
-| `time_zone` | user 轮本地时间与 unleash 时间的时区 |
+| `time_zone` | user 轮本地时间的时区 |
 | `installation_id` | Windows 主机名；Hub 事件的安装标识；登录前错误上报 |
 
-- `os`、`arch` 决定 User-Agent 的系统、架构与构建号，JSON 正文结构逗号后的空格（macOS 与 Linux 带空格），unleash 的 `platformVersion`，Hub 事件的 `os`，系统提示的 OS 与路径分隔符，以及主机名形式
+- `os`、`arch` 决定 User-Agent 的系统、架构与构建号，JSON 正文结构逗号后的空格（macOS 与 Linux 带空格），Hub 事件的 `os`，系统提示的 OS 与路径分隔符，以及主机名形式
 
 主机名：Windows 为 `DESKTOP-` 加 `SHA-256(installation_id 的 UUID 文本)` 以 RFC 4648 标准 Base32 字母表 `A–Z2–7` 编码后的前 7 个字符，macOS 为 `<用户名>s-MacBook-Pro.local`，Linux 为 `<用户名>-pc`。
 
@@ -349,15 +360,15 @@ api 层的公开接口规则：
 
 | 路径 | 内容 |
 | --- | --- |
-| `requests.db` | 请求账本（SQLite，WAL） |
-| `states.db` | Responses 与 Interactions 已结束的续接节点（SQLite，WAL），服务重启后读回，`previous_response_id`、`previous_interaction_id` 与按 ID 读取照常可用 |
+| `requests.db` | 请求账本（SQLite，WAL），保留期与文件大小见 [运行日志与请求账本](logging.md) |
+| `states.db` | Responses 与 Interactions 已结束的续接节点（SQLite，WAL），服务重启后读回，`previous_response_id`、`previous_interaction_id` 与按 ID 读取照常可用；打开方式同请求账本，启动时交还空闲页 |
 | `logs/antigravity2api.log` | 服务日志，轮转文件在同目录 |
 | `logs/crash.log` | 未恢复的 panic 与致命错误 |
-| `files/<ID>`、`files/<ID>.json` | Files API 上传的内容与元数据 |
-| `media/<SHA-256>.<扩展名>` | `MEDIA_OUTPUT=url` 时按内容命名保存的生成媒体 |
+| `files/<ID>`、`files/<ID>.json` | Files API 上传的内容与元数据，到期与总量上限（4 GiB）见 [协议参考](protocol.md) 的 Files |
+| `media/<SHA-256>.<扩展名>` | `MEDIA_OUTPUT=url` 时按内容命名保存的生成媒体，总量超过 1 GiB 时从最久未使用的文件起删除 |
 | `conversations/<cascade_id>.json` | 会话记录，空闲 24 小时后删除 |
-| `catalogs/<账户>.json` | 该账户最近一次读到的模型目录条目 |
-| `hub/<账户>.json` | 虚拟 Hub 状态：该账户经服务开始过的会话数与模型选择器最后选定的模型 |
+| `catalogs/<账户>.json` | 该账户最近一次读到的模型目录条目，账户删除后在下一次刷新账户池时删除 |
+| `hub/<账户>.json` | 虚拟 Hub 状态：该账户经服务开始过的会话数与模型选择器最后选定的模型，账户删除后在下一次刷新账户池时删除 |
 | `warmups.json` | 各账户各每周额度桶最近一次唤醒的时间 |
 | `cooldowns.json` | 各账户未到期的冷却，服务重启后恢复 |
 | `.updaterId` | 版本检查使用的更新器标识 |
@@ -400,7 +411,7 @@ api 层的公开接口规则：
 | `tokens` | 整数 | 上游 `promptTokenCount` |
 
 - `origins` 的键为签名 SHA-256 前 16 字节的小写十六进制，值为生成它的模型的 `modelProvider`（`MODEL_PROVIDER_GOOGLE`、`MODEL_PROVIDER_ANTHROPIC`、`MODEL_PROVIDER_OPENAI`）
-- 会话记录写入时先写同目录临时文件再替换；启动时读入全部记录，任一文件无法解析时服务启动失败
+- 会话记录写入时先写同目录临时文件（`.conversation-*`）再替换；启动时删除写入中断留下的临时文件并读入全部记录，任一文件无法解析时服务启动失败
 - 写入时机：请求开始时（取得会话后、选择账户前）写 `length`、`digest`、`times` 与 `used`，`answer` 清空；`times` 先截到上一次的 `length` 再按当前时刻补齐本次多出的消息。生成正常结束后再写 `prompt`、`signatures`、`origins`，会话仍停在本次请求时写 `answer`
 - 失败或取消的请求只有请求开始时的写入；之后原样重发时按协议参考「会话 ID」第 3 步匹配回同一会话，沿用已写的 `times`
 - 摘要链：`digest(prev, data) = hex(SHA-256(prev + data))`，`prev` 为上一项的小写十六进制文本；`d0 = digest("", {"Session":<分区>,"System":<去掉计费行后的客户端系统提示>,"Tools":<规范工具>})`，`di = digest(d(i-1), 第 i 条规范消息的 JSON)`
@@ -489,7 +500,7 @@ api 层的公开接口规则：
 服务启动后与账户变化后在后台刷新账户池，同一时间只运行一次，进行中再次请求时合并为下一次：
 
 1. 按添加时间处理启用账户，跳过已初始化且代理与 refresh token 都未变的账户；相邻两个账户的初始化相隔随机 1–3 秒开始、彼此并发，全部结束后刷新结束
-2. 每个账户以设备档案与代理创建上游客户端，读取 `RUNTIME_DIR/hub/<账户>.json`，立即开始 unleash 与 clearcut 上报两项伴随请求，0.6–0.8 秒后初始化
+2. 每个账户以设备档案与代理创建上游客户端，读取 `RUNTIME_DIR/hub/<账户>.json`，立即开始 clearcut 上报，0.16–0.59 秒后初始化
 3. 企业账户（`auth_method` 为 `business_licensed_enterprise`）走 `BusinessInitialize`；个人账户在 `project` 为空或 refresh token 与调度中的客户端不同时走登录序列（新账户与换了 refresh token 的再次登录），其余走冷启动序列（序列见协议参考）；账户在等待初始化期间被删除时不初始化。`fetchUserInfo` 显示遥测开启时发 `setUserSettings` 关闭
 4. 成功时以目录的公开条目加入账户池，记录额度快照并开始其余伴随请求；失败时停止该账户的全部伴随请求，记下原因并移出调度
 5. 停用与已删除的账户移出调度，停止全部伴随请求
@@ -688,6 +699,7 @@ api 层的公开接口规则：
 - 会话 Cookie `antigravity_admin`：12 小时，`Path=/api`、HttpOnly、SameSite=Strict，经 TLS 或 `X-Forwarded-Proto: https` 时带 Secure；会话结束时取消该会话的进行中管理请求
 - 同一客户端 IP 一分钟内登录失败 5 次后返回 429 `login_rate_limited`，`Retry-After: 60`
 - 响应带 `Cache-Control: no-store`；错误体为 `{"error":{"code","message"}}`；未知路由返回 404 `not_found`，消息为 `管理 API 不存在: <方法> <路径>`
+- 请求的 `Accept-Encoding` 含 gzip 时，`application/json`、`text/csv` 与 `text/event-stream` 响应以 gzip 压缩（`klauspost/compress` 的 `gzhttp`），不足 1 KiB 的 JSON 与 CSV 响应不压缩；事件流的每条事件写出后立即送出
 
 | 方法与路径 | 作用 |
 | --- | --- |
@@ -725,7 +737,8 @@ api 层的公开接口规则：
 | `POST /api/requests/{id}/cancel` | 停止进行中的请求 |
 | `GET /api/logs` | 一页已入库的 WARN 以上日志 |
 | `DELETE /api/logs` | 清空日志 |
-| `GET /api/prompt/preview` | 系统提示档位的原文预览 |
+| `GET /api/prompt/templates` | 内置三档的模板与官方段原文 |
+| `POST /api/prompt/preview` | 系统提示档位的原文预览 |
 | `GET /api/settings` | `.env` 中保存的配置 |
 | `PATCH /api/settings` | 合并保存配置 |
 | `GET /api/events` | 管理事件流（SSE） |
@@ -784,6 +797,8 @@ api 层的公开接口规则：
 | 其他存在的文件 | 该文件，`Cache-Control: no-cache` |
 | `assets/` 下不存在的文件 | 404 |
 | `/`、`/index.html` 与其他路径 | 200 入口页 `index.html`，`Cache-Control: no-cache` |
+
+静态文件由 `vearutop/statigz` 服务：请求的 `Accept-Encoding` 含 gzip 时直接返回内嵌的 gzip 文件并带 `Content-Encoding: gzip`，否则返回解压后的内容；请求中的 `If-None-Match` 不参与判断，文件每次以 200 返回。
 
 同一监听上的全部响应带 `X-Frame-Options: DENY`、`Content-Security-Policy: frame-ancestors 'none'`、`X-Content-Type-Options: nosniff` 与 `Referrer-Policy: no-referrer`。
 
@@ -852,13 +867,19 @@ api 层的公开接口规则：
 - 只合并提交的键，校验失败返回 400 `invalid_settings`
 - 提交 `ADMIN_PASSWORD` 时以提交值（含空串）替换密码，不提交时保持原值；管理端只在密码输入框非空时提交该键
 
-`GET /api/prompt/preview?tier=&sections=&wrap=` 以占位数据渲染档位，返回 `{system, user, sections}`：
+`GET /api/prompt/templates` 返回 `{tiers, sections}`，供自定义档的编辑框载入预设与插入官方段落：
+
+| 字段 | 内容 |
+| --- | --- |
+| `tiers` | `{"full","medium","aggressive"}`，各为 `{"system","user"}`：该档的 system 模板与 user 模板，`aggressive` 的 `user` 为空 |
+| `sections` | `[{"name","source"}]`，按官方顺序列出 11 个段可放进 system 模板的原文，`featured_plugins` 的原文包在 `{{if .FeaturedPlugins}}…{{end}}` 中 |
+
+`POST /api/prompt/preview` 接受 `{"tier","system","user"}`，以占位数据渲染档位，返回 `{system, user}`；`tier` 为 `custom` 时渲染请求中的 `system` 与 `user` 模板，其余档位只看 `tier`。请求体不是 JSON 时返回 400 `invalid_request`，档位未知、模板解析或执行出错时返回 400 `invalid_prompt`，`message` 为 Go 模板的错误原文，以 `template: system:<行>:<列>:` 或 `template: user:<行>:<列>:` 标出模板与位置。
 
 | 字段 | 内容 |
 | --- | --- |
 | `system` | 系统指令 |
 | `user` | 首个 user 轮 `<user message>` 包装后的文本 |
-| `sections` | `[{"name","text"}]`，按官方顺序列出 11 个段 |
 
 | 占位项 | 值 |
 | --- | --- |
@@ -927,7 +948,7 @@ api 层的公开接口规则：
 | 接入 | OpenAI、Anthropic 与 Gemini 兼容接口的 base URL（OpenAI 兼容含 Chat 与 Responses 两个协议）、API key 管理、客户端配置片段 |
 | 模型 | 额度组、上下文与输出上限、思考档位、可用账户数、模型映射（可编辑） |
 | 请求 | 进行中请求（可停止，显示当前阶段）、请求记录、用量、日志（上方列出进行中请求） |
-| 设置 | 服务、网络、系统提示（各系统提示档位的原文，`custom` 的段落与包装）、调度（含优先用低套餐账户的模型、额度保留比例与周额度唤醒）、日志、远程访问、关于 |
+| 设置 | 服务、网络、系统提示（各系统提示档位的原文，`custom` 的系统指令与 user 轮模板）、调度（含优先用低套餐账户的模型、额度保留比例与周额度唤醒）、日志、远程访问、关于 |
 
 各页面的组成：
 
@@ -935,7 +956,7 @@ api 层的公开接口规则：
 | --- | --- | --- |
 | 账户 | 账户表 | 列为账户、状态、Gemini、Claude 与 GPT、操作，各行等高 |
 | 账户 | 账户详情 | 额度、调度设置、用量、资料、设备档案与操作 |
-| 模型 | 模型映射卡片 | 逐行编辑别名与目标模型 |
+| 模型 | 目录与模型映射两个子页面 | 标题下方的子页面导航切换，模型映射逐行编辑别名与目标模型 |
 | 仪表盘 | 概览条 | 就绪账户与账户状态分布、两组额度的平均剩余比例与低额度账户数、24 小时请求 |
 | 仪表盘 | 最近请求 | 近 24 小时最近 5 条请求 |
 | 账户 | 搜索与分页 | 匹配邮箱、备注名与项目，每页 20 个 |
@@ -948,7 +969,7 @@ api 层的公开接口规则：
 | 用量 | 趋势与分项 | 用量趋势图与分项表 |
 
 - 账户详情：额度与刷新、各项冷却的截止时间与“清除冷却”按钮（`DELETE /api/accounts/{id}/cooldowns/{scope}`）、调度优先级、备注名、AI 积分超额使用、近 30 天用量、资料（套餐、AI 积分余额与使用积分所需的最低余额、项目、代理、添加时间、access token 到期）、设备档案；操作为重新初始化账户、代理、参与调度、删除、切换到官方客户端
-- 模型映射卡片：目标模型的下拉为目录中的模型，可增删行；保存时以 `PATCH /api/settings` 只提交 `MODEL_MAPPING`；别名须非空、不含逗号、不重复，目标模型必选
+- 模型映射子页面（`/models/mapping`）：目标模型的下拉为目录中不是别名的模型，可增删行；保存时以 `PATCH /api/settings` 只提交 `MODEL_MAPPING`；别名须非空、不含逗号、不重复，目标模型必选
 - 进行中：只在有进行中请求时显示，数据来自事件流；列为时间与协议、模型与当前阶段、账户、已用时、“停止”（`POST /api/requests/{id}/cancel`）；当前阶段为该请求最近一条 `request.progress` 日志首行去掉“模型=”一项，各项以中点相连；事件流的初始快照到达前请求页显示加载
 - 日志页的实时日志上方每个进行中请求一行：模型、账户、已运行时长、当前阶段与“查看请求”
 - 请求记录与详情中的协议显示为 OpenAI Chat、OpenAI Responses、Anthropic Messages、Gemini
@@ -979,7 +1000,7 @@ api 层的公开接口规则：
 | --- | --- |
 | 服务 `service` | `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR`、API key（链接到接入页）、`MEDIA_OUTPUT`、`MEDIA_BASE_URL` |
 | 网络 `network` | `PROXY`（每行一个）与代理池状态 |
-| 系统提示 `prompt` | `SYSTEM_PROMPT`、原文预览、`SYSTEM_PROMPT_SECTIONS`、`SYSTEM_PROMPT_WRAP` |
+| 系统提示 `prompt` | `SYSTEM_PROMPT`、原文预览、`SYSTEM_PROMPT_TEMPLATE`、`SYSTEM_PROMPT_USER_TEMPLATE` |
 | 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP` |
 | 日志 `logging` | `LOG_LEVEL`、`LOG_FORMAT`、`LOG_FILE`、`LOG_MAX_TOTAL_MB`、`REQUEST_LOG_BODIES` |
 | 远程访问 `remote` | `ADMIN_AUTH_ENABLED`、`ADMIN_USERNAME`、`ADMIN_PASSWORD`（已设置时输入框为空并显示占位） |
@@ -991,6 +1012,8 @@ api 层的公开接口规则：
 | `QUOTA_RESERVE_PERCENT` | 0–99 | 0–99 的整数 |
 | `LOG_MAX_TOTAL_MB` | 20–100000 | 不小于 20 的整数 |
 
+- 内置三档的说明带模板规模：全保留档为官方段数与模板字符数，中等与激进档为模板字符数，字符数取整到百位，取自 `GET /api/prompt/templates`
+- 系统提示档位为 `custom` 时显示系统指令与 user 轮包装两个等宽字体的编辑框，内容即 `SYSTEM_PROMPT_TEMPLATE` 与 `SYSTEM_PROMPT_USER_TEMPLATE` 的原文；“载入预设”以 `GET /api/prompt/templates` 中内置档位的模板替换全文（user 轮另有“不包装”，即空模板），“插入”在光标处放入变量（`{{.字段}}`）或官方段落的原文并把光标移到其后；输入停下 400 ms 后以 `POST /api/prompt/preview` 渲染，编辑框下方显示代入示例数据后的字符数，返回 `invalid_prompt` 时在出错模板的编辑框下方显示错误中 `template: ` 之后的部分；系统指令为空时显示请求不带系统指令的说明；“查看原文”对话框打开时停在当前档位，`custom` 按表单中尚未保存的模板渲染
 - `.env` 中有取值无效的项时，设置页顶部列出配置项、原值与原因；进程环境变量决定的项带“环境变量”标签，悬停显示变量名，控件停用
 - 加减按钮到达范围端点时停用；输入框中直接键入的值不受按钮范围限制，按“可提交的值”校验，与服务端一致
 - `REQUEST_TIMEOUT` 与 `QUOTA_REFRESH_INTERVAL` 为数值加单位（秒、分钟、小时）：打开时整小时用小时、整分钟用分钟、其余用秒，切换单位时只换算显示的数值（保留 6 位有效数字），改动数值后才写入；保存为 Go 时长（如 `30s`、`5m`），数值为 0 时保存 `0`
@@ -1005,7 +1028,8 @@ api 层的公开接口规则：
 | `/` | 仪表盘 | — |
 | `/accounts` | 账户 | `state`、`q`、`sort`、`page`、`account` |
 | `/connect` | 接入 | `client` |
-| `/models` | 模型 | `group`、`q` |
+| `/models` | 模型目录 | `group`、`q` |
+| `/models/mapping` | 模型映射 | — |
 | `/requests` | 请求记录 | `range`、`state`、`protocol`、`model`、`account`、`q`、`cursor`、`id` |
 | `/requests/usage` | 用量 | `range`、`by`、`model`、`account`、`api_key` |
 | `/requests/logs` | 日志 | `view`、`level`、`source`、`q`、`range`、`request_id` |
@@ -1204,7 +1228,7 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 - 页面上的筛选、范围、分组、视图、客户端、页码与打开的详情写入查询参数（见路由表），刷新或分享链接得到同一页面
 - 不认识或缺省的取值使用默认值：账户状态全部、按添加时间排序，模型额度组全部，请求记录范围 `24h`，用量范围 `7d`、分组 `model`，日志视图 `live`、级别全部，已保存日志范围 `24h`；用量页之外的默认值不写入 URL
 - 筛选变化替换当前历史记录；请求记录翻页与打开详情新增历史记录，其余筛选变化同时清除 `cursor`
-- 顶栏导航与请求页的子页面导航回到各页本次打开管理端后最后一次的子页面与查询参数（`web/src/app/remember.ts`），点击当前所在的项保持当前参数；刷新页面后从无参数开始
+- 顶栏导航与模型页、请求页的子页面导航回到各页本次打开管理端后最后一次的子页面与查询参数（`web/src/app/remember.ts`），点击当前所在的项保持当前参数；刷新页面后从无参数开始
 - 请求记录与已保存日志的时间范围截止到当前时间之后 1 秒；实时日志在页面内按最低级别、来源与关键词（匹配消息与来源，不区分大小写）筛选；每条日志一行，宽度小于 640 时消息换到第二行
 
 | 页面 | 参数取值 |
@@ -1453,7 +1477,7 @@ bob@example.com    error  free-tier           需要验证：...
 
 - 替换后重启：停止服务后以 `serve`、原参数与 `--open-ui=false` 启动新版本；Windows 上新进程沿用当前控制台，其他系统原地替换进程；HTTP 服务关闭超时也照常重启
 - Wails 更新器重启：更新器的辅助进程等当前进程结束后替换文件并启动新版本；Linux 与 macOS 的暂存目录与替换目标位于同一目录
-- Windows 上被替换的旧文件留在同一目录：命令行版为隐藏文件 `.antigravity2api.exe.old`，桌面版为 `antigravity2api.exe.old.<时间戳>`
+- Windows 上被替换的旧文件留在同一目录：命令行版为隐藏文件 `.antigravity2api.exe.old`，桌面版为 `antigravity2api.exe.old.<时间戳>`；服务启动时删除这些文件
 - 管理端事件流断开重连后读取 `/api/status`，版本与上次不同时刷新页面，在线更新重启后任何页面都切换到新版本
 
 设置页“关于”分区的“版本与在线更新”一项读取 `GET /api/update`，按第一条符合的行显示：
@@ -1487,6 +1511,7 @@ go vet ./...
 | `app` | 远程管理需要登录、验证链接、代理脱敏 |
 | `requestdb` | 记录查询与详情、正文保留条数、过期清理、汇总与记录一致、日志查询、结果判定、上游错误读取、费用 |
 | `service` | 流中错误原样返回、客户端取消后排空上游 |
+| `sqlitedb` | 打开已有库时保留记录、删除建表语句中没有的表与索引、转为增量收缩并交还空闲页 |
 | `api` | 空消息过滤、Gemini 输出 part 与签名、`inlineData` 兼容、API key 匹配 |
 
 

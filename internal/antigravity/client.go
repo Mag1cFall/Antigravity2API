@@ -210,7 +210,7 @@ func (c *Client) notify(observed Observed) {
 	}
 }
 
-// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode 走只开 HTTP/1 的 Transport，Authorization 由 oauth2.Transport 注入；头像、tokeninfo、unleash 与 clearcut 走克隆的 http.DefaultTransport，clearcut 另由 oauth2.Transport 注入 Authorization
+// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode 走只开 HTTP/1 的 Transport，Authorization 由 oauth2.Transport 注入；头像、tokeninfo 与 clearcut 走克隆的 http.DefaultTransport，clearcut 另由 oauth2.Transport 注入 Authorization
 func NewClient(account string, source oauth2.TokenSource, device Device, proxy Proxy) *Client {
 	transport := &http.Transport{Proxy: proxy}
 	transport.Protocols = new(http.Protocols)
@@ -330,7 +330,7 @@ type Initialization struct {
 	Quota    QuotaSummary
 }
 
-// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 结束 42–48 ms 后 fetchUserInfo、listExperiments、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，listExperiments 结束 551–613 ms 后发 fetchConfig，listExperiments 失败时不发；其余四个请求全部结束后发 cascadeNuxes；只有 loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
+// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 结束 42–48 ms 后 fetchUserInfo、listExperiments、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，listExperiments 结束 122–195 ms 后发 fetchConfig，listExperiments 失败时不发；其余四个请求全部结束后发 cascadeNuxes；只有 loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
 func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 	var result Initialization
 	user := optional(func() (err error) {
@@ -358,7 +358,7 @@ func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 		return err
 	})
 	experiments := func() error {
-		if c.listExperiments(ctx) == nil && pause(ctx, 551, 613) == nil {
+		if c.listExperiments(ctx) == nil && pause(ctx, 122, 195) == nil {
 			c.fetchConfig(ctx)
 		}
 		return nil
@@ -471,14 +471,14 @@ func (c *Client) Userinfo(ctx context.Context) (Userinfo, error) {
 	return user, c.do(request, &user)
 }
 
-// FetchUserInfo 读取账户设置与地区，并记入伴随状态
+// FetchUserInfo 读取账户设置与地区，并记入伴随状态与读取结束的时刻
 func (c *Client) FetchUserInfo(ctx context.Context) (UserInfoResponse, error) {
 	var response UserInfoResponse
 	if err := c.post(ctx, c.base+"/v1internal:fetchUserInfo", projectRequest{Project: c.Project()}, &response); err != nil {
 		return UserInfoResponse{}, err
 	}
 	c.mu.Lock()
-	c.state.region, c.state.telemetry = response.RegionCode, response.UserSettings.TelemetryEnabled
+	c.state.region, c.state.telemetry, c.hub.refreshed = response.RegionCode, response.UserSettings.TelemetryEnabled, time.Now()
 	c.mu.Unlock()
 	c.notify(Observed{Settings: &response})
 	return response, nil

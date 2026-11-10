@@ -40,14 +40,12 @@ export function QuotaLine({
             label={label + ' ' + fill(m.remaining, { percent })}
           />
         </span>
-        <span className={'text-right font-medium tabular-nums ' + quotaText(fraction)}>
-          {percent}
-        </span>
+        <span className={'text-right font-medium ' + quotaText(fraction)}>{percent}</span>
         {countdown && reset && (
           <Tooltip label={fill(m.resetAt, { time: formatFullDateTime(new Date(reset), locale) })}>
             <span
               className={
-                'col-span-2 col-start-2 truncate font-mono text-foreground-subtle tabular-nums @min-[200px]:col-span-1 @min-[200px]:col-start-auto ' +
+                'col-span-2 col-start-2 truncate font-mono text-foreground-subtle @min-[200px]:col-span-1 @min-[200px]:col-start-auto ' +
                 (compact ? 'max-sm:hidden' : '')
               }
             >

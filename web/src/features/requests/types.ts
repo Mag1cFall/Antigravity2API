@@ -3,7 +3,7 @@ export type RequestState =
   'running' | 'completed' | 'tool_calls' | 'limited' | 'blocked' | 'failed' | 'cancelled'
 
 // Attempt 对应 internal/requestdb 的 Attempt，status 为 0 表示连接失败
-export interface Attempt {
+interface Attempt {
   account: string
   url: string
   status: number

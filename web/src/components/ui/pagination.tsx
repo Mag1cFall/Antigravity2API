@@ -40,7 +40,7 @@ export function Pagination({
       aria-label={label}
       className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-2"
     >
-      <p className="text-sm text-foreground-muted tabular-nums">{summary}</p>
+      <p className="text-sm text-foreground-muted">{summary}</p>
       {pages > 1 && (
         <ul className="flex items-center gap-1">
           <li>
@@ -69,7 +69,7 @@ export function Pagination({
                   size="sm"
                   aria-label={pageLabel(item)}
                   aria-current={item === page ? 'page' : undefined}
-                  className="min-w-control-sm px-2 tabular-nums"
+                  className="min-w-control-sm px-2"
                   onClick={() => {
                     onPage(item)
                   }}

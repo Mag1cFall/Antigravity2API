@@ -346,7 +346,7 @@ func (s *server) compactResponses(ctx context.Context, request responsesRequest,
 	return item, retainedUserMessages(slices.Concat(window.before, work[:cut])), usage, nil
 }
 
-// conversationItems 返回去掉 developer 与 system 消息后的条目，客户端每次请求都重新发送这些指令
+// conversationItems 返回去掉 developer 与 system 消息后的条目
 func conversationItems(items []json.RawMessage) []json.RawMessage {
 	return slices.DeleteFunc(slices.Clone(items), func(item json.RawMessage) bool {
 		var head struct {
@@ -447,6 +447,7 @@ func (s *server) handleCompactionTrigger(w http.ResponseWriter, r *http.Request,
 				return
 			}
 		}
+		stream.setFrame(writer.progressFrame())
 		if err := writer.emit("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "cmp_" + id, "type": "compaction", "encrypted_content": ""}}); err != nil {
 			return
 		}

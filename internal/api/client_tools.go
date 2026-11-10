@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
@@ -151,14 +152,42 @@ func chatCustomTool(tools []openAITool, name string) bool {
 	return false
 }
 
+// declarationKey 是函数声明中决定转换结果的字段
+type declarationKey struct {
+	name, description, parameters string
+	strict                        bool
+}
+
+// cleanedDeclarations 按 declarationKey 保存 antigravity.CleanFunctionDeclaration 的结果，客户端每次请求带同一组工具时不重复转换；满 cleanedDeclarationLimit 项时清空
+var cleanedDeclarations = struct {
+	sync.Mutex
+	items map[declarationKey]antigravity.FunctionDeclaration
+}{items: map[declarationKey]antigravity.FunctionDeclaration{}}
+
+// cleanedDeclarationLimit 为 cleanedDeclarations 保存的声明数上限
+const cleanedDeclarationLimit = 1024
+
 // upstreamFunctions 把各协议的函数声明转换为上游接受的参数 Schema
 func upstreamFunctions(functions []antigravity.FunctionDeclaration) ([]antigravity.FunctionDeclaration, error) {
 	for index, function := range functions {
-		cleaned, err := antigravity.CleanFunctionDeclaration(function)
-		if err != nil {
-			return nil, fmt.Errorf("function %q: %w", function.Name, err)
+		key := declarationKey{function.Name, function.Description, string(function.Parameters), function.Strict}
+		cleanedDeclarations.Lock()
+		cached, ok := cleanedDeclarations.items[key]
+		cleanedDeclarations.Unlock()
+		if !ok {
+			var err error
+			if cached, err = antigravity.CleanFunctionDeclaration(function); err != nil {
+				return nil, fmt.Errorf("function %q: %w", function.Name, err)
+			}
+			cleanedDeclarations.Lock()
+			if len(cleanedDeclarations.items) >= cleanedDeclarationLimit {
+				clear(cleanedDeclarations.items)
+			}
+			cleanedDeclarations.items[key] = cached
+			cleanedDeclarations.Unlock()
 		}
-		functions[index] = cleaned
+		function.Description, function.Parameters, function.Schema = cached.Description, cached.Parameters, cached.Schema
+		functions[index] = function
 	}
 	return functions, nil
 }

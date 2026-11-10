@@ -16,14 +16,20 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
-// 请求结果的取值
 const (
-	StateRunning   = "running"
+	// StateRunning 是进行中的请求
+	StateRunning = "running"
+	// StateCompleted 是正常结束的请求
 	StateCompleted = "completed"
+	// StateToolCalls 是以工具调用结束的请求
 	StateToolCalls = "tool_calls"
-	StateLimited   = "limited"
-	StateBlocked   = "blocked"
-	StateFailed    = "failed"
+	// StateLimited 是达到输出上限的请求
+	StateLimited = "limited"
+	// StateBlocked 是上游以 STOP 与 MAX_TOKENS 之外的原因结束的请求
+	StateBlocked = "blocked"
+	// StateFailed 是失败的请求
+	StateFailed = "failed"
+	// StateCancelled 是被取消的请求
 	StateCancelled = "cancelled"
 )
 
@@ -36,6 +42,7 @@ var ErrRequestTimeout error = requestTimeout{}
 // requestTimeout 是 ErrRequestTimeout 的类型
 type requestTimeout struct{}
 
+// Error 返回超时说明
 func (requestTimeout) Error() string {
 	return "等待上游超过 REQUEST_TIMEOUT"
 }
@@ -54,7 +61,7 @@ var ErrResponseCancelled = errors.New("客户端取消了后台响应")
 // traceKey 是 Trace 在 context 中的键
 type traceKey struct{}
 
-// Trace 收集一次公开请求在各层产生的记录字段，除 Snapshot 与 Finish 外的方法都可在 nil 上调用
+// Trace 收集一次公开请求在各层产生的记录字段，除 Watch、Snapshot 与 Finish 外的方法都可在 nil 上调用
 type Trace struct {
 	mu      sync.Mutex
 	started time.Time

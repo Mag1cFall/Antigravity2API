@@ -13,13 +13,13 @@ import { api } from '@/lib/api'
 export const logsKey = ['logs'] as const
 
 // runningKey 保存事件流推送的进行中请求
-export const runningKey = ['requests-running'] as const
+const runningKey = ['requests-running'] as const
 
 // connectionKey 保存事件流的连接状态：connecting 为尚未收完初始快照，open 为已收完初始快照，closed 为已断开
-export const connectionKey = ['events', 'connection'] as const
+const connectionKey = ['events', 'connection'] as const
 
 // Connection 是事件流的连接状态
-export type Connection = 'connecting' | 'open' | 'closed'
+type Connection = 'connecting' | 'open' | 'closed'
 
 // reconnectDelay 是事件流被服务拒绝后重新连接的间隔
 const reconnectDelay = 3000
@@ -27,6 +27,7 @@ const reconnectDelay = 3000
 // maxLogs 是页面保留的日志条数
 const maxLogs = 2000
 
+// AdminEvent 是事件流推送的一条管理事件
 type AdminEvent =
   | { type: 'accounts'; data: Account[] }
   | { type: 'log'; data: LogEntry }

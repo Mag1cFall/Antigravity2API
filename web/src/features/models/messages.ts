@@ -4,6 +4,8 @@ import { defineMessages } from '@/lib/i18n'
 export const modelMessages = defineMessages(
   {
     title: '模型',
+    tabs: '模型视图',
+    tabCatalog: '目录',
     summary: '{count} 个模型，来自 {ready} 个就绪账户的模型目录',
     description: '客户端请求时填写的模型 ID，以及它们的额度组、上下文与可用账户',
     search: '搜索模型 ID 或名称',
@@ -52,6 +54,8 @@ export const modelMessages = defineMessages(
   },
   {
     title: 'Models',
+    tabs: 'Model views',
+    tabCatalog: 'Catalog',
     summary: 'Models: {count} · Ready accounts: {ready}',
     description:
       'Model IDs clients put in requests, with their quota group, context and available accounts',
@@ -102,6 +106,8 @@ export const modelMessages = defineMessages(
   },
   {
     title: '模型',
+    tabs: '模型檢視',
+    tabCatalog: '目錄',
     summary: '{count} 個模型，來自 {ready} 個就緒帳號的模型目錄',
     description: '用戶端請求時填寫的模型 ID，以及各模型的額度群組、上下文與可用帳號',
     search: '搜尋模型 ID 或名稱',

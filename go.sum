@@ -10,6 +10,8 @@ github.com/bogdanfinn/tls-client v1.16.0 h1:km3YLI6CMRLZnfrC+hGStePPryIicd3hoxFQ
 github.com/bogdanfinn/tls-client v1.16.0/go.mod h1:TxbiXlpZhNN5xmxzsr3KhNAeqoEEPJafwgBbyp26Phc=
 github.com/bogdanfinn/utls v1.7.8-barnius h1:wRT83mP4hmuMM1/lIpLKKhzaEuyEKjux7VSj7XHFXdg=
 github.com/bogdanfinn/utls v1.7.8-barnius/go.mod h1:o5v09jf+9ayMEfcP+8sssNdSMm278cyhBV25H8jb5Lw=
+github.com/bool64/dev v0.2.39 h1:kP8DnMGlWXhGYJEZE/J0l/gVBdbuhoPGL+MJG4QbofE=
+github.com/bool64/dev v0.2.39/go.mod h1:iJbh1y/HkunEPhgebWRNcs8wfGq7sjvJ6W5iabL8ACg=
 github.com/cloudflare/circl v1.6.3 h1:9GPOhQGF9MCYUeXyMYlqTR6a5gTrgR/fBLXvUgtVcg8=
 github.com/cloudflare/circl v1.6.3/go.mod h1:2eXP6Qfat4O/Yhh8BznvKnJ+uzEoTQ6jVKJRn81BiS4=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
@@ -90,6 +92,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/tphakala/go-mp3 v0.1.0 h1:3nY1WwY3E9lSK22d1AtaAvQXqMSfDQlPtqD+Ym/Yc+c=
 github.com/tphakala/go-mp3 v0.1.0/go.mod h1:h8c9IC7aD14TKrq+hnjOMd31B+0GLXtX9TJXXNItisg=
+github.com/vearutop/statigz v1.5.0 h1:FuWwZiT82yBw4xbWdWIawiP2XFTyEPhIo8upRxiKLqk=
+github.com/vearutop/statigz v1.5.0/go.mod h1:oHmjFf3izfCO804Di1ZjB666P3fAlVzJEx2k6jNt/Gk=
 github.com/wailsapp/wails/v3 v3.0.0-beta.29 h1:oJbXasfieQmMkYtqPlFSPnDe0RwpzA5BKiov8WPD5lo=
 github.com/wailsapp/wails/v3 v3.0.0-beta.29/go.mod h1:5DR/EG5FHU8+BNV7tQYQ/rJMjoFsVlYpM+0gp1+gcTI=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=

@@ -70,7 +70,7 @@ const (
 )
 
 // postHooks 为每次模型调用之后依次执行的内置钩子
-var postHooks = []string{"command_assessor", "message_continue_check", "terminal_step_check", "max_generator_invocations_check", "empty_output_continuation_check", "force_invocation", "no_tool_call_check"}
+var postHooks = []string{"message_continue_check", "terminal_step_check", "max_generator_invocations_check", "empty_output_continuation_check", "force_invocation", "no_tool_call_check"}
 
 // stopHooks 为执行结束前依次执行的内置钩子
 var stopHooks = []string{"goal_stop", "idle_subagent_guard"}
@@ -318,18 +318,18 @@ func (s companionState) sessionExperiments() []byte {
 	return out
 }
 
-// mendelFlags 返回会话事件所用的实验开关：use-aicode-mendel 开启时为最近一次 fetchConfig，否则为最近一次 listExperiments
+// mendelFlags 返回会话事件所用的实验开关：实验改以 fetchConfig 为准后为最近一次 fetchConfig，否则为最近一次 listExperiments
 func (s companionState) mendelFlags() []experimentFlag {
-	if s.routed() {
+	if s.mendel {
 		return s.aicode.ExperimentConfig.ExperimentFlags
 	}
 	return s.ccpa.Flags
 }
 
-// mendelIDs 编码实验 ID 与 fetchAvailableModels 实验 ID 的升序并集：use-aicode-mendel 开启时实验 ID 取最近一次 fetchConfig，否则取最近一次 listExperiments
+// mendelIDs 编码实验 ID 与 fetchAvailableModels 实验 ID 的升序并集：实验改以 fetchConfig 为准后实验 ID 取最近一次 fetchConfig，否则取最近一次 listExperiments
 func (s companionState) mendelIDs() []byte {
 	ids := s.ccpa.ExperimentIDs
-	if s.routed() {
+	if s.mendel {
 		ids = s.aicode.ExperimentConfig.EnabledExperimentIDs
 	}
 	ids = slices.Concat(ids, s.catalogExperiments)
@@ -507,7 +507,9 @@ func userStep(conversation Conversation, model CatalogModel, previous string, in
 	if previous != "" {
 		input = appendBytes(input, 13, sessionOverride(CatalogModel{Model: previous}))
 	}
+	input = appendBytes(input, 16, nil)
 	input = appendBytes(input, 18, pbGet(sessionFixed.Resolution, 1).raw)
+	input = appendString(input, 19, uuid.NewString())
 	step := appendVarint(nil, 1, stepUser)
 	step = appendVarint(step, 4, stepDone)
 	step = appendBytes(step, 5, meta)
@@ -868,7 +870,6 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		c.sessionUI(opened, "conversation_new", map[string]any{"ui_location": "new_conversation_button", "trigger_type": "click"})
 		c.sessionUI(opened, "AGENT_MANAGER_NEW_WORKSPACE_CONVERSATION", map[string]any{})
 		c.sessionUI(opened.Add(time.Millisecond), "SWITCH_CONVERSATION", map[string]any{"cascadeId": ""})
-		c.sessionUI(opened.Add(8*time.Millisecond), "AGENT_MANAGER_HOME", map[string]any{})
 	}
 	if changed {
 		c.sessionUI(early(1400, 1900), "model_changed", map[string]any{"ui_location": "model_selector_button", "trigger_type": "click", "name": model.DisplayName})
@@ -898,9 +899,9 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		"total_latency_ms": latency, "cascade_send_latency_ms": latency, "hydrate_slash_commands_latency_ms": 0, "active_user_state_latency_ms": 0, "load_trajectory_latency_ms": 0,
 		"resolve_agent_config_latency_ms": 0, "save_media_latency_ms": 0, "media_summaries_latency_ms": 0, "media_count": media, "saved_media_count": media,
 	})
-	delay := 9
+	delay := between(8, 11)
 	if turn.New {
-		delay = between(16, 47)
+		delay = between(10, 47)
 	}
 	c.sessionUI(sent.Add(time.Duration(delay)*time.Millisecond), "CASCADE_MESSAGE_SENT", map[string]any{
 		"is_new_conversation": strconv.FormatBool(turn.New), "model": model.DisplayName, "num_images": images, "num_audio": audio, "num_videos": video, "project_type": "normal",
@@ -917,7 +918,27 @@ func (c *Client) SessionSend(turn SessionTurn) {
 	c.preInvocation(hooked, turn, track, metadata)
 }
 
-// SessionReply 在模型调用完成后记录回复事件：模型回复步骤；有工具调用时记录码 2 与第一个调用的工具前钩子，否则记录首 token 耗时、码 2、调用后与结束钩子和码 1
+// promptLatency 返回 prompt_latency 事件的参数与界面量得的首 token 耗时：sent 为发送时刻，invoked 为模型调用开始时刻，first 为首个事件时刻，steps 为回复与其第一个工具步骤在内的步骤数；界面比 language_server 晚 26–86 ms 看到首个事件，新会话另有 166–295 ms 的会话准备耗时
+func promptLatency(turn SessionTurn, sent, invoked, first time.Time, steps int) (map[string]any, int) {
+	before, chunk := int(invoked.Sub(sent).Milliseconds()), int(first.Sub(invoked).Milliseconds())
+	token := before + chunk + between(26, 86)
+	dispatch, paint := between(8, 52), between(12, 33)
+	params := map[string]any{
+		"kind": "follow_up", "outcome": "completed", "queued": "false", "pageHidden": "false", "modelId": strings.TrimPrefix(turn.Model.Model, "MODEL_"),
+		"stepCount": steps, "workspaceCount": 0, "preDispatch": dispatch, "submitToDispatch": dispatch, "dispatchToUserInputVisible": before + between(6, 61),
+		"lsPreModel": before, "lsModelFirstChunk": chunk, "dispatchToFirstToken": token, "firstTokenToPaint": paint,
+	}
+	if turn.New {
+		setup := between(166, 295)
+		params["kind"], params["createdEnvironment"], params["conversationSetup"], params["submitToDispatch"] = "new_conversation", "false", setup, dispatch+setup
+		params["newConversationTtftMs"] = dispatch + setup + token + paint
+	} else {
+		params["followUpTtftMs"] = dispatch + token + paint
+	}
+	return params, token + between(0, 23)
+}
+
+// SessionReply 在模型调用完成后记录回复事件：模型回复步骤；每个用户请求的第一次回复记录 prompt_latency；有工具调用时记录码 2 与第一个调用的工具前钩子，否则记录首 token 耗时、码 2、调用后与结束钩子和码 1
 func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 	conversation, model := turn.Conversation, turn.Model
 	execution := conversation.ExecutionID(conversation.Execution)
@@ -936,6 +957,13 @@ func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 	state := c.state
 	c.mu.Unlock()
 	generators := state.generatorPayloads(turn, c.device, steps, reply, metadata, invoked)
+	latency := int(reply.First.Sub(sent).Milliseconds())
+	prompted := func() {}
+	if steps[planner-1].kind == stepUser {
+		var params map[string]any
+		params, latency = promptLatency(turn, sent, invoked, reply.First, planner+1+min(len(reply.Calls), 1))
+		prompted = func() { c.sessionUI(time.Now(), "prompt_latency", params) }
+	}
 	if len(reply.Calls) > 0 {
 		c.sessionEvent(time.Now(), 11, 12, stepPayload(conversation, plannerStep(conversation, model, reply, planner, metadata, execution, invoked), planner, metadata, execution))
 		hooked := time.Now()
@@ -943,6 +971,7 @@ func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 			c.sessionEvent(hooked, 2, 3, payload)
 		}
 		c.preTool(hooked, turn, track, metadata+1, int64(planner+1))
+		prompted()
 		return
 	}
 	turns, tools, invocations := 0, 0, 1
@@ -960,9 +989,10 @@ func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 		}
 	}
 	c.hubEvent("ttft_completed", eventShape{flags: true, ui: true}, map[string]any{
-		"latencyMs": int(reply.First.Sub(sent).Milliseconds()), "turnCount": turns - 1, "toolCallCount": tools, "stepCount": planner + 1, "workspaceCount": 0,
+		"latencyMs": latency, "turnCount": turns - 1, "toolCallCount": tools, "stepCount": planner + 1, "workspaceCount": 0,
 		"modelId": strings.TrimPrefix(model.Model, "MODEL_"),
 	})
+	prompted()
 	c.sessionEvent(time.Now(), 11, 12, stepPayload(conversation, plannerStep(conversation, model, reply, planner, metadata, execution, invoked), planner, metadata, execution))
 	hooked := time.Now()
 	for _, payload := range generators {

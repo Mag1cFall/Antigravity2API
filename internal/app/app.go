@@ -25,6 +25,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 	"github.com/Mag1cFall/Antigravity2API/internal/statedb"
+	"github.com/klauspost/compress/gzhttp"
 )
 
 // Deps 是 Serve 使用的运行时组件，由 cmd 装配
@@ -52,6 +53,9 @@ const shutdownTimeout = 10 * time.Second
 
 // mediaLimit 是 runtime/media 的总字节上限
 const mediaLimit = 1 << 30
+
+// filesLimit 是 runtime/files 的总字节上限
+const filesLimit = 4 << 30
 
 // server 持有一次 Serve 的运行状态
 type server struct {
@@ -94,6 +98,7 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewMultiHandler(deps.Logger.Handler(), s.events.handler(deps.Logger.Leveler(), s.ledger))))
 	defer slog.SetDefault(previous)
+	s.updater.removeReplaced()
 	for _, invalid := range boot.Invalid {
 		slog.Warn(fmt.Sprintf("配置项取值无效，按默认值运行 | 配置项=%s | 原因=%s", invalid.Key, invalid.Reason), "source", "service")
 	}
@@ -157,7 +162,7 @@ func (s *server) routes() http.Handler {
 		return cfg.MediaOutput == "url", cfg.MediaBaseURL
 	}
 	public := s.recordPublic(api.NewHandler(recordingService{Service: s.deps.Service, server: s}, api.Options{
-		APIKeys: keys, FilesDir: filepath.Join(s.boot.RuntimeDir, "files"), MediaDir: filepath.Join(s.boot.RuntimeDir, "media"), MediaLimit: mediaLimit, MediaLinks: media, WaitLaunch: s.deps.Service.WaitLaunch,
+		APIKeys: keys, FilesDir: filepath.Join(s.boot.RuntimeDir, "files"), FilesLimit: filesLimit, MediaDir: filepath.Join(s.boot.RuntimeDir, "media"), MediaLimit: mediaLimit, MediaLinks: media, WaitLaunch: s.deps.Service.WaitLaunch,
 		ResponseModes: func() api.ResponseModes {
 			cfg := s.live.Load()
 			return api.ResponseModes{NonstreamKeepalive: cfg.NonstreamKeepalive, FakeStream: cfg.FakeStream}
@@ -169,11 +174,20 @@ func (s *server) routes() http.Handler {
 	root.Handle("/upload/", public)
 	root.Handle("/media/", public)
 	root.HandleFunc("POST /api/pairing/accounts", s.pairAccount)
-	root.Handle("/api/", s.requireAdmin(s.admin()))
+	root.Handle("/api/", compressAdmin(s.requireAdmin(s.admin())))
 	if s.deps.UI != nil {
 		root.Handle("/", s.deps.UI)
 	}
 	return s.access(securityHeaders(root))
+}
+
+// compressAdmin 以 gzip 压缩管理接口发给接受 gzip 的客户端的 JSON、CSV 与事件流响应
+func compressAdmin(next http.Handler) http.Handler {
+	wrap, err := gzhttp.NewWrapper(gzhttp.ContentTypes([]string{"application/json", "text/csv", "text/event-stream"}))
+	if err != nil {
+		panic(err)
+	}
+	return wrap(next)
 }
 
 // access 为每个请求生成请求 ID 并经 X-Request-ID 回传，结束后写一行访问日志；静态资源成功只在 debug 级别记录

@@ -31,6 +31,7 @@ import type { RequestPage } from '@/features/requests/types'
 import { api } from '@/lib/api'
 import { formatCompact, formatCost, formatDateTime, formatDuration } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { changeParams } from '@/lib/params'
 import { useNow } from '@/lib/time'
 
 // RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL；事件流的初始快照到达后进行中的请求与记录一起显示；宽度小于 640px 时每个请求一张卡片
@@ -54,19 +55,9 @@ export function RequestsPage() {
     filter.range !== '24h' ||
     Boolean(filter.state || filter.protocol || filter.model || filter.account || filter.q)
 
+  // update 修改筛选条件，changes 不含 cursor 时回到第一页
   const update = (changes: Record<string, string>, push = false) => {
-    setParams(
-      (current) => {
-        const next = new URLSearchParams(current)
-        for (const [key, value] of Object.entries(changes)) {
-          if (value) next.set(key, value)
-          else next.delete(key)
-        }
-        if (!('cursor' in changes)) next.delete('cursor')
-        return next
-      },
-      { replace: !push },
-    )
+    changeParams(setParams, { cursor: '', ...changes }, push)
   }
   const rangeLabels: Record<RangeKey, string> = {
     '1h': m.range1h,
@@ -330,7 +321,7 @@ export function RequestsPage() {
               </tbody>
             </Table>
             <div className="flex flex-wrap items-center justify-end gap-3 border-t border-border px-4 py-2">
-              <p className="mr-auto text-sm text-foreground-muted tabular-nums">
+              <p className="mr-auto text-sm text-foreground-muted">
                 {fill(m.pageCost, { cost: formatCost(pageCost, locale) })}
                 {pageUnpriced > 0 && ' · ' + fill(m.pageUnpriced, { count: pageUnpriced })}
               </p>

@@ -12,16 +12,15 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
-// bootDelay 为虚拟进程启动到第一次 loadCodeAssist 的最短间隔，官方冷启动现场为 0.6–0.8 s
-const bootDelay = 600 * time.Millisecond
+// bootDelay 为虚拟进程启动到第一次 loadCodeAssist 的最短间隔，官方冷启动现场为 0.16–0.59 s
+const bootDelay = 160 * time.Millisecond
 
-// boot 开始账户的虚拟客户端：unleash 与 clearcut 上报循环随 watch 立即开始，0.6–0.8 s 后企业 WIF 账户走 businessaicode 序列、刚登录或导入的账户走登录序列、其余走冷启动序列，账户遥测开启时按官方设置请求关闭
+// boot 开始账户的虚拟客户端：clearcut 上报循环随 watch 立即开始，0.16–0.59 s 后企业 WIF 账户走 businessaicode 序列、刚登录或导入的账户走登录序列、其余走冷启动序列，账户遥测开启时按官方设置请求关闭
 func boot(ctx, watch context.Context, client *antigravity.Client, id string, login, business bool) (*antigravity.Companion, antigravity.Initialization, error) {
 	companion := antigravity.NewCompanion(client)
-	go companion.Unleash(watch)
 	go companion.Clearcut(watch)
 	select {
-	case <-time.After(bootDelay + rand.N(200*time.Millisecond)):
+	case <-time.After(bootDelay + rand.N(430*time.Millisecond)):
 	case <-ctx.Done():
 		return nil, antigravity.Initialization{}, ctx.Err()
 	}

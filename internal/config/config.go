@@ -2,7 +2,6 @@
 package config
 
 import (
-	"bufio"
 	"bytes"
 	"flag"
 	"fmt"
@@ -32,8 +31,8 @@ var Keys = []string{
 	"RUNTIME_DIR",
 	"PROXY",
 	"SYSTEM_PROMPT",
-	"SYSTEM_PROMPT_SECTIONS",
-	"SYSTEM_PROMPT_WRAP",
+	"SYSTEM_PROMPT_TEMPLATE",
+	"SYSTEM_PROMPT_USER_TEMPLATE",
 	"MODEL_MAPPING",
 	"MEDIA_OUTPUT",
 	"MEDIA_BASE_URL",
@@ -87,10 +86,10 @@ type Config struct {
 	RuntimeDir     string
 	Proxy          string
 	SystemPrompt   string
-	// SystemPromptSections 是 custom 档保留的官方段名
-	SystemPromptSections []string
-	// SystemPromptWrap 是 custom 档的 user 轮包装方式
-	SystemPromptWrap string
+	// SystemPromptTemplate 是 custom 档的 system 模板
+	SystemPromptTemplate string
+	// SystemPromptUserTemplate 是 custom 档的 user 轮模板，为空时 user 轮不包装
+	SystemPromptUserTemplate string
 	// ModelMapping 是客户端模型名到目录模型 ID 的映射，按书写顺序匹配
 	ModelMapping []ModelAlias
 	// MediaOutput 是 Chat、Messages 正文与 Images url 格式中生成媒体的输出方式
@@ -139,23 +138,23 @@ var secretKeys = []string{"API_KEYS", "PROXY", "ADMIN_PASSWORD"}
 // Default 返回可直接启动的默认配置
 func Default() Config {
 	return Config{
-		Listen:               "127.0.0.1:8017",
-		AuthDir:              "auth",
-		RuntimeDir:           "runtime",
-		SystemPrompt:         "full",
-		SystemPromptSections: []string{"identity", "guidelines", "communication_style"},
-		SystemPromptWrap:     prompt.WrapTime,
-		MediaOutput:          "inline",
-		AccountConcurrency:   2,
-		RoutingStrategy:      "round-robin",
-		RequestTimeout:       5 * time.Minute,
-		NonstreamKeepalive:   true,
-		QuotaRefreshInterval: 15 * time.Minute,
-		LogLevel:             "info",
-		LogFormat:            "json",
-		LogFile:              true,
-		LogMaxTotalMB:        500,
-		AdminUsername:        "admin",
+		Listen:                   "127.0.0.1:8017",
+		AuthDir:                  "auth",
+		RuntimeDir:               "runtime",
+		SystemPrompt:             "full",
+		SystemPromptTemplate:     prompt.Builtins[prompt.TierMedium].System,
+		SystemPromptUserTemplate: prompt.Builtins[prompt.TierMedium].User,
+		MediaOutput:              "inline",
+		AccountConcurrency:       2,
+		RoutingStrategy:          "round-robin",
+		RequestTimeout:           5 * time.Minute,
+		NonstreamKeepalive:       true,
+		QuotaRefreshInterval:     15 * time.Minute,
+		LogLevel:                 "info",
+		LogFormat:                "json",
+		LogFile:                  true,
+		LogMaxTotalMB:            500,
+		AdminUsername:            "admin",
 	}
 }
 
@@ -241,10 +240,12 @@ func (c *Config) Set(values map[string]string) error {
 	text("RUNTIME_DIR", &c.RuntimeDir)
 	text("PROXY", &c.Proxy)
 	text("SYSTEM_PROMPT", &c.SystemPrompt)
-	if value, ok := values["SYSTEM_PROMPT_SECTIONS"]; ok {
-		c.SystemPromptSections = SplitList(value)
+	if value, ok := values["SYSTEM_PROMPT_TEMPLATE"]; ok {
+		c.SystemPromptTemplate = value
 	}
-	text("SYSTEM_PROMPT_WRAP", &c.SystemPromptWrap)
+	if value, ok := values["SYSTEM_PROMPT_USER_TEMPLATE"]; ok {
+		c.SystemPromptUserTemplate = value
+	}
 	if value, ok := values["MODEL_MAPPING"]; ok && err == nil {
 		c.ModelMapping, err = parseModelMapping(value)
 	}
@@ -280,35 +281,35 @@ func (c *Config) Set(values map[string]string) error {
 // Values 返回各配置项的 env 文本值
 func (c Config) Values() map[string]string {
 	return map[string]string{
-		"LISTEN":                   c.Listen,
-		"API_KEYS":                 strings.Join(c.APIKeys, ","),
-		"API_KEY_ACCOUNTS":         formatAPIKeyAccounts(c.APIKeyAccounts),
-		"AUTH_DIR":                 c.AuthDir,
-		"RUNTIME_DIR":              c.RuntimeDir,
-		"PROXY":                    c.Proxy,
-		"SYSTEM_PROMPT":            c.SystemPrompt,
-		"SYSTEM_PROMPT_SECTIONS":   strings.Join(c.SystemPromptSections, ","),
-		"SYSTEM_PROMPT_WRAP":       c.SystemPromptWrap,
-		"MODEL_MAPPING":            formatModelMapping(c.ModelMapping),
-		"MEDIA_OUTPUT":             c.MediaOutput,
-		"MEDIA_BASE_URL":           c.MediaBaseURL,
-		"ACCOUNT_CONCURRENCY":      strconv.Itoa(c.AccountConcurrency),
-		"ROUTING_STRATEGY":         c.RoutingStrategy,
-		"PREFER_LOWER_TIER_MODELS": strings.Join(c.PreferLowerTierModels, ","),
-		"REQUEST_TIMEOUT":          formatDuration(c.RequestTimeout),
-		"NONSTREAM_KEEPALIVE":      strconv.FormatBool(c.NonstreamKeepalive),
-		"FAKE_STREAM":              strconv.FormatBool(c.FakeStream),
-		"QUOTA_REFRESH_INTERVAL":   formatDuration(c.QuotaRefreshInterval),
-		"QUOTA_RESERVE_PERCENT":    strconv.Itoa(c.QuotaReservePercent),
-		"WEEKLY_QUOTA_WARMUP":      strconv.FormatBool(c.WeeklyQuotaWarmup),
-		"LOG_LEVEL":                c.LogLevel,
-		"LOG_FORMAT":               c.LogFormat,
-		"LOG_FILE":                 strconv.FormatBool(c.LogFile),
-		"LOG_MAX_TOTAL_MB":         strconv.Itoa(c.LogMaxTotalMB),
-		"REQUEST_LOG_BODIES":       strconv.FormatBool(c.RequestLogBodies),
-		"ADMIN_AUTH_ENABLED":       strconv.FormatBool(c.AdminAuthEnabled),
-		"ADMIN_USERNAME":           c.AdminUsername,
-		"ADMIN_PASSWORD":           c.AdminPassword,
+		"LISTEN":                      c.Listen,
+		"API_KEYS":                    strings.Join(c.APIKeys, ","),
+		"API_KEY_ACCOUNTS":            formatAPIKeyAccounts(c.APIKeyAccounts),
+		"AUTH_DIR":                    c.AuthDir,
+		"RUNTIME_DIR":                 c.RuntimeDir,
+		"PROXY":                       c.Proxy,
+		"SYSTEM_PROMPT":               c.SystemPrompt,
+		"SYSTEM_PROMPT_TEMPLATE":      c.SystemPromptTemplate,
+		"SYSTEM_PROMPT_USER_TEMPLATE": c.SystemPromptUserTemplate,
+		"MODEL_MAPPING":               formatModelMapping(c.ModelMapping),
+		"MEDIA_OUTPUT":                c.MediaOutput,
+		"MEDIA_BASE_URL":              c.MediaBaseURL,
+		"ACCOUNT_CONCURRENCY":         strconv.Itoa(c.AccountConcurrency),
+		"ROUTING_STRATEGY":            c.RoutingStrategy,
+		"PREFER_LOWER_TIER_MODELS":    strings.Join(c.PreferLowerTierModels, ","),
+		"REQUEST_TIMEOUT":             formatDuration(c.RequestTimeout),
+		"NONSTREAM_KEEPALIVE":         strconv.FormatBool(c.NonstreamKeepalive),
+		"FAKE_STREAM":                 strconv.FormatBool(c.FakeStream),
+		"QUOTA_REFRESH_INTERVAL":      formatDuration(c.QuotaRefreshInterval),
+		"QUOTA_RESERVE_PERCENT":       strconv.Itoa(c.QuotaReservePercent),
+		"WEEKLY_QUOTA_WARMUP":         strconv.FormatBool(c.WeeklyQuotaWarmup),
+		"LOG_LEVEL":                   c.LogLevel,
+		"LOG_FORMAT":                  c.LogFormat,
+		"LOG_FILE":                    strconv.FormatBool(c.LogFile),
+		"LOG_MAX_TOTAL_MB":            strconv.Itoa(c.LogMaxTotalMB),
+		"REQUEST_LOG_BODIES":          strconv.FormatBool(c.RequestLogBodies),
+		"ADMIN_AUTH_ENABLED":          strconv.FormatBool(c.AdminAuthEnabled),
+		"ADMIN_USERNAME":              c.AdminUsername,
+		"ADMIN_PASSWORD":              c.AdminPassword,
 	}
 }
 
@@ -372,9 +373,9 @@ var checks = []struct {
 		}
 		return nil
 	}},
-	{[]string{"SYSTEM_PROMPT_SECTIONS", "SYSTEM_PROMPT_WRAP"}, func(c Config) error {
-		if _, err := prompt.New(prompt.TierCustom, prompt.Custom{Sections: c.SystemPromptSections, Wrap: c.SystemPromptWrap}); err != nil {
-			return fmt.Errorf("SYSTEM_PROMPT_SECTIONS 或 SYSTEM_PROMPT_WRAP 无效: %w", err)
+	{[]string{"SYSTEM_PROMPT_TEMPLATE", "SYSTEM_PROMPT_USER_TEMPLATE"}, func(c Config) error {
+		if _, err := prompt.New(prompt.TierCustom, prompt.Custom{System: c.SystemPromptTemplate, User: c.SystemPromptUserTemplate}); err != nil {
+			return fmt.Errorf("SYSTEM_PROMPT_TEMPLATE 或 SYSTEM_PROMPT_USER_TEMPLATE 无效: %w", err)
 		}
 		return nil
 	}},
@@ -618,17 +619,17 @@ func validateListen(value string) error {
 // readEnvFile 读取 env 文件中的已知配置项，文件不存在时返回空集合
 func readEnvFile(path string) (map[string]string, error) {
 	values := map[string]string{}
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return values, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("读取配置文件: %w", err)
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	for line := 1; scanner.Scan(); line++ {
-		text := strings.TrimSpace(scanner.Text())
+	line := 0
+	for text := range strings.Lines(string(data)) {
+		line++
+		text = strings.TrimSpace(text)
 		if text == "" || strings.HasPrefix(text, "#") {
 			continue
 		}
@@ -645,9 +646,6 @@ func readEnvFile(path string) (map[string]string, error) {
 			return nil, fmt.Errorf("%s:%d: %w", path, line, err)
 		}
 		values[key] = value
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("读取配置文件: %w", err)
 	}
 	return values, nil
 }

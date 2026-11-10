@@ -16,7 +16,6 @@ import { useNow } from '@/lib/time'
 // aboutMessages 是关于页的文案
 const aboutMessages = defineMessages(
   {
-    title: '关于',
     tagline: 'Google Antigravity 的多账户 API 代理',
     version: '版本',
     update: '在线更新',
@@ -39,7 +38,6 @@ const aboutMessages = defineMessages(
     loadFailed: '无法读取服务状态',
   },
   {
-    title: 'About',
     tagline: 'Multi-account API proxy for Google Antigravity',
     version: 'Version',
     update: 'Updates',
@@ -62,7 +60,6 @@ const aboutMessages = defineMessages(
     loadFailed: 'Could not load service status',
   },
   {
-    title: '關於',
     tagline: 'Google Antigravity 的多帳號 API 代理',
     version: '版本',
     update: '線上更新',

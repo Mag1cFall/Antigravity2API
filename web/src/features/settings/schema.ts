@@ -7,7 +7,7 @@ import type { Settings } from '@/features/settings/types'
 const goDuration = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/
 
 // validListen 判断 host:port 形式的监听地址，端口为 1 到 65535
-export function validListen(value: string) {
+function validListen(value: string) {
   const match = /^(\[[0-9a-fA-F:.]+\]|[^\s:[\]]*):(\d{1,5})$/.exec(value)
   const port = Number(match?.[2])
   return match !== null && port >= 1 && port <= 65535
@@ -31,7 +31,7 @@ export function validProxy(value: string) {
 }
 
 // validBaseURL 判断媒体链接地址为空或为 http、https URL
-export function validBaseURL(value: string) {
+function validBaseURL(value: string) {
   if (value === '') return true
   try {
     const url = new URL(value)
@@ -42,7 +42,7 @@ export function validBaseURL(value: string) {
 }
 
 // proxyLines 返回按行填写的代理，忽略空行
-export function proxyLines(value: string) {
+function proxyLines(value: string) {
   return value
     .split('\n')
     .map((line) => line.trim())
@@ -75,8 +75,8 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
       MEDIA_BASE_URL: z.string().trim().refine(validBaseURL, m.errMediaBase),
       PROXY: z.string().refine((value) => proxyLines(value).every(validProxy), m.errProxy),
       SYSTEM_PROMPT: z.enum(['full', 'medium', 'aggressive', 'custom']),
-      SYSTEM_PROMPT_SECTIONS: z.array(z.string()),
-      SYSTEM_PROMPT_WRAP: z.enum(['full', 'time', 'none']),
+      SYSTEM_PROMPT_TEMPLATE: z.string(),
+      SYSTEM_PROMPT_USER_TEMPLATE: z.string(),
       ACCOUNT_CONCURRENCY: positive,
       ROUTING_STRATEGY: z.enum(['round-robin', 'fill-first']),
       PREFER_LOWER_TIER_MODELS: z.array(z.string()),
@@ -144,11 +144,8 @@ export function toForm(settings: Settings): SettingsForm {
     MEDIA_BASE_URL: v('MEDIA_BASE_URL', ''),
     PROXY: list('PROXY', '').join('\n'),
     SYSTEM_PROMPT: v('SYSTEM_PROMPT', 'full') as SettingsForm['SYSTEM_PROMPT'],
-    SYSTEM_PROMPT_SECTIONS: list(
-      'SYSTEM_PROMPT_SECTIONS',
-      'identity,guidelines,communication_style',
-    ),
-    SYSTEM_PROMPT_WRAP: v('SYSTEM_PROMPT_WRAP', 'time') as SettingsForm['SYSTEM_PROMPT_WRAP'],
+    SYSTEM_PROMPT_TEMPLATE: v('SYSTEM_PROMPT_TEMPLATE', ''),
+    SYSTEM_PROMPT_USER_TEMPLATE: v('SYSTEM_PROMPT_USER_TEMPLATE', ''),
     ACCOUNT_CONCURRENCY: num('ACCOUNT_CONCURRENCY', '2'),
     ROUTING_STRATEGY: v('ROUTING_STRATEGY', 'round-robin') as SettingsForm['ROUTING_STRATEGY'],
     PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS', ''),
