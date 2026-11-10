@@ -291,17 +291,17 @@ api 层的公开接口规则：
 | `region` | `fetchUserInfo` 的 `regionCode` |
 | `device` | 设备档案 |
 | `auth_method` | 认证方式，见表下 |
-| `wif_provider` | 企业 WIF 账户登录时的 `--provider`，个人账户省略 |
+| `wif_provider` | 企业账户 WIF 登录的 provider，个人账户与以 Google 账户登录的企业账户省略 |
 | `enabled` | 是否参与调度 |
 | `priority` | 调度优先级，越大越先使用，为 0 时省略 |
 | `ai_credits` | 额度用尽后继续以 Google One AI 积分生成，关闭时省略 |
 | `credit_balance`、`credit_minimum` | `loadCodeAssist` 的 `paidTier.availableCredits` 中 `GOOGLE_ONE_AI` 项的余额（上游省略 `creditAmount` 时为 `"0"`）与 `minimumCreditAmountForUsage`，没有该项时省略；登录、冷启动与读取额度时更新 |
 | `added_at` | 添加时间，RFC 3339 带纳秒 |
 
-- `auth_method` 为空或 `personal_consumer` 时是个人账户，`business_licensed_enterprise` 为企业 WIF 账户
+- `auth_method` 为空或 `personal_consumer` 时是个人账户，`business_licensed_enterprise` 为“Continue with Google Cloud”登录的企业账户
 - `added_at` 为 Go `time.Time` 的 JSON；账户按它排序，相同时按 ID
 
-设备档案在账户首次加入时生成，之后保持不变：`login` 与管理端登录的新账户沿用登录前虚拟进程的档案（`installation_id`、系统与时区，用户名与 `app_data_dir` 按邮箱补齐），`import` 与远程配对的新账户随机生成；已有账户再次登录、导入或配对时只更新 `token.json`，档案与其他资料不变。
+设备档案在账户首次加入时生成，之后保持不变：`login` 与管理端登录的新账户沿用登录前虚拟进程的档案（`installation_id`、系统与时区，用户名与 `app_data_dir` 按邮箱补齐），远程配对的新账户沿用 `login --remote` 上传的档案，`import` 的新账户随机生成；已有账户再次登录、导入或配对时更新 `token.json`，refresh token 与原来不同时清空 `project`，档案与其他资料不变。
 
 | 字段 | 取值 |
 | --- | --- |
@@ -430,13 +430,13 @@ api 层的公开接口规则：
 
 ### 添加账户
 
-`login`、`import`、远程配对与管理端登录都把 OAuth token 交给账户库：邮箱取自 `id_token` 载荷，没有 `id_token`（官方客户端保存的 token）时以该 token 请求 userinfo；新账户生成设备档案（来源见“账户目录”）并启用，已有账户更新 token 并清除 `auth_method` 与 `wif_provider`，企业 WIF 登录随后写回这两项。`import` 先读系统凭据库（服务 `gemini`、用户 `antigravity`），读取失败时再读 `~/.gemini/jetski-standalone-oauth-token`，取 JSON 的 `token` 字段，导入这一个账户；凭据的 `auth_method` 不参与，导入的账户为个人账户。`POST /api/accounts/import` 的 `accounts` 因此只有一项。
+`login`、`import`、远程配对与管理端登录都把 OAuth token 交给账户库：邮箱取自 `id_token` 载荷，官方客户端保存的凭据取 `id_token_email`，都没有时以该 token 请求 userinfo；新账户生成设备档案（来源见“账户目录”）并启用，已有账户更新 token，`auth_method` 与 `wif_provider` 改为本次登录的认证方式，refresh token 与原来不同时清空 `project`。`import` 先读系统凭据库（服务 `gemini`、用户 `antigravity`），读取失败时再读 `~/.gemini/jetski-standalone-oauth-token`，取 JSON 的 `token` 字段，导入这一个账户；凭据的 `auth_method` 为 `gcp`（“Continue with Google Cloud”登录）时导入为企业账户，`wif_provider` 写入账户，其余为个人账户。`POST /api/accounts/import` 的 `accounts` 因此只有一项。
 
 账户 JSON 的导出与导入：
 
-- 导出为数组，每项为 `email`、`refresh_token`、`label`、`proxy`、`priority`（为 0 时省略）、`enabled`、`ai_credits`（关闭时省略）与 `device`（设备档案），没有 token 的账户不导出；Antigravity Manager 按 `email` 与 `refresh_token` 导入同一文件
+- 导出为数组，每项为 `email`、`refresh_token`、`label`、`proxy`、`priority`（为 0 时省略）、`enabled`、`ai_credits`（关闭时省略）、`auth_method` 与 `wif_provider`（个人账户省略）与 `device`（设备档案），没有 token 的账户不导出；Antigravity Manager 按 `email` 与 `refresh_token` 导入同一文件
 - 导入在任意层级中把带 `refresh_token`、`refreshToken`（`|` 之后的项目 ID 去掉）或 `token.refresh_token` 且以 `1//` 开头的对象各作为一个账户，`platform` 不是 `antigravity` 的对象跳过，同一 refresh token 只导入一次；整段内容不是合法 JSON 时取文本中全部 `1//` 开头的 token。覆盖的格式为 Antigravity Manager 的导出数组与 `accounts` 对象、CLIProxyAPI 与 gcli2api 的账户文件、opencode-antigravity-auth 与 antigravity-claude-proxy 的 `accounts.json`、sub2api 的数据导出
-- 每个账户以 refresh token 换取 access token 并读取 userinfo 的邮箱后按上文写入账户库，同时最多 4 个；项中的 `device` 带 `installation_id`（本服务导出的文件）时新账户沿用该设备档案，并写回备注名、代理、优先级、启用状态与 AI 积分设置（省略的优先级与 AI 积分按 0 与关闭写回），其他来源的设置不写回
+- 每个账户以 refresh token 换取 access token 并读取 userinfo 的邮箱后按上文写入账户库，同时最多 4 个；这两个请求经该账户的代理发出：项中带 `proxy` 时用它（不是 `direct` 与 http、https、socks5 URL 时该项失败），否则用代理池按项中 `email` 绑定的代理，代理池为空时用 `PROXY`，项中 `email` 没有成为账户时解除绑定；项中的 `device` 带 `installation_id`（本服务导出的文件）时新账户沿用该设备档案，沿用项中的认证方式与 WIF provider，并写回备注名、代理、优先级、启用状态与 AI 积分设置（省略的优先级与 AI 积分按 0 与关闭写回），其他来源的设置不写回
 
 系统凭据库经 `zalando/go-keyring` v0.2.8 读写，与官方客户端使用同一位置：
 
@@ -454,7 +454,7 @@ api 层的公开接口规则：
 
 1. 找到官方客户端，结束它的全部进程并等待退出（下表）
 2. 把 token 写入官方客户端的凭据存储（下表）
-3. 重新启动官方客户端，language_server 启动时读取新 token
+3. 重新启动官方客户端，language_server 启动时读取新 token；写入失败时同样重新启动，并返回写入的错误
 
 | 步骤 | Windows | macOS | Linux |
 | --- | --- | --- | --- |
@@ -470,7 +470,7 @@ api 层的公开接口规则：
 - Linux 的可执行文件为 PATH 中 `antigravity` 解析符号链接后的文件，安装目录为它所在的目录，启动时工作目录为安装目录
 - macOS 与 Linux 在 `pgrep -f` 查不到进程时视为已退出
 
-写入的凭据为官方客户端登录后保存的 JSON `{"token":{"access_token","token_type","refresh_token","expiry"},"auth_method":"consumer"}`，位置取决于标记文件 `~/.gemini/cache/antigravity-keyring-unavailable`：
+写入的凭据为官方客户端登录后保存的 JSON `{"token":{"access_token","token_type","refresh_token","expiry"},"auth_method":"consumer"}`，企业账户的 `auth_method` 为 `gcp`，另带 `id_token_email`（邮箱）与 `wif_provider`、`saved_wif_provider`（账户的 `wif_provider`，为空时省略），与官方客户端登录后、选择许可证前保存的凭据相同，官方客户端启动后选择许可证；位置取决于标记文件 `~/.gemini/cache/antigravity-keyring-unavailable`：
 
 | 情形 | 写入 |
 | --- | --- |
@@ -490,7 +490,7 @@ api 层的公开接口规则：
 
 1. 按添加时间处理启用账户，跳过已初始化且代理与 refresh token 都未变的账户；相邻两个账户的初始化相隔随机 1–3 秒开始、彼此并发，全部结束后刷新结束
 2. 每个账户以设备档案与代理创建上游客户端，读取 `RUNTIME_DIR/hub/<账户>.json`，立即开始 unleash 与 clearcut 上报两项伴随请求，0.6–0.8 秒后初始化
-3. 企业账户（`auth_method` 为 `business_licensed_enterprise`）走 `BusinessInitialize`；个人账户在 `project` 为空或 refresh token 已变时走登录序列，其余走冷启动序列（序列见协议参考）。`fetchUserInfo` 显示遥测开启时发 `setUserSettings` 关闭
+3. 企业账户（`auth_method` 为 `business_licensed_enterprise`）走 `BusinessInitialize`；个人账户在 `project` 为空或 refresh token 与调度中的客户端不同时走登录序列（新账户与换了 refresh token 的再次登录），其余走冷启动序列（序列见协议参考）；账户在等待初始化期间被删除时不初始化。`fetchUserInfo` 显示遥测开启时发 `setUserSettings` 关闭
 4. 成功时以目录的公开条目加入账户池，记录额度快照并开始其余伴随请求；失败时停止该账户的全部伴随请求，记下原因并移出调度
 5. 停用与已删除的账户移出调度，停止全部伴随请求
 
@@ -682,7 +682,7 @@ api 层的公开接口规则：
 
 管理 API 挂在 `/api/`，与公开 API 共用监听：
 
-- 只接受同源请求：`Sec-Fetch-Site: cross-site` 或 `Origin` 与 `Host` 不一致时返回 403 `admin_origin_forbidden`
+- 只接受同源请求：`Sec-Fetch-Site: cross-site` 或 `Origin` 与 `Host` 不一致时返回 403 `admin_origin_forbidden`，带 `Origin` 时消息写出 `Origin` 与 `Host` 的值；反向代理原样转发 `Host`（nginx 为 `proxy_set_header Host $http_host`）
 - 本机回环访问免登录：对端地址是回环 IP，`Host` 的主机部分为 `localhost`（不区分大小写）或回环 IP（如 `localhost:8017`、`127.0.0.1:8017`、`[::1]:8017`），且没有 `X-Forwarded-For`、`Forwarded`、`X-Real-IP`
 - 远程访问需要 `ADMIN_AUTH_ENABLED=true`，否则返回 401 `admin_remote_disabled`；未登录返回 401 `admin_login_required`
 - 会话 Cookie `antigravity_admin`：12 小时，`Path=/api`、HttpOnly、SameSite=Strict，经 TLS 或 `X-Forwarded-Proto: https` 时带 Secure；会话结束时取消该会话的进行中管理请求
@@ -757,7 +757,7 @@ api 层的公开接口规则：
 | `POST /api/logins/{id}/code` | `{"code":"<授权码或回调地址>"}` | 登录结束后的登录状态 | 400 `invalid_request`、`login_callback_rejected`，404 `login_not_found`，409 `login_code_submitted` |
 | `DELETE /api/logins/{id}` | — | 204 | 404 `login_not_found` |
 | `POST /api/pairing` | — | 201 `{"token","expires_at"}` | — |
-| `POST /api/pairing/accounts` | `oauth2.Token` JSON，`Authorization: Bearer <令牌>` | 201 `{"account":"<邮箱>"}` | 400 `invalid_request`，401 `pairing_token_invalid`，502 `pairing_import_failed` |
+| `POST /api/pairing/accounts` | `oauth2.Token` 的各字段与 `device`（设备档案）组成的 JSON，`Authorization: Bearer <令牌>` | 201 `{"account":"<邮箱>"}` | 400 `invalid_request`，401 `pairing_token_invalid`，502 `pairing_import_failed` |
 | `GET /api/models` | — | `{"models":[公开模型对象加 "accounts"]}` | 502 `models_failed` |
 | `GET /api/requests` | — | `{"requests":[请求记录]}`，按开始时间升序 | — |
 | `POST /api/requests/{id}/cancel` | — | 204 | 404 `request_not_found` |
@@ -831,8 +831,8 @@ api 层的公开接口规则：
 远程配对：`POST /api/pairing` 生成 10 分钟有效的令牌，同时只有一个有效令牌，服务只保存其 SHA-256。`login --remote <地址> --token <令牌>`：
 
 - 本机：与 `login` 相同地运行登录前虚拟进程并完成浏览器或授权码登录，拿到 token 后不写本机 `auth/`
-- 上传：把 `oauth2.Token` 的 JSON（`access_token`、`token_type`、`refresh_token`、`expiry`，不含 `id_token`）以 `Authorization: Bearer <令牌>` POST 到 `<地址>/api/pairing/accounts`，经进程环境变量的代理发出；返回 201 以外时打印 `远程服务返回 <状态>: <正文>` 并失败
-- 远程：以 userinfo 取得邮箱，新账户随机生成设备档案，已有账户只更新 token；成功返回 201 `{"account": "<邮箱>"}` 并使令牌失效，本机打印 `已添加账户 <邮箱> 到 <地址>`
+- 上传：把 `oauth2.Token` 的字段（`access_token`、`token_type`、`refresh_token`、`expiry`，不含 `id_token`）与 `device`（登录前虚拟进程的设备档案）组成的 JSON 以 `Authorization: Bearer <令牌>` POST 到 `<地址>/api/pairing/accounts`，经进程环境变量的代理发出；返回 201 以外时打印 `远程服务返回 <状态>: <正文>` 并失败
+- 远程：以 userinfo 取得邮箱，新账户沿用上传的设备档案（没有 `device.installation_id` 时随机生成），已有账户只更新 token；成功返回 201 `{"account": "<邮箱>"}` 并使令牌失效，本机打印 `已添加账户 <邮箱> 到 <地址>`
 
 ### 设置与系统提示预览
 
@@ -1168,7 +1168,7 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 #### 账户批量操作与排序
 
 - 勾选账户后显示批量操作栏：启用、停用、刷新额度、重新初始化（只作用于所选账户中 `state` 为 `error` 的账户）、删除；对所选账户逐个调用单账户接口，结束后提示完成数量与失败的账户；批量删除 5 秒内可撤销
-- 删除账户（单个与批量）：账户行立即隐藏，5 秒后发出 `DELETE /api/accounts/{id}`；5 秒内撤销，或经导入与登录再次加入同一账户时不发出删除并恢复显示；删除完成且账户列表刷新后不再隐藏该账户，之后再次加入时照常显示
+- 删除账户（单个与批量）：账户行立即隐藏，5 秒后发出 `DELETE /api/accounts/{id}`；5 秒内撤销，或经导入与登录再次加入同一账户时不发出删除并恢复显示；5 秒内关闭或刷新页面时立即发出删除；删除完成且账户列表刷新后不再隐藏该账户，之后再次加入时照常显示
 - 排序：按添加时间（默认）；按重置时间，取各额度桶中剩余比例低于 100% 的最早 `reset_time`，从早到晚；按最近使用，取近 30 天用量中各账户的 `last_at`，从近到远。没有对应时间的账户排在后面，保持添加顺序
 
 #### 额度与额度最多的账户

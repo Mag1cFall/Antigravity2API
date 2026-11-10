@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/oauth2"
+
+	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
 // pairingLifetime 是远程配对令牌的有效期
@@ -20,6 +22,12 @@ const pairingLifetime = 10 * time.Minute
 type pairingToken struct {
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// PairingUpload 是 login --remote 上传的正文：本机登录得到的 OAuth token 与登录开始时生成的设备档案
+type PairingUpload struct {
+	oauth2.Token
+	Device antigravity.Device `json:"device"`
 }
 
 // pairing 保存当前唯一有效配对令牌的摘要，令牌成功导入一个账户后失效
@@ -60,7 +68,7 @@ func (s *server) createPairing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, token)
 }
 
-// pairAccount 凭配对令牌导入本机登录得到的 OAuth token，不经过管理会话
+// pairAccount 凭配对令牌导入本机登录得到的 OAuth token 与设备档案，不经过管理会话
 func (s *server) pairAccount(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	scheme, value, _ := strings.Cut(r.Header.Get("Authorization"), " ")
@@ -68,12 +76,12 @@ func (s *server) pairAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "pairing_token_invalid", "配对令牌无效或已过期")
 		return
 	}
-	var token oauth2.Token
-	if err := decodeJSON(r, &token); err != nil {
+	var upload PairingUpload
+	if err := decodeJSON(r, &upload); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	added, err := s.deps.Store.Add(r.Context(), &token)
+	added, err := s.deps.Store.AddWithDevice(r.Context(), &upload.Token, upload.Device)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "远程配对导入失败 | 错误="+err.Error(), "source", "auth")
 		writeError(w, http.StatusBadGateway, "pairing_import_failed", err.Error())

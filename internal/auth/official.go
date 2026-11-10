@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/zalando/go-keyring"
 	"golang.org/x/oauth2"
+
+	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
 const (
@@ -23,15 +26,22 @@ const (
 	officialMarker = "antigravity-keyring-unavailable"
 	// cliFile 为官方 agy CLI 在系统凭据库不可用时保存凭据的会话文件，相对 ~/.gemini
 	cliFile = "antigravity-cli/antigravity-oauth-token"
+	// officialConsumer 为官方客户端凭据中个人账户的 auth_method
+	officialConsumer = "consumer"
+	// officialCloud 为官方客户端凭据中“Continue with Google Cloud”登录的 auth_method
+	officialCloud = "gcp"
 )
 
-// officialCredential 表示官方客户端保存的凭据 JSON
+// officialCredential 表示官方客户端保存的凭据 JSON，字段与其 StoredToken 相同；企业账户的项目、地区与许可证由官方客户端选择许可证后写入
 type officialCredential struct {
-	Token      oauth2.Token `json:"token"`
-	AuthMethod string       `json:"auth_method,omitempty"`
+	Token            oauth2.Token `json:"token"`
+	AuthMethod       string       `json:"auth_method,omitempty"`
+	IDTokenEmail     string       `json:"id_token_email,omitempty"`
+	WIFProvider      string       `json:"wif_provider,omitempty"`
+	SavedWIFProvider string       `json:"saved_wif_provider,omitempty"`
 }
 
-// ImportOfficial 读取本机官方客户端保存的 OAuth token 并作为账户加入 store
+// ImportOfficial 读取本机官方客户端保存的 OAuth token 并作为账户加入 store，auth_method 为 gcp 的凭据成为企业账户并沿用其 WIF provider
 func ImportOfficial(ctx context.Context, store *Store) ([]*Account, error) {
 	data, err := readOfficial()
 	if err != nil {
@@ -41,15 +51,20 @@ func ImportOfficial(ctx context.Context, store *Store) ([]*Account, error) {
 	if err := json.Unmarshal(data, &credential); err != nil {
 		return nil, fmt.Errorf("解析官方客户端凭据: %w", err)
 	}
-	account, err := store.Add(ctx, &credential.Token)
+	from := identity{email: credential.IDTokenEmail}
+	if credential.AuthMethod == officialCloud {
+		from.method, from.provider = antigravity.AuthMethodEnterprise, credential.WIFProvider
+	}
+	account, err := store.add(ctx, &credential.Token, from, store.proxy, func(*Account) {})
 	if err != nil {
 		return nil, err
 	}
 	return []*Account{account}, nil
 }
 
-// SwitchOfficial 结束运行中的官方客户端，把账户 token 写入官方客户端的凭据存储后以原启动参数重新启动它
+// SwitchOfficial 结束运行中的官方客户端，把账户的 token 写入官方客户端的凭据存储后以原启动参数重新启动它，写入失败时同样重新启动
 func SwitchOfficial(store *Store, id string) error {
+	account, _ := store.Account(id)
 	token := store.Token(id)
 	if token == nil {
 		return fmt.Errorf("账户不存在: %s", id)
@@ -62,18 +77,20 @@ func SwitchOfficial(store *Store, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeOfficial(token); err != nil {
-		return err
-	}
-	return startOfficial(app, args)
+	return errors.Join(writeOfficial(account, token), startOfficial(app, args))
 }
 
-// writeOfficial 按官方客户端登录后保存的格式写入凭据：keyring 不可用标记 1 小时内有效时写 ~/.gemini/jetski-standalone-oauth-token，系统凭据库已有可读凭据时一并更新（官方客户端优先读取它），否则写系统凭据库；系统凭据库不可写时与官方客户端一样写入标记并改写该文件；agy CLI 的会话文件存在时同样改写
-func writeOfficial(token *oauth2.Token) error {
-	data, err := json.Marshal(officialCredential{
+// writeOfficial 按官方客户端登录后保存的格式写入凭据，企业账户写 auth_method gcp、邮箱与 WIF provider：keyring 不可用标记 1 小时内有效时写 ~/.gemini/jetski-standalone-oauth-token，系统凭据库已有可读凭据时一并更新（官方客户端优先读取它），否则写系统凭据库；系统凭据库不可写时与官方客户端一样写入标记并改写该文件；agy CLI 的会话文件存在时同样改写
+func writeOfficial(account Account, token *oauth2.Token) error {
+	credential := officialCredential{
 		Token:      oauth2.Token{AccessToken: token.AccessToken, TokenType: token.Type(), RefreshToken: token.RefreshToken, Expiry: token.Expiry},
-		AuthMethod: "consumer",
-	})
+		AuthMethod: officialConsumer,
+	}
+	if account.AuthMethod == antigravity.AuthMethodEnterprise {
+		credential.AuthMethod, credential.IDTokenEmail = officialCloud, account.Email
+		credential.WIFProvider, credential.SavedWIFProvider = account.WIFProvider, account.WIFProvider
+	}
+	data, err := json.Marshal(credential)
 	if err != nil {
 		return err
 	}

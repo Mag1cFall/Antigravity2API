@@ -218,7 +218,7 @@ POST   /v1beta/interactions/{id}/cancel
 
 ### 管理端与服务状态
 
-浏览器打开 `http://127.0.0.1:8017/` 进入管理端，页面使用 `/api/*` 接口。本机回环地址访问免登录；设置 `ADMIN_AUTH_ENABLED=true`、`ADMIN_USERNAME` 与 `ADMIN_PASSWORD` 后可从其他设备登录访问。设置页修改的配置写回 `.env`，`LISTEN`、`AUTH_DIR` 与 `RUNTIME_DIR` 重启服务后生效，其余项下一次请求生效。设置页的“关于”显示 GitHub 最新发行版本，确认后下载当前平台的发行包、校验 SHA-256、替换程序并重启到新版本，下载经 `PROXY`；Docker 部署随镜像更新。
+浏览器打开 `http://127.0.0.1:8017/` 进入管理端，页面使用 `/api/*` 接口。本机回环地址访问免登录；设置 `ADMIN_AUTH_ENABLED=true`、`ADMIN_USERNAME` 与 `ADMIN_PASSWORD` 后可从其他设备登录访问。经反向代理访问时原样转发 `Host`（nginx 为 `proxy_set_header Host $http_host;`），管理端按访问的域名识别远程访问并要求登录。设置页修改的配置写回 `.env`，`LISTEN`、`AUTH_DIR` 与 `RUNTIME_DIR` 重启服务后生效，其余项下一次请求生效。设置页的“关于”显示 GitHub 最新发行版本，确认后下载当前平台的发行包、校验 SHA-256、替换程序并重启到新版本，下载经 `PROXY`；Docker 部署随镜像更新。
 
 ## 客户端接入
 

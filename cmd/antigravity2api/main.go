@@ -236,7 +236,7 @@ func loginCommand(ctx context.Context, args []string) error {
 	go antigravity.NewPrelogin(device, proxy).Run(prelogin)
 	var authorized *oauth2.Token
 	if *code {
-		authorized, err = antigravity.LoginTerminal(ctx, proxy, promptCode)
+		authorized, err = antigravity.LoginTerminal(ctx, proxy, func(link string) (string, error) { return promptCode(ctx, link) })
 	} else {
 		authorized, err = antigravity.LoginBrowser(ctx, proxy, func(link string) error {
 			fmt.Println("在浏览器中完成 Google 登录：")
@@ -249,7 +249,7 @@ func loginCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if *remote != "" {
-		return pair(ctx, *remote, *token, authorized)
+		return pair(ctx, *remote, *token, app.PairingUpload{Token: *authorized, Device: device})
 	}
 	store, err := auth.Open(cfg.AuthDir, proxy)
 	if err != nil {
@@ -263,21 +263,32 @@ func loginCommand(ctx context.Context, args []string) error {
 	return nil
 }
 
-// promptCode 打印授权链接并读取用户粘贴的授权码
-func promptCode(link string) (string, error) {
+// promptCode 打印授权链接并读取用户粘贴的授权码，ctx 结束时返回其错误
+func promptCode(ctx context.Context, link string) (string, error) {
 	fmt.Println("在任意设备的浏览器中打开链接完成 Google 登录，把页面给出的授权码粘贴到这里：")
 	fmt.Println(link)
 	fmt.Print("授权码: ")
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	var line string
+	var err error
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		line, err = bufio.NewReader(os.Stdin).ReadString('\n')
+	}()
+	select {
+	case <-read:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
 }
 
-// pair 把登录得到的 token 经配对令牌提交给远程服务
-func pair(ctx context.Context, remote, token string, authorized *oauth2.Token) error {
-	body, err := json.Marshal(authorized)
+// pair 把登录得到的 token 与设备档案经配对令牌提交给远程服务
+func pair(ctx context.Context, remote, token string, upload app.PairingUpload) error {
+	body, err := json.Marshal(upload)
 	if err != nil {
 		return err
 	}

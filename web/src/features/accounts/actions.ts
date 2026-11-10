@@ -429,6 +429,14 @@ export function useSwitchAccount() {
 // pendingRemovals 是撤销期内尚未发出删除的账户及取消该删除的函数
 const pendingRemovals = new Map<string, () => void>()
 
+// 页面关闭或刷新时立即发出撤销期内尚未发出的删除，并取消计时器中的同一次删除
+window.addEventListener('pagehide', () => {
+  for (const [id, keep] of pendingRemovals) {
+    void fetch(accountPath(id), { method: 'DELETE', keepalive: true })
+    keep()
+  }
+})
+
 // keepAccounts 取消这些账户在撤销期内待发出的删除并恢复显示，账户被重新导入或登录时调用
 export function keepAccounts(ids: readonly string[]) {
   for (const id of ids) pendingRemovals.get(id)?.()

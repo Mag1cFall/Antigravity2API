@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -82,7 +83,11 @@ func (s *server) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if !sameOrigin(r) {
-			writeError(w, http.StatusForbidden, "admin_origin_forbidden", "管理 API 只接受同源请求")
+			message := "管理 API 只接受同源请求"
+			if origin := r.Header.Get("Origin"); origin != "" {
+				message += fmt.Sprintf("：Origin 为 %s，Host 为 %s，经反向代理访问时原样转发 Host", origin, r.Host)
+			}
+			writeError(w, http.StatusForbidden, "admin_origin_forbidden", message)
 			return
 		}
 		if r.URL.Path == sessionPath || loopback(r) {

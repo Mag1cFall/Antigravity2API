@@ -40,6 +40,20 @@ var OAuthConfig = oauth2.Config{
 	},
 }
 
+// OAuthConfigCloud 为官方客户端“Continue with Google Cloud”以 Google 账户登录使用的 OAuth 客户端
+var OAuthConfigCloud = oauth2.Config{
+	ClientID:     "884354919052-36trc1jjb3tguiac32ov6cod268c5blh.apps.googleusercontent.com",
+	ClientSecret: "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",
+	Endpoint:     OAuthConfig.Endpoint,
+	Scopes: []string{
+		"https://www.googleapis.com/auth/cloud-platform",
+		"https://www.googleapis.com/auth/userinfo.email",
+		"https://www.googleapis.com/auth/userinfo.profile",
+		"https://www.googleapis.com/auth/cclog",
+		"https://www.googleapis.com/auth/experimentsandconfigs",
+	},
+}
+
 // exchangeContext 返回换取 token 的上下文，请求经克隆的 http.DefaultTransport 与代理发出
 func exchangeContext(ctx context.Context, proxy Proxy) context.Context {
 	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: webTransport(proxy)})
@@ -129,11 +143,14 @@ type TokenSource struct {
 	token  *oauth2.Token
 }
 
-// NewTokenSource 以已保存的 token 创建 token 源，认证方式为 AuthMethodEnterprise 时经 OAuthConfigWIF 的 STS 刷新，其余经 OAuthConfig 刷新；刷新请求经克隆的 http.DefaultTransport 与账户代理发出
-func NewTokenSource(token *oauth2.Token, method string, proxy Proxy, save func(*oauth2.Token) error) *TokenSource {
+// NewTokenSource 以已保存的 token 创建 token 源，OAuth 客户端的选择与官方客户端相同：provider 非空时经 OAuthConfigWIF 的 STS 刷新，认证方式为 AuthMethodEnterprise 时经 OAuthConfigCloud 刷新，其余经 OAuthConfig 刷新；刷新请求经克隆的 http.DefaultTransport 与账户代理发出
+func NewTokenSource(token *oauth2.Token, method, provider string, proxy Proxy, save func(*oauth2.Token) error) *TokenSource {
 	config := OAuthConfig
-	if method == AuthMethodEnterprise {
+	switch {
+	case provider != "":
 		config = OAuthConfigWIF
+	case method == AuthMethodEnterprise:
+		config = OAuthConfigCloud
 	}
 	ctx := exchangeContext(context.Background(), proxy)
 	return &TokenSource{ctx: ctx, config: config, save: save, source: oauth2.ReuseTokenSourceWithExpiry(token, config.TokenSource(ctx, token), refreshAhead), token: token}

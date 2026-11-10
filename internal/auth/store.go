@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -37,9 +38,9 @@ type Account struct {
 	PaidTier string             `json:"paid_tier,omitempty"`
 	Region   string             `json:"region,omitempty"`
 	Device   antigravity.Device `json:"device"`
-	// AuthMethod 为账户认证方式，空与 personal_consumer 为个人账户，business_licensed_enterprise 为企业 WIF 账户
+	// AuthMethod 为账户认证方式，空与 personal_consumer 为个人账户，business_licensed_enterprise 为“Continue with Google Cloud”登录的企业账户
 	AuthMethod string `json:"auth_method,omitempty"`
-	// WIFProvider 为企业 WIF 账户的 provider 名
+	// WIFProvider 为企业账户 WIF 登录的 provider 名，以 Google 账户登录的企业账户为空
 	WIFProvider string `json:"wif_provider,omitempty"`
 	Enabled     bool   `json:"enabled"`
 	// Priority 为调度优先级，越大越先使用，默认 0
@@ -155,10 +156,23 @@ func (s *Store) Accounts() []*Account {
 	return accounts
 }
 
+// Account 返回账户库中的账户副本，不存在时返回 false
+func (s *Store) Account(id string) (Account, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	account, ok := s.accounts[id]
+	return account, ok
+}
+
 // Save 原子写回 account.json
 func (s *Store) Save(account *Account) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.save(account)
+}
+
+// save 在持有锁时原子写回 account.json
+func (s *Store) save(account *Account) error {
 	if err := writeJSON(filepath.Join(s.dir, account.ID, accountFile), account); err != nil {
 		return err
 	}
@@ -184,13 +198,6 @@ func (s *Store) Update(id string, change func(*Account)) (Account, bool, error) 
 	}
 	s.accounts[id] = updated
 	return updated, true, nil
-}
-
-// SaveToken 原子写回 token.json
-func (s *Store) SaveToken(id string, token *oauth2.Token) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveToken(id, token)
 }
 
 // UpdateToken 原子写回仍在账户库中的账户的 token.json，账户已删除时不写入
@@ -226,57 +233,60 @@ func (s *Store) Token(id string) *oauth2.Token {
 	return s.tokens[id]
 }
 
-// Add 以邮箱为 ID 写入账户，新账户生成设备档案
-func (s *Store) Add(ctx context.Context, token *oauth2.Token) (*Account, error) {
-	return s.AddWithDevice(ctx, token, antigravity.Device{})
+// AddWithDevice 以个人账户登录得到的 token 写入账户，device 为登录开始时生成的设备档案
+func (s *Store) AddWithDevice(ctx context.Context, token *oauth2.Token, device antigravity.Device) (*Account, error) {
+	return s.add(ctx, token, identity{device: device}, s.proxy, func(*Account) {})
 }
 
-// AddWithDevice 取 id_token 中的邮箱，没有 id_token 时请求 userinfo，以邮箱为 ID 写入个人账户的 token 与资料；device 带 installation_id 时用它补齐用户名与目录，否则新账户生成设备档案，已有账户清除企业认证方式与 provider、保留其余字段；项目、套餐与地区由服务初始化账户时写回
-func (s *Store) AddWithDevice(ctx context.Context, token *oauth2.Token, device antigravity.Device) (*Account, error) {
-	latest := token
-	email := tokenEmail(token)
+// AddWIF 以企业 WIF 登录结果写入账户，记认证方式与 provider
+func (s *Store) AddWIF(ctx context.Context, login *antigravity.WIFLogin, device antigravity.Device) (*Account, error) {
+	return s.add(ctx, login.Token, identity{device: device, method: antigravity.AuthMethodEnterprise, provider: login.Provider}, s.proxy, func(*Account) {})
+}
+
+// identity 为一次登录或导入的账户身份：email 为已知的邮箱，device 为登录时的设备档案，method 与 provider 为认证方式与 WIF provider
+type identity struct {
+	email    string
+	device   antigravity.Device
+	method   string
+	provider string
+}
+
+// add 以邮箱为 ID 写入 token 与资料：邮箱为空时取 id_token 载荷，再没有时以该认证方式的 OAuth 客户端经 proxy 请求 userinfo；设备档案带 installation_id 时用它补齐用户名与目录，否则新账户生成设备档案；已有账户改用本次的认证方式与 provider、保留其余字段，refresh token 变化时清空项目，服务据此按登录序列初始化；写入前以 change 修改账户；项目、套餐与地区由服务初始化账户时写回
+func (s *Store) add(ctx context.Context, token *oauth2.Token, from identity, proxy antigravity.Proxy, change func(*Account)) (*Account, error) {
+	email := cmp.Or(from.email, tokenEmail(token))
 	if email == "" {
-		source := antigravity.NewTokenSource(token, antigravity.AuthMethodConsumer, s.proxy, func(refreshed *oauth2.Token) error {
-			latest = refreshed
+		source := antigravity.NewTokenSource(token, from.method, from.provider, proxy, func(refreshed *oauth2.Token) error {
+			token = refreshed
 			return nil
 		})
-		user, err := antigravity.NewClient("", source, antigravity.NewDevice(""), s.proxy).Userinfo(ctx)
+		user, err := antigravity.NewClient("", source, antigravity.NewDevice(""), proxy).Userinfo(ctx)
 		if err != nil {
 			return nil, err
 		}
 		email = user.Email
 	}
 	profile := antigravity.NewDevice(email)
-	if device.InstallationID != "" {
-		profile = device.WithAccount(email)
+	if from.device.InstallationID != "" {
+		profile = from.device.WithAccount(email)
 	}
-	account := &Account{ID: email, Email: email, Device: profile, Enabled: true, AddedAt: time.Now()}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	account := Account{ID: email, Email: email, Device: profile, Enabled: true, AddedAt: time.Now()}
 	if existing, ok := s.accounts[email]; ok {
-		account = &existing
-		account.AuthMethod, account.WIFProvider = "", ""
+		account = existing
+		if s.tokens[email].RefreshToken != token.RefreshToken {
+			account.Project = ""
+		}
 	}
-	s.mu.Unlock()
-	if err := s.SaveToken(account.ID, latest); err != nil {
+	account.AuthMethod, account.WIFProvider = from.method, from.provider
+	change(&account)
+	if err := s.saveToken(email, token); err != nil {
 		return nil, err
 	}
-	if err := s.Save(account); err != nil {
+	if err := s.save(&account); err != nil {
 		return nil, err
 	}
-	return account, nil
-}
-
-// AddWIF 以企业 WIF 登录结果写入账户，设备档案补齐用户名与目录，记认证方式与 provider
-func (s *Store) AddWIF(ctx context.Context, login *antigravity.WIFLogin, device antigravity.Device) (*Account, error) {
-	account, err := s.AddWithDevice(ctx, login.Token, device)
-	if err != nil {
-		return nil, err
-	}
-	account.AuthMethod, account.WIFProvider = antigravity.AuthMethodEnterprise, login.Provider
-	if err := s.Save(account); err != nil {
-		return nil, err
-	}
-	return account, nil
+	return &account, nil
 }
 
 // tokenEmail 返回 token 响应中 id_token 载荷的邮箱，登录换取的 token 带 id_token，官方客户端保存的 token 没有
@@ -315,7 +325,10 @@ func readJSON(path string, out any) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, out)
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
 }
 
 // writeJSON 先写同目录临时文件再替换目标，保证读者只看到完整文件
