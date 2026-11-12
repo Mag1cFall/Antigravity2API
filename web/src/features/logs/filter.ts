@@ -1,4 +1,5 @@
 import type { LogEntry, LogLevel } from '@/features/logs/types'
+import { serverText } from '@/lib/i18n'
 
 // levelRank 是日志级别的严重程度
 const levelRank: Record<LogLevel, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 }
@@ -26,7 +27,7 @@ export function parseLogFilter(params: URLSearchParams): LogFilter {
   }
 }
 
-// requestStages 返回各进行中请求的当前阶段：该请求最近一条 request.progress 日志的首行去掉模型一项，各项以中点相连，键为请求 ID
+// requestStages 返回各进行中请求的当前阶段：该请求最近一条 request.progress 日志的首行去掉模型一项，各项按界面语言翻译后以中点相连，键为请求 ID
 export function requestStages(logs: LogEntry[]) {
   const stages = new Map<string, string>()
   for (const entry of logs) {
@@ -37,6 +38,7 @@ export function requestStages(logs: LogEntry[]) {
         line
           .split(' | ')
           .filter((part) => !part.startsWith('模型='))
+          .map(serverText)
           .join(' · '),
       )
     }
@@ -44,7 +46,7 @@ export function requestStages(logs: LogEntry[]) {
   return stages
 }
 
-// matchLog 判断日志是否达到最低级别、来源相同并包含搜索词
+// matchLog 判断日志是否达到最低级别、来源相同，且消息原文、按界面语言翻译的消息或来源包含搜索词
 export function matchLog(entry: LogEntry, filter: LogFilter) {
   if (filter.level !== 'all' && levelRank[entry.level] < levelRank[filter.level]) return false
   if (filter.source && entry.source !== filter.source) return false
@@ -52,6 +54,7 @@ export function matchLog(entry: LogEntry, filter: LogFilter) {
   return (
     !needle ||
     entry.message.toLowerCase().includes(needle) ||
+    serverText(entry.message).toLowerCase().includes(needle) ||
     entry.source.toLowerCase().includes(needle)
   )
 }

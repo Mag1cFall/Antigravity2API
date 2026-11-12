@@ -19,6 +19,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/config"
 	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
+	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
 
 // maxBuckets 是一次用量查询允许的最多分桶数
@@ -37,6 +38,7 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("GET /api/update", s.getUpdate)
 	mux.HandleFunc("GET /api/proxies", s.listProxies)
 	mux.HandleFunc("POST /api/proxies/check", s.checkProxies)
+	mux.HandleFunc("GET /api/paths", s.listPaths)
 	mux.HandleFunc("POST /api/update", s.postUpdate)
 	mux.HandleFunc("GET /api/accounts", s.listAccounts)
 	mux.HandleFunc("PATCH /api/accounts/{id}", s.updateAccount)
@@ -66,6 +68,7 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("DELETE /api/logs", s.clearLogs)
 	mux.HandleFunc("GET /api/prompt/templates", s.getPromptTemplates)
 	mux.HandleFunc("POST /api/prompt/preview", s.previewPrompt)
+	mux.HandleFunc("GET /api/first-event-latency", s.listFirstEventLatencies)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PATCH /api/settings", s.updateSettings)
 	mux.HandleFunc("GET /api/events", s.streamEvents)
@@ -73,6 +76,11 @@ func (s *server) admin() http.Handler {
 		writeError(w, http.StatusNotFound, "not_found", "管理 API 不存在: "+r.Method+" "+r.URL.Path)
 	})
 	return mux
+}
+
+// listFirstEventLatencies 返回各模型近期原请求首字等待的 p95 与样本数
+func (s *server) listFirstEventLatencies(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string][]service.FirstEventLatency{"latencies": s.deps.Service.FirstEventLatencies()})
 }
 
 // getStatus 返回宿主、版本、监听地址、启动时间、模拟的官方客户端版本与官方更新清单中的最新版本，尚未读到更新清单时最新版本为空
@@ -152,11 +160,11 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Enabled != nil {
-		action := "停用"
+		message := "账户已停用"
 		if *input.Enabled {
-			action = "启用"
+			message = "账户已启用"
 		}
-		slog.InfoContext(r.Context(), "账户已"+action, "source", stored.ID)
+		slog.InfoContext(r.Context(), message, "source", stored.ID)
 	}
 	if input.Proxy != nil {
 		slog.InfoContext(r.Context(), "账户代理已设置 | 代理="+cmp.Or(redactProxy(stored.Proxy), "跟随全局"), "source", stored.ID)

@@ -5,7 +5,6 @@ import { Navigate, useNavigate, useSearchParams } from 'react-router'
 import { z } from 'zod'
 
 import { Header } from '@/app/Header'
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Field } from '@/components/ui/field'
@@ -14,54 +13,12 @@ import { Loading } from '@/components/ui/states'
 import { sessionKey, useSession } from '@/features/service/queries'
 import type { Session } from '@/features/service/types'
 import { api, ApiError } from '@/lib/api'
-import { defineMessages, fill, useMessages } from '@/lib/i18n'
-
-// loginMessages 是管理登录页的文案
-const loginMessages = defineMessages(
-  {
-    title: '登录管理端',
-    description: '从其他电脑访问需要管理用户名与密码。',
-    username: '用户名',
-    password: '密码',
-    submit: '登录',
-    required: '不能为空。',
-    invalid: '用户名或密码错误。',
-    limited: '登录失败次数过多，请一分钟后再试。',
-    disabled: '远程登录未开启。在服务所在电脑上打开管理端，在“设置 › 远程访问”中开启。',
-    failed: '登录失败：{message}',
-  },
-  {
-    title: 'Sign in to the console',
-    description:
-      'Opening the console from another computer requires the admin username and password.',
-    username: 'Username',
-    password: 'Password',
-    submit: 'Sign in',
-    required: 'Required.',
-    invalid: 'Wrong username or password.',
-    limited: 'Too many failed attempts. Try again in a minute.',
-    disabled:
-      'Remote sign-in is off. Open the console on the computer running the service and turn it on under Settings › Remote access.',
-    failed: 'Sign-in failed: {message}',
-  },
-  {
-    title: '登入管理介面',
-    description: '從其他電腦存取時，需要輸入管理員使用者名稱與密碼。',
-    username: '使用者名稱',
-    password: '密碼',
-    submit: '登入',
-    required: '此欄位為必填。',
-    invalid: '使用者名稱或密碼錯誤。',
-    limited: '登入失敗次數過多，請一分鐘後再試。',
-    disabled: '遠端登入未啟用。請在執行服務的電腦上開啟管理介面，並在「設定 › 遠端存取」中啟用。',
-    failed: '登入失敗：{message}',
-  },
-)
+import { fill, useMessages } from '@/lib/i18n'
 
 // LoginPage 是远程访问时的管理登录
 export function LoginPage() {
-  const m = useMessages(loginMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('login')
+  const app = useMessages('app')
   const client = useQueryClient()
   const navigate = useNavigate()
   const [params] = useSearchParams()

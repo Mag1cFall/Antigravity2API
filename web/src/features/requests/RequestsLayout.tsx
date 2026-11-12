@@ -3,12 +3,11 @@ import { Outlet } from 'react-router'
 
 import { NavTabs } from '@/components/ui/nav-tabs'
 import { PageHeader } from '@/components/ui/page'
-import { requestMessages } from '@/features/requests/messages'
 import { useMessages } from '@/lib/i18n'
 
 // RequestsLayout 是请求页：标题与记录、用量、日志三个子页面的切换
 export function RequestsLayout() {
-  const m = useMessages(requestMessages)
+  const m = useMessages('requests')
   return (
     <>
       <PageHeader title={m.pageTitle} />

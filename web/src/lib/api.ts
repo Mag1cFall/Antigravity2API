@@ -1,13 +1,20 @@
-// ApiError 是管理 API 返回的错误，code 与 message 取自响应体
+import { serverText } from '@/lib/i18n'
+
+// ApiError 是管理 API 返回的错误，code 与 detail 取自响应体，message 是按当前界面语言翻译的 detail
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
-    message: string,
+    readonly detail: string,
   ) {
-    super(message)
+    super()
   }
 }
+Object.defineProperty(ApiError.prototype, 'message', {
+  get(this: ApiError) {
+    return serverText(this.detail)
+  },
+})
 
 // errorMessage 返回错误的说明文字
 export function errorMessage(error: unknown) {

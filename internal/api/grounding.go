@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -82,8 +83,8 @@ func interactionAnnotations(text string, grounding *antigravity.Grounding) []map
 	return annotations
 }
 
-// holdUntilGrounding 返回声明搜索时的写出函数与补发函数：首个正文起暂存事件，直到搜索来源或结束事件到达，先写出搜索来源再补发暂存的事件，使搜索结果排在正文之前；生成中途失败时由补发函数写出暂存的事件
-func holdUntilGrounding(live func(antigravity.Event) error) (func(antigravity.Event) error, func() error) {
+// holdUntilGrounding 返回声明搜索时的写出函数与补发函数：首个正文起暂存事件，直到搜索来源或结束事件到达，先写出搜索来源再补发暂存的事件，使搜索结果排在正文之前；preview 不为空时在写出搜索来源前收到暂存的事件；生成中途失败时由补发函数写出暂存的事件
+func holdUntilGrounding(live func(antigravity.Event) error, preview func([]antigravity.Event, *antigravity.Grounding)) (func(antigravity.Event) error, func() error) {
 	var held []antigravity.Event
 	holding, released := false, false
 	release := func() error {
@@ -102,6 +103,9 @@ func holdUntilGrounding(live func(antigravity.Event) error) (func(antigravity.Ev
 			return live(event)
 		case event.Kind == antigravity.EventGrounding || event.Kind == antigravity.EventFinish:
 			if event.Kind == antigravity.EventGrounding {
+				if preview != nil {
+					preview(held, event.Grounding)
+				}
 				if err := live(event); err != nil {
 					return err
 				}
@@ -188,13 +192,29 @@ func anthropicSearchBlocks(id string, grounding *antigravity.Grounding) []anthro
 	}
 }
 
-// anthropicCitations 返回 text 块中引用搜索来源的 web_search_result_location
-func anthropicCitations(text string, grounding *antigravity.Grounding) []any {
-	var citations []any
+// anthropicCitationGroup 是正文中被同一组来源支撑的字节区间 [start,end) 与对应的 web_search_result_location 引用
+type anthropicCitationGroup struct {
+	start, end int
+	citations  []any
+}
+
+// anthropicCitationGroups 把正文中带区间的来源按区间合并、同一区间按网址去重，并按起点排序
+func anthropicCitationGroups(text string, grounding *antigravity.Grounding) []anthropicCitationGroup {
+	var groups []anthropicCitationGroup
 	for _, item := range groundingCitations(text, grounding) {
-		citations = append(citations, map[string]any{"type": "web_search_result_location", "url": item.URL, "title": item.Title, "encrypted_index": "", "cited_text": item.Text})
+		start, end := item.Offset, item.Offset+len(item.Text)
+		index := slices.IndexFunc(groups, func(group anthropicCitationGroup) bool { return group.start == start && group.end == end })
+		if index < 0 {
+			groups = append(groups, anthropicCitationGroup{start: start, end: end})
+			index = len(groups) - 1
+		}
+		if slices.ContainsFunc(groups[index].citations, func(citation any) bool { return citation.(map[string]any)["url"] == item.URL }) {
+			continue
+		}
+		groups[index].citations = append(groups[index].citations, map[string]any{"type": "web_search_result_location", "url": item.URL, "title": item.Title, "encrypted_index": "", "cited_text": item.Text})
 	}
-	return citations
+	slices.SortStableFunc(groups, func(a, b anthropicCitationGroup) int { return a.start - b.start })
+	return groups
 }
 
 // anthropicSearchUsage 返回 usage 的 server_tool_use，搜索次数为查询数，网页读取次数为 0

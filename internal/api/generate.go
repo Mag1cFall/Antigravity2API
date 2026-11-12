@@ -253,3 +253,20 @@ func appendWithReminders(contents []antigravity.Content, content antigravity.Con
 	}
 	return append(contents, content), reminders
 }
+
+// appendTrailingReminders 放置之后没有 user 消息的 system-reminder：末尾为 assistant 预填时并入其前的最后一个 user 消息，使预填仍在末尾，否则作为末尾的 user 消息
+func appendTrailingReminders(contents []antigravity.Content, reminders []antigravity.Part) []antigravity.Content {
+	if len(reminders) == 0 {
+		return contents
+	}
+	last := len(contents) - 1
+	if last >= 0 && contents[last].Role == antigravity.RoleAssistant {
+		for index := last - 1; index >= 0; index-- {
+			if contents[index].Role == antigravity.RoleUser {
+				contents[index].Parts = slices.Concat(contents[index].Parts, reminders)
+				return contents
+			}
+		}
+	}
+	return append(contents, antigravity.Content{Role: antigravity.RoleUser, Parts: reminders})
+}

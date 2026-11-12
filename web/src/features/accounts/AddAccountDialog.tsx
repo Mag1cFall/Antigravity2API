@@ -14,20 +14,18 @@ import {
 import { ToggleGroup } from 'radix-ui'
 import { type ReactNode, type SyntheticEvent, useEffect, useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { keepAccounts, useImportAccounts } from '@/features/accounts/actions'
-import { accountMessages } from '@/features/accounts/messages'
 import { accountsKey } from '@/features/accounts/queries'
 import { ImportAccountFiles } from '@/features/accounts/TransferDialog'
 import type { Login, Pairing } from '@/features/accounts/types'
 import { api } from '@/lib/api'
 import { isDesktop } from '@/lib/desktop'
-import { fill, useMessages } from '@/lib/i18n'
+import { fill, serverText, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
 
 // countdown 把剩余毫秒向下取整输出为 m:ss
@@ -38,7 +36,7 @@ function countdown(ms: number) {
 
 // LoginProgress 显示已生成的登录链接、等待状态与授权码输入
 function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => void }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   const now = useNow(1000)
   const [code, setCode] = useState('')
@@ -88,7 +86,9 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
     return (
       <div role="alert" className="flex flex-col items-start gap-3">
         <p className="text-sm break-words text-error-text">
-          {login.state === 'failed' ? fill(m.failed, { message: login.error ?? '' }) : m.expired}
+          {login.state === 'failed'
+            ? fill(m.failed, { message: serverText(login.error ?? '') })
+            : m.expired}
         </p>
         <Button onClick={onRestart}>{m.restart}</Button>
       </div>
@@ -152,7 +152,7 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
 
 // RemotePairing 生成配对令牌，在有浏览器的电脑上运行 login --remote 完成登录后账户写入本服务
 function RemotePairing() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const now = useNow(1000)
   const pairing = useMutation({
     mutationFn: () => api<Pairing>('/api/pairing', { method: 'POST' }),
@@ -226,7 +226,7 @@ export const methodGroups: { key: 'login' | 'import'; methods: Method[] }[] = [
 
 // useMethodText 返回各添加方式与分组的名称与说明
 export function useMethodText() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const methods: Record<Method, [string, string]> = {
     browser: [m.methodBrowser, m.methodBrowserHint],
     code: [m.methodCode, m.methodCodeHint],
@@ -246,7 +246,7 @@ function preferredMethod(): Method {
 
 // ImportOfficial 导入本机官方客户端已登录的账户
 function ImportOfficial() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const importing = useImportAccounts()
   return (
     <div className="flex flex-col items-start gap-3">
@@ -278,8 +278,8 @@ function ImportOfficial() {
 
 // AddAccountDialog 是添加账户的五种方式：登录 Google（浏览器登录、粘贴授权码、远程配对）与导入已登录的账户（本机官方客户端、账户文件）；trigger 是打开对话框的按钮，method 是打开时选中的方式
 export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; method?: Method }) {
-  const m = useMessages(accountMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('accounts')
+  const app = useMessages('app')
   const text = useMethodText()
   const client = useQueryClient()
   const [open, setOpen] = useState(false)
@@ -320,7 +320,7 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
     <Dialog open={open} onOpenChange={close}>
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent
-        wide
+        width="wide"
         title={m.dialogTitle}
         closeLabel={app.closeDialog}
         footer={
@@ -434,7 +434,7 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
 
 // AddAccountButton 是打开添加账户对话框的主按钮
 export function AddAccountButton() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   return (
     <AddAccountDialog
       trigger={

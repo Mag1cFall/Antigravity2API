@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -48,6 +50,14 @@ type interactionRequest struct {
 			ImageSize   string `json:"image_size"`
 		} `json:"image_config"`
 	} `json:"generation_config"`
+	// Background 为 true 时立即返回 in_progress 的交互，生成在后台继续，WebhookConfig 为结束时通知的地址
+	Background    bool                      `json:"background"`
+	WebhookConfig *interactionWebhookConfig `json:"webhook_config"`
+	// CachedContent 为显式缓存的资源名
+	CachedContent string `json:"cached_content"`
+	// cache 为 cached_content 引用的显式缓存，stream 为后台交互写出的事件记录
+	cache  *geminiCache
+	stream *streamLog
 }
 
 // interactionFormat 为文本与图片的返回配置
@@ -74,12 +84,16 @@ type interactionInput struct {
 	Result    json.RawMessage    `json:"result"`
 	IsError   bool               `json:"is_error"`
 	Signature string             `json:"signature"`
+	// Resolution 为图片与视频的媒体分辨率，Processing 为视频的片段与帧率
+	Resolution string          `json:"resolution"`
+	Processing json.RawMessage `json:"processing"`
 }
 
-// interactionRecord 为已保存交互的资源对象与请求输入步骤
+// interactionRecord 为已保存交互的资源对象与请求输入步骤，stream 为后台交互的事件记录
 type interactionRecord struct {
 	object json.RawMessage
 	input  []json.RawMessage
+	stream *streamLog
 }
 
 // savedInteraction 是 interactionRecord 写入续接状态库的形式
@@ -103,7 +117,7 @@ func (record *interactionRecord) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// handleInteraction 把 Interactions 请求接入规范生成链路，previous_interaction_id 续接已保存的交互
+// handleInteraction 把 Interactions 请求接入规范生成链路，previous_interaction_id 续接已保存的交互；background 时保存并返回 in_progress 的交互，生成在本请求内继续且不随客户端断开而停止，流式时客户端跟随事件记录
 func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	var request interactionRequest
 	if err := decodeJSON(r, &request); err != nil {
@@ -111,6 +125,12 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	generate, err := request.toGenerateRequest(newID("int"))
+	if err == nil && request.Background && request.Store != nil && !*request.Store {
+		err = errors.New("store=false is incompatible with background=true")
+	}
+	if err == nil && request.WebhookConfig != nil {
+		err = request.WebhookConfig.validate(request.Background)
+	}
 	if err == nil {
 		err = inlineRemoteMedia(r.Context(), generate.Contents)
 	}
@@ -129,19 +149,62 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		}
 		generate.Contents = append(cloneResponseContents(previous.Contents), generate.Contents...)
 	}
+	cache, ok := s.applyGeminiCache(w, request.CachedContent, &generate)
+	if !ok {
+		return
+	}
+	request.cache = cache
 	if err := resolveInteractionResults(generate.Contents); err != nil {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
-	ctx, cancel := context.WithCancel(r.Context())
+	client := r.Context()
+	ctx, cancel := context.WithCancel(client)
 	defer cancel()
-	r = r.WithContext(ctx)
 	generate.Unary = !request.Stream || s.fakeStream()
-	if !request.Stream {
+	if !request.Stream && !request.Background {
 		var stopKeepalive func()
 		w, stopKeepalive = s.nonstreamKeepalive(w)
 		defer stopKeepalive()
 	}
+	created := time.Now().UTC().Format(time.RFC3339)
+	if request.Background {
+		ctx, cancel = context.WithCancel(client)
+		run := backgroundRun{cancel: cancel, done: make(chan struct{})}
+		s.background.Store(generate.ID, run)
+		request.stream = newStreamLog()
+		following := make(chan struct{})
+		failure := &bytes.Buffer{}
+		defer func() {
+			s.endBackgroundInteraction(ctx, request, generate, previous, current, created, failure.Bytes())
+			request.stream.finish()
+			<-following
+			s.background.Delete(generate.ID)
+			cancel()
+			close(run.done)
+		}()
+		started := interactionObject(generate, request.PreviousID, created, "in_progress", nil)
+		s.storeInteraction(request, previous, current, generationResult{}, started)
+		if request.Stream {
+			out := w
+			go func() {
+				defer close(following)
+				if streamHeaders(out) == nil {
+					_ = request.stream.follow(client, out, -1)
+				}
+			}()
+		} else {
+			close(following)
+			body, _ := json.Marshal(officialOrder("interactions", started))
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			w.Header().Set("Connection", "close")
+			_, _ = w.Write(body)
+			_ = http.NewResponseController(w).Flush()
+		}
+		w = &discardResponseWriter{header: http.Header{}, body: failure}
+	}
+	r = r.WithContext(ctx)
 	events, err := s.service.Generate(ctx, generate)
 	if err == nil && request.Stream {
 		events, _, err = awaitStreamStart(ctx, events)
@@ -150,11 +213,19 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		if shouldWriteRequestError(r, err) {
 			writeGeminiRequestError(w, err)
 		}
+		if request.Background && shouldWriteRequestError(r, err) {
+			_ = writeSSE(request.stream, "error", officialOrder("interactions", map[string]any{"event_type": "error", "event_id": "1", "error": map[string]any{"code": geminiErrorStatus(err), "message": err.Error()}}))
+		}
 		return
 	}
-	created := time.Now().UTC().Format(time.RFC3339)
-	if request.Stream {
-		s.streamInteraction(w, r, request, generate, previous, current, created, events)
+	switch {
+	case request.Background:
+		if err := s.streamInteraction(request.stream, r, request, generate, previous, current, created, events); err != nil {
+			writeGeminiRequestError(w, err)
+		}
+		return
+	case request.Stream:
+		_ = s.streamInteraction(w, r, request, generate, previous, current, created, events)
 		return
 	}
 	result, err := consumeEvents(ctx, events, nil)
@@ -164,13 +235,45 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	response := interactionObject(generate, created, interactionStatus(result), result.usage)
+	response := interactionObject(generate, request.PreviousID, created, interactionStatus(result), cache.usage(result.usage))
 	response["steps"] = interactionSteps(result, request.Generation.ThinkingSummaries != "none")
 	if request.Store == nil || *request.Store {
 		s.storeInteraction(request, previous, current, result, response)
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, officialOrder("interactions", response))
 }
+
+// endBackgroundInteraction 在后台交互结束时把仍为 in_progress 的记录保存为终态：被取消时为 cancelled，其他情况为 failed；带 webhook_config 时发送终态事件，failure 为后台生成失败时写出的 Gemini 错误
+func (s *server) endBackgroundInteraction(ctx context.Context, request interactionRequest, generate antigravity.GenerateRequest, previous responseHistory, current []antigravity.Content, created string, failure []byte) {
+	record, ok := s.interactions.Interaction(generate.ID)
+	if !ok {
+		return
+	}
+	var stored struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(record.object, &stored)
+	if stored.Status == "in_progress" {
+		stored.Status = "failed"
+		if errors.Is(ctx.Err(), context.Canceled) {
+			stored.Status = "cancelled"
+		}
+		s.storeInteraction(request, previous, current, generationResult{}, interactionObject(generate, request.PreviousID, created, stored.Status, nil))
+	}
+	if request.WebhookConfig != nil {
+		sendInteractionWebhook(*request.WebhookConfig, generate.ID, stored.Status, failure)
+	}
+}
+
+// discardResponseWriter 记下后台交互立即返回之后的写出
+type discardResponseWriter struct {
+	header http.Header
+	body   *bytes.Buffer
+}
+
+func (w *discardResponseWriter) Header() http.Header            { return w.header }
+func (w *discardResponseWriter) Write(data []byte) (int, error) { return w.body.Write(data) }
+func (w *discardResponseWriter) WriteHeader(int)                {}
 
 // interactionList 解析单对象或数组形式的联合字段
 func interactionList[T any](raw json.RawMessage) ([]T, error) {
@@ -424,9 +527,32 @@ func interactionResultParts(raw json.RawMessage) ([]antigravity.Part, error) {
 	return parts, nil
 }
 
-// parts 复用 Gemini 的文本、内联媒体与文件 URI 输入映射
+// parts 复用 Gemini 的文本、内联媒体与文件 URI 输入映射，resolution 写为媒体分辨率，processing 对象写为视频片段与帧率
 func (content interactionInput) parts() ([]antigravity.Part, error) {
 	var part geminiPart
+	if content.Resolution != "" {
+		part.MediaResolution, _ = json.Marshal(map[string]string{"level": "MEDIA_RESOLUTION_" + strings.ToUpper(content.Resolution)})
+	}
+	var processing struct {
+		StartOffset string   `json:"start_offset"`
+		EndOffset   string   `json:"end_offset"`
+		FPS         *float64 `json:"fps"`
+	}
+	if json.Unmarshal(content.Processing, &processing) == nil {
+		metadata := map[string]any{}
+		if processing.StartOffset != "" {
+			metadata["startOffset"] = processing.StartOffset
+		}
+		if processing.EndOffset != "" {
+			metadata["endOffset"] = processing.EndOffset
+		}
+		if processing.FPS != nil {
+			metadata["fps"] = *processing.FPS
+		}
+		if len(metadata) > 0 {
+			part.VideoMetadata, _ = json.Marshal(metadata)
+		}
+	}
 	switch content.Type {
 	case "text":
 		if content.Text == nil {
@@ -478,10 +604,13 @@ func resolveInteractionResults(contents []antigravity.Content) error {
 }
 
 // interactionObject 构造交互资源的标识、状态与用量
-func interactionObject(request antigravity.GenerateRequest, created, status string, usage *antigravity.Usage) map[string]any {
+func interactionObject(request antigravity.GenerateRequest, previousID, created, status string, usage *antigravity.Usage) map[string]any {
 	object := map[string]any{
 		"id": request.ID, "object": "interaction", "model": request.Model,
 		"created": created, "updated": time.Now().UTC().Format(time.RFC3339), "status": status,
+	}
+	if previousID != "" {
+		object["previous_interaction_id"] = previousID
 	}
 	if usage != nil {
 		object["usage"] = map[string]any{
@@ -495,7 +624,7 @@ func interactionObject(request antigravity.GenerateRequest, created, status stri
 // interactionStatus 把生成终态换成交互状态：有函数调用为 requires_action，非正常结束为 incomplete
 func interactionStatus(result generationResult) string {
 	switch openAIFinishReason(result.finishReason, len(result.toolCalls) > 0) {
-	case "length", "content_filter":
+	case "length":
 		return "incomplete"
 	case "tool_calls":
 		return "requires_action"
@@ -606,20 +735,25 @@ func interactionSteps(result generationResult, summaries bool) []map[string]any 
 	return steps
 }
 
-// streamInteraction 输出 interaction.created、各步骤的 step.start、step.delta、step.stop 与 interaction.completed；正文之后的独立签名暂存到下一个事件，使搜索来源先以 text_annotation_delta 写在正文步骤内
-func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, request interactionRequest, generate antigravity.GenerateRequest, previous responseHistory, current []antigravity.Content, created string, events <-chan antigravity.Event) {
+// streamInteraction 输出 interaction.created、各步骤的 step.start、step.delta、step.stop 与 interaction.completed，返回生成失败的错误；正文之后的独立签名暂存到下一个事件，使搜索来源先以 text_annotation_delta 写在正文步骤内；后台交互的事件带从 1 起的 event_id
+func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, request interactionRequest, generate antigravity.GenerateRequest, previous responseHistory, current []antigravity.Content, created string, events <-chan antigravity.Event) error {
 	stream, err := openStream(w, sseHeartbeat)
 	defer stream.stop()
 	if err != nil {
-		return
+		return nil
 	}
 	w = stream
+	sequence := 0
 	send := func(kind string, value map[string]any) error {
 		value["event_type"] = kind
-		return writeSSE(w, kind, value)
+		if request.Background {
+			sequence++
+			value["event_id"] = strconv.Itoa(sequence)
+		}
+		return writeSSE(w, kind, officialOrder("interactions", value))
 	}
-	if err := send("interaction.created", map[string]any{"interaction": interactionObject(generate, created, "in_progress", nil)}); err != nil {
-		return
+	if err := send("interaction.created", map[string]any{"interaction": interactionObject(generate, request.PreviousID, created, "in_progress", nil)}); err != nil {
+		return nil
 	}
 	index := -1
 	active := ""
@@ -696,16 +830,17 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 		if shouldWriteRequestError(r, err) {
 			send("error", map[string]any{"error": map[string]any{"code": geminiErrorStatus(err), "message": err.Error()}})
 		}
-		return
+		return err
 	}
 	if err := closeStep(); err != nil {
-		return
+		return nil
 	}
-	completed := interactionObject(generate, created, interactionStatus(result), result.usage)
+	completed := interactionObject(generate, request.PreviousID, created, interactionStatus(result), request.cache.usage(result.usage))
 	if request.Store == nil || *request.Store {
 		s.storeInteraction(request, previous, current, result, completed)
 	}
 	send("interaction.completed", map[string]any{"interaction": completed})
+	return nil
 }
 
 // storeInteraction 保存续接上下文与可检索的交互资源，对象不含步骤时按生成结果补齐
@@ -714,9 +849,9 @@ func (s *server) storeInteraction(request interactionRequest, previous responseH
 	if _, ok := stored["steps"]; !ok {
 		stored["steps"] = interactionSteps(result, request.Generation.ThinkingSummaries != "none")
 	}
-	encoded, _ := json.Marshal(stored)
+	encoded, _ := json.Marshal(officialOrder("interactions", stored))
 	id, _ := object["id"].(string)
-	s.interactions.Store(id, previous, result, responseState{Contents: current, Interaction: &interactionRecord{object: encoded, input: interactionInputSteps(request.Input)}})
+	s.interactions.Store(id, previous, result, responseState{Contents: current, Interaction: &interactionRecord{object: encoded, input: interactionInputSteps(request.Input), stream: request.stream}})
 }
 
 // Interaction 返回已保存的交互资源
@@ -757,7 +892,7 @@ func interactionInputSteps(raw json.RawMessage) []json.RawMessage {
 	return steps
 }
 
-// handleInteractionGet 返回已保存的交互，include_input 时在步骤前加入请求输入，stream 时按流式事件重放
+// handleInteractionGet 返回已保存的交互，include_input 时在步骤前加入请求输入，stream 时后台交互从事件记录跟随到结束，其他交互按流式事件重放
 func (s *server) handleInteractionGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	record, ok := s.interactions.Interaction(id)
@@ -767,7 +902,22 @@ func (s *server) handleInteractionGet(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 	if stream, _ := strconv.ParseBool(query.Get("stream")); stream {
-		replayInteraction(w, record.object, query.Get("last_event_id"))
+		if record.stream == nil {
+			replayInteraction(w, record.object, query.Get("last_event_id"))
+			return
+		}
+		after := 0
+		if value := query.Get("last_event_id"); value != "" {
+			sequence, err := strconv.Atoi(value)
+			if err != nil || sequence < 1 {
+				writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", fmt.Sprintf("last_event_id %q was not found", value))
+				return
+			}
+			after = sequence
+		}
+		if streamHeaders(w) == nil {
+			_ = record.stream.follow(r.Context(), w, after-1)
+		}
 		return
 	}
 	if include, _ := strconv.ParseBool(query.Get("include_input")); include && len(record.input) > 0 {
@@ -776,15 +926,16 @@ func (s *server) handleInteractionGet(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(record.object, &fields)
 		json.Unmarshal(fields["steps"], &steps)
 		fields["steps"], _ = json.Marshal(append(slices.Clone(record.input), steps...))
-		writeJSON(w, http.StatusOK, fields)
+		writeJSON(w, http.StatusOK, officialOrder("interactions", fields))
 		return
 	}
 	writeJSON(w, http.StatusOK, record.object)
 }
 
-// handleInteractionDelete 删除已保存的交互，之后不能再作为 previous_interaction_id
+// handleInteractionDelete 终止进行中的后台交互并删除已保存的交互，之后不能再作为 previous_interaction_id
 func (s *server) handleInteractionDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	s.stopBackground(id)
 	if _, ok := s.interactions.Interaction(id); !ok || !s.interactions.Delete(id) {
 		writeInteractionNotFound(w, id)
 		return
@@ -792,9 +943,10 @@ func (s *server) handleInteractionDelete(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
-// handleInteractionCancel 返回已保存的交互，交互在请求内完成，没有进行中的后台交互
+// handleInteractionCancel 停止进行中的后台交互并返回保存的交互
 func (s *server) handleInteractionCancel(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	s.stopBackground(id)
 	record, ok := s.interactions.Interaction(id)
 	if !ok {
 		writeInteractionNotFound(w, id)
@@ -868,7 +1020,7 @@ func replayInteraction(w http.ResponseWriter, object json.RawMessage, lastEventI
 		event := events[sequence]
 		event.value["event_type"] = event.kind
 		event.value["event_id"] = strconv.Itoa(sequence + 1)
-		if err := writeSSE(w, event.kind, event.value); err != nil {
+		if err := writeSSE(w, event.kind, officialOrder("interactions", event.value)); err != nil {
 			return
 		}
 	}

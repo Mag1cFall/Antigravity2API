@@ -1,7 +1,6 @@
 import { ExternalLink } from 'lucide-react'
 import type { ReactNode } from 'react'
 
-import { appMessages } from '@/app/messages'
 import logo from '@/assets/logo.png'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/copy-button'
@@ -10,78 +9,8 @@ import { useStatus } from '@/features/service/queries'
 import { newerVersion } from '@/features/service/version'
 import { UpdateItem } from '@/features/settings/UpdateItem'
 import { formatFullDateTime, formatRelative } from '@/lib/format'
-import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
-
-// aboutMessages 是关于页的文案
-const aboutMessages = defineMessages(
-  {
-    tagline: 'Google Antigravity 的多账户 API 代理',
-    version: '版本',
-    update: '在线更新',
-    host: '运行方式',
-    hostWeb: '浏览器（serve）',
-    hostDesktop: '桌面窗口',
-    listen: '监听地址',
-    started: '启动时间',
-    startedAgo: '{time}启动',
-    api: '客户端接口地址',
-    client: '官方客户端版本',
-    clientLatest: '最新 {latest}',
-    clientUnknown: '尚未读取最新版本',
-    license: '许可证',
-    homepage: '项目主页',
-    releases: '发布页',
-    copy: '复制',
-    copied: '已复制',
-    copyVersion: '复制版本信息',
-    loadFailed: '无法读取服务状态',
-  },
-  {
-    tagline: 'Multi-account API proxy for Google Antigravity',
-    version: 'Version',
-    update: 'Updates',
-    host: 'Running as',
-    hostWeb: 'Browser (serve)',
-    hostDesktop: 'Desktop window',
-    listen: 'Listen address',
-    started: 'Started',
-    startedAgo: 'started {time}',
-    api: 'Client base URL',
-    client: 'Official client version',
-    clientLatest: 'latest {latest}',
-    clientUnknown: 'latest version not read yet',
-    license: 'License',
-    homepage: 'Project page',
-    releases: 'Releases',
-    copy: 'Copy',
-    copied: 'Copied',
-    copyVersion: 'Copy version info',
-    loadFailed: 'Could not load service status',
-  },
-  {
-    tagline: 'Google Antigravity 的多帳號 API 代理',
-    version: '版本',
-    update: '線上更新',
-    host: '執行方式',
-    hostWeb: '瀏覽器（serve）',
-    hostDesktop: '桌面視窗',
-    listen: '監聽位址',
-    started: '啟動時間',
-    startedAgo: '{time}啟動',
-    api: '用戶端 API 網址',
-    client: '官方用戶端版本',
-    clientLatest: '最新版 {latest}',
-    clientUnknown: '尚未取得最新版本',
-    license: '授權條款',
-    homepage: '專案首頁',
-    releases: '發行版本',
-    copy: '複製',
-    copied: '已複製',
-    copyVersion: '複製版本資訊',
-    loadFailed: '無法讀取服務狀態',
-  },
-)
 
 // repository 是项目主页
 const repository = 'https://github.com/Mag1cFall/Antigravity2API'
@@ -98,8 +27,8 @@ function Item({ label, children }: { label: string; children: ReactNode }) {
 
 // AboutSection 是设置中的关于：版本、运行方式、接口地址与项目链接
 export function AboutSection() {
-  const m = useMessages(aboutMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('about')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const now = useNow(60_000)
   const status = useStatus()

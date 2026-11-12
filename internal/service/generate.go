@@ -3,9 +3,9 @@ package service
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -25,6 +25,8 @@ import (
 const (
 	// retiredText 为上游对已下线模型以 HTTP 200 返回的提示中的固定片段
 	retiredText = " is no longer available. Please switch to "
+	// unsupportedText 为上游对低于最低客户端版本的请求以 HTTP 200 返回的提示开头
+	unsupportedText = "This version of Antigravity is no longer supported."
 	// maxAccounts 为单个请求最多尝试的账户数
 	maxAccounts = 12
 	// maxLimitedAccounts 为没有恢复时刻的 429 限速在单个请求中最多尝试的账户数
@@ -40,7 +42,7 @@ const (
 )
 
 // tierSuffixes 为目录中同族模型 ID 的档位后缀
-var tierSuffixes = []string{"-low", "-medium", "-high"}
+var tierSuffixes = []string{"-low", "-medium", "-high", "-xhigh"}
 
 // Error 表示带 HTTP 状态语义的服务错误
 type Error struct {
@@ -101,16 +103,31 @@ func (w *watchdog) failure(err error) error {
 	return err
 }
 
-// model 按 resolve 的规则与账户目录确定请求使用的模型，没有就绪账户时列出各账户的原因，指定的账户须已就绪
+// model 按 resolve 的规则与账户目录确定请求使用的模型，没有就绪账户时列出账户库中各账户的原因；指定的账户须在账户库中、属于请求 API key 可用的账户且已就绪
 func (s *Service) model(request antigravity.GenerateRequest) (antigravity.CatalogModel, error) {
+	if request.AccountID != "" {
+		if _, ok := s.store.Account(request.AccountID); !ok {
+			return antigravity.CatalogModel{}, &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("账户 %s 不存在", request.AccountID)}
+		}
+		if len(request.Accounts) > 0 && !slices.Contains(request.Accounts, request.AccountID) {
+			return antigravity.CatalogModel{}, &Error{Status: http.StatusForbidden, Message: fmt.Sprintf("账户 %s 不在该 API key 可用的账户中", request.AccountID)}
+		}
+	}
 	if s.pool.Len() == 0 {
 		s.mu.Lock()
 		reasons := []string{"没有就绪账户"}
-		for id, reason := range s.failures {
-			reasons = append(reasons, id+": "+reason)
+		for _, record := range s.store.Accounts() {
+			reason, failed := s.failures[record.ID]
+			switch {
+			case failed:
+			case !record.Enabled:
+				reason = "已停用"
+			default:
+				reason = "初始化中"
+			}
+			reasons = append(reasons, record.ID+": "+reason)
 		}
 		s.mu.Unlock()
-		slices.Sort(reasons[1:])
 		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: strings.Join(reasons, "\n")}
 	}
 	if request.AccountID != "" && s.account(request.AccountID) == nil {
@@ -122,7 +139,7 @@ func (s *Service) model(request antigravity.GenerateRequest) (antigravity.Catalo
 	return s.resolve(request.Model, request.Config)
 }
 
-// Generate 去掉客户端系统提示中的计费行，按实时配置与目录确定模型，图像与转写模型及要求输出图片的请求交给 generateMedia，其余请求取得会话后选定账户，以该账户的设备档案组装信封并转发事件，上游请求发出前与成功结束后记录会话 clearcut 事件；首字节前按错误原因换账户重试，429 限速的恢复时间在 maxRetryWait 内时等待后再次使用该账户、只重发生成请求且不计入换号，单个请求最多尝试的账户数取 accountLimit，指定账户时只用该账户；首个上游事件前与相邻两个上游事件之间受 REQUEST_TIMEOUT 限制，每次上游尝试写入请求账本
+// Generate 去掉客户端系统提示中的计费行，按实时配置与目录确定模型，图像与转写模型及要求输出图片的请求交给 generateMedia，其余请求取得会话后选定账户，以该账户的设备档案组装信封并转发事件，上游请求发出前与成功结束后记录会话 clearcut 事件；首字节前按错误原因换账户重试，429 限速的恢复时间在 maxRetryWait 内时等待后再次使用该账户、只重发生成请求且不计入换号，单个请求最多尝试的账户数取 accountLimit，指定账户时只用该账户；原请求等待首个上游事件达到 hedgeDelay 时发起一个备用请求（后台响应不发起），先返回首个事件的一方继续；首个上游事件前与相邻两个上游事件之间受 REQUEST_TIMEOUT 限制，每次上游尝试写入请求账本
 func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequest) (<-chan antigravity.Event, error) {
 	request.System = dropBilling(request.System)
 	cfg := s.live.Load()
@@ -169,7 +186,54 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 	var last error
 	attempts := 0
 	turns := make(map[string]*antigravity.SessionTurn)
-	// open 在尚未尝试的账户上发出生成请求，每个账户只在第一次尝试前发出会话开头的伴随请求与会话事件，返回已开始的上游尝试；broken 为上一次尝试的流中断原因，此时换新的输出处理，已尝试 maxAccounts 个账户或超时后返回它；again 不为空时该账户可再次使用且不计入尝试数
+	// begin 以租约账户的设备档案组装信封并在后台发出生成请求，每个账户只在第一次尝试前发出会话开头的伴随请求与会话事件；备用请求不改写请求账本的执行账户与上游字段
+	begin := func(lease *balancer.Lease, current *account, out *output, hedge bool) (*upstreamStream, error) {
+		turn := turns[lease.ID]
+		var anchor time.Time
+		switch {
+		case turn != nil:
+		case session.New:
+			anchor = current.client.StartTrajectory(deadline, session.Trajectory, request.Contents)
+		default:
+			anchor = current.client.LoadMarketplace(deadline)
+		}
+		plugins, experiments := current.client.Plugins(), current.client.Experiments()
+		composed, err := composer.Compose(request, lease.Model, session.Cascade, localTimes(times, current.device), current.device, plugins, experiments)
+		if err != nil {
+			return nil, &Error{Status: http.StatusInternalServerError, Message: "系统提示模板: " + err.Error()}
+		}
+		envelope, err := antigravity.BuildEnvelope(current.client.Project(), lease.Model, conversation, composed.System, composed.Contents, composed.Tools, composed.Config, time.Now())
+		if err != nil {
+			return nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+		if lease.Credits {
+			envelope.EnabledCreditTypes = []string{antigravity.CreditGoogleOneAI}
+		}
+		out.prompt = envelope.Request
+		if turn == nil {
+			turn = &antigravity.SessionTurn{Conversation: conversation, New: session.New, Model: lease.Model, Contents: composed.Contents, Sections: sectionTokens(lease.Model, session.Cascade, current.device, plugins, experiments), Anchor: anchor}
+			current.client.SessionSend(*turn)
+			turns[lease.ID] = turn
+		}
+		if !hedge {
+			trace.SetAccount(lease.ID)
+			trace.SetUpstream(lease.Model.ID, lease.Model.QuotaGroup(), envelope.RequestType)
+			trace.SetConversation(session.Cascade, conversation.Step)
+		}
+		body, err := json.Marshal(envelope)
+		if err != nil {
+			return nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+		return send(deadline, trace, &upstreamStream{lease: lease, current: current, out: out, turn: turn, hedge: hedge, bytes: len(body)}, envelope), nil
+	}
+	// settle 把失败的尝试写入账本、归还槽位并按失败原因处理账户，返回是否换账户重试
+	settle := func(stream *upstreamStream) bool {
+		trace.AddAttempt(stream.record(stream.err, antigravity.Event{}))
+		stream.lease.Release()
+		return s.fail(ctx, stream.current, stream.lease.Model, stream.err, composer.Tier())
+	}
+	hedged := false
+	// open 在尚未尝试的账户上发出生成请求并等待首个上游事件，本请求还没有发起过备用请求时按 hedgeDelay 发起一个，返回胜出的上游尝试；broken 为上一次尝试的流中断原因，此时换新的输出处理，已尝试 maxAccounts 个账户或超时后返回它；again 不为空时该账户可再次使用且不计入尝试数
 	open := func(broken error, again string) (*upstreamStream, error) {
 		if again != "" {
 			delete(tried, again)
@@ -198,61 +262,55 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 				lease.Release()
 				continue
 			}
-			turn := turns[lease.ID]
-			var anchor time.Time
-			switch {
-			case turn != nil:
-			case session.New:
-				anchor = current.client.StartTrajectory(deadline, session.Trajectory, request.Contents)
-			default:
-				anchor = current.client.LoadMarketplace(deadline)
-			}
-			plugins := current.client.Plugins()
-			composed, err := composer.Compose(request, lease.Model, session.Cascade, localTimes(times, current.device), current.device, plugins)
+			stream, err := begin(lease, current, out, false)
 			if err != nil {
 				lease.Release()
-				return nil, &Error{Status: http.StatusInternalServerError, Message: "系统提示模板: " + err.Error()}
+				return nil, err
 			}
-			envelope, err := antigravity.BuildEnvelope(current.client.Project(), lease.Model, conversation, composed.System, composed.Contents, composed.Tools, composed.Config, time.Now())
-			if err != nil {
-				lease.Release()
-				return nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
+			var plan *hedgePlan
+			if delay, ok := s.hedgeDelay(cfg, original, lease.Model, stream.bytes); ok && !hedged {
+				primary := lease.ID
+				plan = &hedgePlan{delay: delay, start: func() *upstreamStream {
+					backup := s.hedgeLease(request, primary, tried, model)
+					if backup == nil {
+						return nil
+					}
+					current := s.account(backup.ID)
+					if current == nil {
+						backup.Release()
+						return nil
+					}
+					_, out, _ := prepare(original, model, signed)
+					hedge, err := begin(backup, current, out, true)
+					if err != nil {
+						backup.Release()
+						return nil
+					}
+					hedged, tried[backup.ID] = true, true
+					attempts++
+					return hedge
+				}}
 			}
-			if lease.Credits {
-				envelope.EnabledCreditTypes = []string{antigravity.CreditGoogleOneAI}
+			stream = s.await(ctx, stream, plan, func(failed *upstreamStream) { settle(failed) })
+			if stream.err == nil {
+				if stream.hedge {
+					trace.SetAccount(stream.lease.ID)
+				}
+				return stream, nil
 			}
-			out.prompt = envelope.Request
-			if turn == nil {
-				turn = &antigravity.SessionTurn{Conversation: conversation, New: session.New, Model: lease.Model, Contents: composed.Contents, Sections: sectionTokens(lease.Model, session.Cascade, current.device, plugins), Anchor: anchor}
-				current.client.SessionSend(*turn)
-				turns[lease.ID] = turn
-			}
-			trace.SetAccount(lease.ID)
-			trace.SetUpstream(lease.Model.ID, lease.Model.QuotaGroup(), envelope.RequestType)
-			trace.SetConversation(session.Cascade, conversation.Step)
-			started := time.Now()
-			upstream, exchange, err := current.client.StreamGenerateContent(deadline, envelope)
-			if status(err) == http.StatusUnauthorized {
-				trace.AddAttempt(attempt(lease.ID, exchange, started, err, antigravity.Event{}))
-				current.source.Expire()
-				started = time.Now()
-				upstream, exchange, err = current.client.StreamGenerateContent(deadline, envelope)
-			}
-			if err == nil {
-				return &upstreamStream{lease: lease, current: current, events: upstream, exchange: exchange, started: started, out: out, turn: turn}, nil
-			}
-			trace.AddAttempt(attempt(lease.ID, exchange, started, err, antigravity.Event{}))
-			lease.Release()
-			switched := s.fail(ctx, current, lease.Model, err, composer.Tier())
-			if switched && waitRateLimit(deadline, lease.ID, err, waited) {
-				delete(tried, lease.ID)
+			err = stream.err
+			switched := settle(stream)
+			if switched && waitRateLimit(deadline, stream.lease.ID, err, waited) {
+				delete(tried, stream.lease.ID)
 				attempts--
 				continue
 			}
 			if !switched || attempts >= accountLimit(err) || deadline.Err() != nil {
 				return nil, deadline.failure(err)
 			}
-			last = err
+			if last == nil || !unauthorized(err) {
+				last = err
+			}
 		}
 	}
 	stream, err := open(nil, "")
@@ -263,7 +321,7 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 	return s.relay(ctx, deadline, stream, open, request.Unary, digests, session.Cascade, composer.Tier()), nil
 }
 
-// upstreamStream 表示一次已开始的上游尝试：账户租约、上游事件、往返正文、开始时刻、本次尝试的输出处理与会话轮次
+// upstreamStream 表示一次上游尝试：账户租约、上游事件、往返正文、开始时刻、本次尝试的输出处理与会话轮次；hedge 标记备用请求，begun 为发出时刻，first 与 firstAt 为首个上游事件及其到达时刻，err 为流开始前的错误，cancel 取消本次尝试，done 在流开始失败或收到首个事件后关闭
 type upstreamStream struct {
 	lease    *balancer.Lease
 	current  *account
@@ -272,6 +330,57 @@ type upstreamStream struct {
 	started  time.Time
 	out      *output
 	turn     *antigravity.SessionTurn
+	hedge    bool
+	begun    time.Time
+	first    antigravity.Event
+	firstAt  time.Time
+	err      error
+	cancel   context.CancelFunc
+	done     chan struct{}
+	bytes    int
+}
+
+// record 返回本次尝试的账本记录，备用请求带 Hedge 标记
+func (stream *upstreamStream) record(err error, final antigravity.Event) requestdb.Attempt {
+	record := attempt(stream.lease.ID, stream.exchange, stream.started, err, final)
+	record.Hedge, record.RequestBytes = stream.hedge, stream.bytes
+	return record
+}
+
+// send 在后台向上游发出生成请求并等待首个上游事件，401 时把这次尝试写入账本、让 token 过期后重发一次；done 关闭后 events、exchange、started、first、firstAt 与 err 可读，events 从首个事件开始
+func send(deadline context.Context, trace *requestdb.Trace, stream *upstreamStream, envelope antigravity.Envelope) *upstreamStream {
+	ctx, cancel := context.WithCancel(deadline)
+	stream.cancel, stream.done, stream.begun = cancel, make(chan struct{}), time.Now()
+	go func() {
+		defer close(stream.done)
+		stream.started = stream.begun
+		upstream, exchange, err := stream.current.client.StreamGenerateContent(ctx, envelope)
+		if status(err) == http.StatusUnauthorized {
+			stream.exchange = exchange
+			trace.AddAttempt(stream.record(err, antigravity.Event{}))
+			stream.current.source.Expire()
+			stream.started = time.Now()
+			upstream, exchange, err = stream.current.client.StreamGenerateContent(ctx, envelope)
+		}
+		stream.exchange, stream.err = exchange, err
+		if err != nil {
+			return
+		}
+		first, ok := <-upstream
+		stream.first, stream.firstAt = first, time.Now()
+		events := make(chan antigravity.Event)
+		stream.events = events
+		go func() {
+			defer close(events)
+			if ok {
+				events <- first
+			}
+			for event := range upstream {
+				events <- event
+			}
+		}()
+	}()
+	return stream
 }
 
 // retryError 为上游错误附上账户冷却到期的时刻，作为客户端的可重试时刻
@@ -328,20 +437,21 @@ func attempt(account string, exchange *antigravity.Exchange, started time.Time, 
 		record.Status, record.Error = 0, err.Error()
 	case err != nil:
 		record.Error = err.Error()
+	case final.Err != nil:
+		record.Error = final.Err.Error()
 	}
 	return record
 }
 
-// fail 按上游错误原因处理账户并写日志：输入过滤与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
+// fail 按上游错误原因处理账户并写日志：内容策略结束（含过滤提示）与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
 func (s *Service) fail(ctx context.Context, current *account, model antigravity.CatalogModel, err error, tier prompt.Tier) bool {
-	var blocked *antigravity.PromptBlockedError
+	var policy *antigravity.ContentPolicyError
 	var local *Error
-	if errors.As(err, &blocked) || errors.As(err, &local) {
+	if errors.As(err, &policy) || errors.As(err, &local) {
 		return false
 	}
 	var upstream *antigravity.UpstreamError
-	var retrieve *oauth2.RetrieveError
-	if errors.As(err, &retrieve) && refused(retrieve) || status(err) == http.StatusUnauthorized {
+	if unauthorized(err) {
 		slog.WarnContext(ctx, "账户认证失败，移出调度 | 错误="+err.Error(), "source", current.id)
 		s.mu.Lock()
 		s.stop(current.id, "认证失败："+err.Error())
@@ -406,14 +516,25 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 		limit(model.ID, cmp.Or(upstream.RetryAt(now), now.Add(shortCooldown)))
 	case upstream.Status == http.StatusInternalServerError && state == "INTERNAL":
 		s.mu.Lock()
+		if cooling, _ := s.pool.Status(current.id); now.Before(cooling.Cooldown[model.ID]) {
+			s.mu.Unlock()
+			break
+		}
 		current.internal++
-		penalty := time.Duration(current.internal) * shortCooldown
+		until := now.Add(time.Duration(current.internal) * shortCooldown)
+		s.pool.Limit(current.id, model.ID, until)
 		s.mu.Unlock()
-		limit(model.ID, now.Add(penalty))
+		limit(model.ID, until)
 	default:
 		return false
 	}
 	return true
+}
+
+// unauthorized 判断错误是否为账户认证失败：上游 401 或 token 端点拒绝刷新
+func unauthorized(err error) bool {
+	var retrieve *oauth2.RetrieveError
+	return errors.As(err, &retrieve) && refused(retrieve) || status(err) == http.StatusUnauthorized
 }
 
 // refused 判断 token 端点是否拒绝了刷新，5xx 与 429 为端点暂时不可用
@@ -472,8 +593,8 @@ func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateReq
 	for len(times) < len(request.Contents) {
 		times = append(times, time.Now().Unix())
 	}
-	device, plugins := s.countProfile(request.AccountID)
-	composed, err := composer.Compose(request, model, session.Cascade, localTimes(times, device), device, plugins)
+	device, plugins, experiments := s.countProfile(request.AccountID)
+	composed, err := composer.Compose(request, model, session.Cascade, localTimes(times, device), device, plugins, experiments)
 	if err != nil {
 		return 0, &Error{Status: http.StatusInternalServerError, Message: "系统提示模板: " + err.Error()}
 	}
@@ -487,14 +608,14 @@ func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateReq
 	return tokencount.Prompt(model.ModelProvider, envelope.Request), nil
 }
 
-// countProfile 返回计数时组装系统提示所用的设备档案与推荐插件段的货架正文：取指定账户的，否则取最早添加的就绪账户的
-func (s *Service) countProfile(id string) (antigravity.Device, string) {
+// countProfile 返回计数时组装系统提示所用的设备档案、推荐插件段的货架正文与布尔实验开关：取指定账户的，否则取最早添加的就绪账户的
+func (s *Service) countProfile(id string) (antigravity.Device, string, map[string]bool) {
 	for _, record := range s.store.Accounts() {
 		if current := s.account(record.ID); current != nil && (id == "" || id == record.ID) {
-			return current.device, current.client.Plugins()
+			return current.device, current.client.Plugins(), current.client.Experiments()
 		}
 	}
-	return antigravity.Device{}, ""
+	return antigravity.Device{}, "", nil
 }
 
 // localTimes 把各消息首次出现的 Unix 秒按设备时区写成 RFC 3339
@@ -537,8 +658,18 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 				deliver(ctx, events, event)
 			}
 			reported, final, err := forward(stream.events, emit, stream.out, deadline)
-			requestdb.TraceFrom(ctx).AddAttempt(attempt(stream.lease.ID, stream.exchange, stream.started, err, final))
-			if retry := regenerable(ctx, err, final, committed); retry != nil && open != nil && regenerated < regenerations {
+			record := stream.record(err, final)
+			retry := regenerable(ctx, err, final, committed)
+			regenerate := retry != nil && open != nil && regenerated < regenerations
+			switched := !regenerate && err != nil && s.fail(ctx, stream.current, stream.lease.Model, err, tier)
+			if regenerate || switched && open != nil && !delivered && ctx.Err() == nil {
+				record.Usage = reported
+			}
+			requestdb.TraceFrom(ctx).AddAttempt(record)
+			if final.Err != nil {
+				slog.WarnContext(ctx, "上游在函数调用之后异常结束，按 STOP 结束 | 错误="+final.Err.Error(), "source", stream.current.id)
+			}
+			if regenerate {
 				regenerated++
 				if err != nil && status(err) == 0 {
 					s.fail(ctx, stream.current, stream.lease.Model, err, tier)
@@ -554,7 +685,6 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 				stream = next
 				continue
 			}
-			switched := err != nil && s.fail(ctx, stream.current, stream.lease.Model, err, tier)
 			if switched && open != nil && !delivered && ctx.Err() == nil {
 				stream.lease.Release()
 				next, err := open(err, "")
@@ -601,17 +731,25 @@ func content(event antigravity.Event) bool {
 	return false
 }
 
-// regenerable 返回尝试可在客户端尚未收到内容时重新生成的原因：流中断、流尾 5xx，或以函数调用格式错误、意外的工具调用或没有内容的 STOP 结束；其余情形返回 nil
+// regenerable 返回尝试可在客户端尚未收到内容时重新生成的原因：流中断（提前结束、连接重置、HTTP/2 流重置、TLS 记录错误等读取错误）、流尾 5xx，或以函数调用格式错误、意外的工具调用或没有内容的 STOP 结束；上游 4xx、内容策略结束、本地错误与超时返回 nil
 func regenerable(ctx context.Context, err error, final antigravity.Event, committed bool) error {
 	if committed || ctx.Err() != nil {
 		return nil
 	}
 	if err != nil {
 		var upstream *antigravity.UpstreamError
-		if errors.As(err, &upstream) && upstream.Status >= http.StatusInternalServerError || errors.Is(err, antigravity.ErrIncompleteStream) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return err
+		var policy *antigravity.ContentPolicyError
+		var local *Error
+		switch {
+		case errors.As(err, &upstream):
+			if upstream.Status >= http.StatusInternalServerError {
+				return err
+			}
+			return nil
+		case errors.As(err, &policy), errors.As(err, &local), errors.Is(err, requestdb.ErrRequestTimeout), errors.Is(err, context.Canceled):
+			return nil
 		}
-		return nil
+		return err
 	}
 	if final.Kind == antigravity.EventFinish {
 		switch strings.ToUpper(final.FinishReason) {
@@ -622,7 +760,7 @@ func regenerable(ctx context.Context, err error, final antigravity.Event, commit
 	return nil
 }
 
-// forward 把上游事件经 out 处理后交给 emit，返回最后一次转发的用量、上游最后一个事件与流中的错误；正文、思考、签名或函数调用事件使累计输出超过 out 的上限时丢弃它及其后的上游事件，以已转发部分的用量和 MAX_TOKENS 结束，Claude 与 GPT-OSS 的块不带逐块累计的输出用量，累计输出按已转发正文、思考与函数调用的本地计数，输入取块上的上游用量，没有时按信封的本地计数；out 发出结束事件或核对失败后关闭上游并丢弃其后的事件；首个事件为下线提示且其后流未完成时改发 404 错误事件；每个上游事件为 deadline 重新计时，上游因超时中断时错误改为 REQUEST_TIMEOUT；客户端取消后 emit 丢弃事件，上游照常排空
+// forward 把上游事件经 out 处理后交给 emit，返回最后一次转发的用量、上游最后一个事件与流中的错误；正文、思考、签名或函数调用事件使累计输出超过 out 的上限时丢弃它及其后的上游事件，以已转发部分的用量和 MAX_TOKENS 结束，Claude 与 GPT-OSS 的块不带逐块累计的输出用量，累计输出按已转发正文、思考与函数调用的本地计数，输入取块上的上游用量，没有时按信封的本地计数；out 发出结束事件或核对失败后关闭上游并丢弃其后的事件；首个事件为下线提示且其后流未完成时改发 404 错误事件，首个事件为最低客户端版本提示时不论流如何结束都改发带提示原文的 502 错误事件；每个上游事件为 deadline 重新计时，上游因超时中断时错误改为 REQUEST_TIMEOUT；客户端取消后 emit 丢弃事件，上游照常排空
 func forward(upstream <-chan antigravity.Event, emit func(antigravity.Event), out *output, deadline *watchdog) (*antigravity.Usage, antigravity.Event, error) {
 	var failure error
 	var usage *antigravity.Usage
@@ -651,14 +789,18 @@ func forward(upstream <-chan antigravity.Event, emit func(antigravity.Event), ou
 		if truncated {
 			continue
 		}
-		if count == 1 && event.Kind == antigravity.EventText && strings.Contains(event.Text, retiredText) || len(held) != 0 && event.Kind == antigravity.EventUsage {
+		if count == 1 && event.Kind == antigravity.EventText && (strings.Contains(event.Text, retiredText) || strings.HasPrefix(event.Text, unsupportedText)) || len(held) != 0 && event.Kind == antigravity.EventUsage {
 			held = append(held, event)
 			continue
 		}
 		if event.Kind == antigravity.EventError && deadline.timedOut() {
 			event.Err = requestdb.ErrRequestTimeout
 		}
-		if len(held) != 0 && event.Kind == antigravity.EventError && errors.Is(event.Err, antigravity.ErrIncompleteStream) {
+		switch {
+		case len(held) != 0 && strings.HasPrefix(held[0].Text, unsupportedText):
+			event = antigravity.Event{Kind: antigravity.EventError, Err: &Error{Status: http.StatusBadGateway, Message: held[0].Text}}
+			held = nil
+		case len(held) != 0 && event.Kind == antigravity.EventError && errors.Is(event.Err, antigravity.ErrIncompleteStream):
 			event.Err = &Error{Status: http.StatusNotFound, Message: held[0].Text}
 			held = nil
 		}
@@ -737,15 +879,17 @@ func deliver(ctx context.Context, events chan<- antigravity.Event, event antigra
 	}
 }
 
-// effortLevel 返回客户端思考参数对应的档位，预算分界取 1024 与 8192，未指定与负数的动态预算为空，由模型默认档位决定
+// effortLevel 返回客户端思考参数对应的档位，xhigh 与 max 为 xhigh，预算分界取 1024 与 8192，未指定与负数的动态预算为空，由模型默认档位决定
 func effortLevel(config antigravity.GenerationConfig) string {
 	switch strings.ToLower(config.ReasoningEffort) {
 	case "none", "minimal", "low":
 		return "low"
 	case "medium":
 		return "medium"
-	case "high", "xhigh", "max":
+	case "high":
 		return "high"
+	case "xhigh", "max":
+		return "xhigh"
 	}
 	if config.ThinkingBudget == nil || *config.ThinkingBudget < 0 {
 		return ""
@@ -770,8 +914,8 @@ func status(err error) int {
 }
 
 // sectionTokens 返回官方系统提示各段的 token 数，顺序同 antigravity.SessionSections
-func sectionTokens(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string) []int {
-	tokens := prompt.SectionTokens(model, conversation, device, plugins)
+func sectionTokens(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string, experiments map[string]bool) []int {
+	tokens := prompt.SectionTokens(model, conversation, device, plugins, experiments)
 	out := make([]int, len(antigravity.SessionSections))
 	for i, name := range antigravity.SessionSections {
 		out[i] = tokens[name]

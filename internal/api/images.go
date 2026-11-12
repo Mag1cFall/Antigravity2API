@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"math"
@@ -18,7 +19,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HugoSmits86/nativewebp"
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"golang.org/x/image/draw"
 )
 
 const (
@@ -40,6 +43,12 @@ type openAIImageRequest struct {
 	Quality        string `json:"quality"`
 	ResponseFormat string `json:"response_format"`
 	Stream         bool   `json:"stream"`
+	// OutputFormat 与 OutputCompression 为输出图片的编码与 JPEG 压缩质量
+	OutputFormat      string `json:"output_format"`
+	OutputCompression *int   `json:"output_compression"`
+	// SafetyIdentifier 与 User 为调用方的终端用户标识，响应回传其中非空的一个
+	SafetyIdentifier string `json:"safety_identifier"`
+	User             string `json:"user"`
 }
 
 // handleOpenAIImages 按提示词生成图片
@@ -61,6 +70,15 @@ func (s *server) handleOpenAIImageEdits(w http.ResponseWriter, r *http.Request) 
 	request := openAIImageRequest{
 		Model: r.FormValue("model"), Prompt: r.FormValue("prompt"), Size: r.FormValue("size"),
 		Quality: r.FormValue("quality"), ResponseFormat: r.FormValue("response_format"),
+		OutputFormat: r.FormValue("output_format"), SafetyIdentifier: r.FormValue("safety_identifier"), User: r.FormValue("user"),
+	}
+	if value := strings.TrimSpace(r.FormValue("output_compression")); value != "" {
+		compression, err := strconv.Atoi(value)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "output_compression must be an integer")
+			return
+		}
+		request.OutputCompression = &compression
 	}
 	request.Stream, _ = strconv.ParseBool(r.FormValue("stream"))
 	if value := strings.TrimSpace(r.FormValue("n")); value != "" {
@@ -87,7 +105,10 @@ func (s *server) handleOpenAIImageEdits(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if masks := r.MultipartForm.File["mask"]; len(masks) > 0 {
-		mask, err := imageEditMask(masks[0])
+		mask, err := readMultipartFile(masks[0])
+		if err == nil {
+			mask, err = imageEditMask(mask)
+		}
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
@@ -117,6 +138,12 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		request.Model = catalogModel(models, "image_generation")
 	}
 	config, err := openAIImageConfig(request.Size, request.Quality)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	target, _ := openAIImageSize(request.Size)
+	format, compression, err := openAIImageEncoding(request.OutputFormat, request.OutputCompression)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -153,7 +180,11 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 	}
 	created := time.Now().Unix()
 	output := s.mediaOutputFor(r)
+	quality := openAIImageQuality(request.Quality, config)
+	identifier := cmp.Or(request.SafetyIdentifier, request.User)
 	var data []map[string]any
+	var size image.Point
+	var outputFormat string
 	for _, result := range results {
 		if len(result.media) == 0 {
 			message := "the model returned no image: finish reason " + result.finishReason
@@ -163,13 +194,25 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 			return
 		}
 		for _, media := range result.media {
+			media, size, err = fitImage(media, target, format, compression)
+			if err != nil {
+				if !streamed(err) {
+					writeOpenAIError(w, http.StatusBadGateway, "upstream_error", err.Error())
+				}
+				return
+			}
+			outputFormat = strings.TrimPrefix(media.MIME, "image/")
 			encoded := base64.StdEncoding.EncodeToString(media.Data)
 			item := map[string]any{}
 			switch {
 			case request.Stream:
 				item["type"], item["b64_json"], item["created_at"] = event+".completed", encoded, created
-				item["output_format"] = strings.TrimPrefix(media.MIME, "image/")
-				item["size"], item["quality"], item["background"] = cmp.Or(request.Size, "auto"), cmp.Or(request.Quality, "auto"), "auto"
+				item["output_format"] = outputFormat
+				item["size"], item["quality"], item["background"] = fmt.Sprintf("%dx%d", size.X, size.Y), quality, "opaque"
+				item["usage"] = openAIImageUsage(result.usage)
+				if identifier != "" {
+					item["safety_identifier"] = identifier
+				}
 			case request.ResponseFormat == "url":
 				if err := output.save(media); err != nil {
 					if !streamed(err) {
@@ -188,14 +231,21 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		}
 	}
 	if !request.Stream {
-		writeJSON(w, http.StatusOK, map[string]any{"created": created, "data": data})
+		body := map[string]any{
+			"created": created, "data": data, "background": "opaque", "output_format": outputFormat,
+			"quality": quality, "size": fmt.Sprintf("%dx%d", size.X, size.Y), "usage": openAIImageUsage(choicesUsage(results)),
+		}
+		if identifier != "" {
+			body["safety_identifier"] = identifier
+		}
+		writeJSON(w, http.StatusOK, officialOrder("openai", body))
 		return
 	}
 	if err := stream.open(); err != nil {
 		return
 	}
 	for _, item := range data {
-		if err := writeSSE(stream, item["type"].(string), item); err != nil {
+		if err := writeSSE(stream, item["type"].(string), officialOrder("openai", item)); err != nil {
 			return
 		}
 	}
@@ -223,42 +273,167 @@ func catalogModel(models []antigravity.Model, capability string) string {
 	return ""
 }
 
-// openAIImageConfig 把 OpenAI size 换成最接近的宽高比，quality 换成 1K、2K 或 4K 分辨率
+// imageResolutions 为图像模型的分辨率档位及其长边像素
+var imageResolutions = []struct {
+	name   string
+	pixels int
+}{{"1K", 1024}, {"2K", 2048}, {"4K", 4096}}
+
+// openAIImageConfig 把 OpenAI size 换成最接近的宽高比与能覆盖该尺寸的最小分辨率，quality 换成 1K、2K 或 4K 分辨率，两者取较高的分辨率
 func openAIImageConfig(size string, quality string) (*antigravity.ImageConfig, error) {
 	config := &antigravity.ImageConfig{}
-	if size = strings.ToLower(strings.TrimSpace(size)); size != "" && size != "auto" {
-		widthText, heightText, _ := strings.Cut(size, "x")
-		width, widthErr := strconv.Atoi(widthText)
-		height, heightErr := strconv.Atoi(heightText)
-		if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-			return nil, fmt.Errorf("size must be auto or WIDTHxHEIGHT")
-		}
-		target := math.Log(float64(width) / float64(height))
+	target, err := openAIImageSize(size)
+	if err != nil {
+		return nil, err
+	}
+	resolution := 0
+	if target != (image.Point{}) {
+		logRatio := math.Log(float64(target.X) / float64(target.Y))
 		best := math.Inf(1)
 		for _, ratio := range imageAspectRatios {
 			left, right, _ := strings.Cut(ratio, ":")
 			numerator, _ := strconv.Atoi(left)
 			denominator, _ := strconv.Atoi(right)
-			if distance := math.Abs(math.Log(float64(numerator)/float64(denominator)) - target); distance < best {
+			if distance := math.Abs(math.Log(float64(numerator)/float64(denominator)) - logRatio); distance < best {
 				best, config.AspectRatio = distance, ratio
 			}
 		}
+		edge := math.Sqrt(float64(target.X) * float64(target.Y))
+		for resolution < len(imageResolutions)-1 && float64(imageResolutions[resolution].pixels) < edge {
+			resolution++
+		}
+		config.ImageSize = imageResolutions[resolution].name
 	}
+	requested := -1
 	switch strings.ToLower(strings.TrimSpace(quality)) {
 	case "", "auto":
 	case "low", "standard":
-		config.ImageSize = "1K"
+		requested = 0
 	case "medium", "hd":
-		config.ImageSize = "2K"
-	case "high":
-		config.ImageSize = "4K"
+		requested = 1
+	case "high", "xhigh", "max":
+		requested = 2
 	default:
-		return nil, fmt.Errorf("quality must be auto, low, medium, high, standard or hd")
+		return nil, fmt.Errorf("quality must be auto, low, medium, high, xhigh, max, standard or hd")
+	}
+	if requested >= 0 && (config.ImageSize == "" || requested > resolution) {
+		config.ImageSize = imageResolutions[requested].name
 	}
 	if *config == (antigravity.ImageConfig{}) {
 		return nil, nil
 	}
 	return config, nil
+}
+
+// openAIImageSize 解析 OpenAI size 的 WIDTHxHEIGHT，auto 或省略时为零
+func openAIImageSize(size string) (image.Point, error) {
+	size = strings.ToLower(strings.TrimSpace(size))
+	if size == "" || size == "auto" {
+		return image.Point{}, nil
+	}
+	widthText, heightText, ok := strings.Cut(size, "x")
+	width, widthErr := strconv.Atoi(widthText)
+	height, heightErr := strconv.Atoi(heightText)
+	if !ok || widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
+		return image.Point{}, fmt.Errorf("size must be auto or WIDTHxHEIGHT")
+	}
+	return image.Pt(width, height), nil
+}
+
+// openAIImageQuality 返回响应中的 quality：请求的 low、medium、high、xhigh、max 原样返回，其余按生成分辨率换为 low、medium 或 high
+func openAIImageQuality(quality string, config *antigravity.ImageConfig) string {
+	switch quality = strings.ToLower(strings.TrimSpace(quality)); quality {
+	case "low", "medium", "high", "xhigh", "max":
+		return quality
+	}
+	if config != nil {
+		switch config.ImageSize {
+		case "4K":
+			return "high"
+		case "2K":
+			return "medium"
+		}
+	}
+	return "low"
+}
+
+// openAIImageEncoding 返回 output_format 对应的 MIME 类型与 output_compression 给出的 JPEG 质量，省略时为 PNG 与 100；webp 为无损编码，不使用质量
+func openAIImageEncoding(format string, compression *int) (string, int, error) {
+	quality := 100
+	if compression != nil {
+		if *compression < 0 || *compression > 100 {
+			return "", 0, fmt.Errorf("output_compression must be between 0 and 100")
+		}
+		quality = *compression
+	}
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "png":
+		return "image/png", quality, nil
+	case "jpeg", "jpg":
+		return "image/jpeg", quality, nil
+	case "webp":
+		return "image/webp", quality, nil
+	}
+	return "", 0, fmt.Errorf("output_format must be png, jpeg or webp")
+}
+
+// openAIImageUsage 返回 OpenAI 图片用量，没有用量时各项为 0
+func openAIImageUsage(usage *antigravity.Usage) map[string]any {
+	usage = cmp.Or(usage, &antigravity.Usage{})
+	return map[string]any{"input_tokens": usage.InputTokens, "output_tokens": outputTokens(usage), "total_tokens": usage.TotalTokens}
+}
+
+// fitImage 把图片居中裁切缩放为 size 并编码为 mimeType，返回实际尺寸；size 为零或图片任一边小于 size 时保持原尺寸，不放大；mimeType 为空时保持上游编码
+func fitImage(media antigravity.Blob, size image.Point, mimeType string, quality int) (antigravity.Blob, image.Point, error) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(media.Data))
+	if err != nil {
+		return media, image.Point{}, fmt.Errorf("decode %s output: %w", media.MIME, err)
+	}
+	bounds := image.Pt(config.Width, config.Height)
+	resize := size != (image.Point{}) && bounds != size && bounds.X >= size.X && bounds.Y >= size.Y
+	mimeType = cmp.Or(mimeType, media.MIME)
+	if !resize && media.MIME == mimeType && (mimeType == "image/png" || quality == 100) {
+		return media, bounds, nil
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(media.Data))
+	if err != nil {
+		return media, image.Point{}, fmt.Errorf("decode %s output: %w", media.MIME, err)
+	}
+	if resize {
+		decoded = coverImage(decoded, size)
+	}
+	var encoded bytes.Buffer
+	switch mimeType {
+	case "image/png":
+		err = png.Encode(&encoded, decoded)
+	case "image/jpeg":
+		err = jpeg.Encode(&encoded, decoded, &jpeg.Options{Quality: quality})
+	case "image/webp":
+		err = nativewebp.Encode(&encoded, decoded, nil)
+	default:
+		return media, bounds, nil
+	}
+	if err != nil {
+		return media, image.Point{}, fmt.Errorf("convert %s output to %s: %w", media.MIME, mimeType, err)
+	}
+	return antigravity.Blob{MIME: mimeType, Data: encoded.Bytes()}, decoded.Bounds().Size(), nil
+}
+
+// coverImage 居中裁切出与 size 同宽高比的区域并以 CatmullRom 缩放到 size
+func coverImage(source image.Image, size image.Point) image.Image {
+	crop := source.Bounds()
+	if crop.Dx()*size.Y > crop.Dy()*size.X {
+		width := crop.Dy() * size.X / size.Y
+		crop.Min.X += (crop.Dx() - width) / 2
+		crop.Max.X = crop.Min.X + width
+	} else {
+		height := crop.Dx() * size.Y / size.X
+		crop.Min.Y += (crop.Dy() - height) / 2
+		crop.Max.Y = crop.Min.Y + height
+	}
+	scaled := image.NewRGBA(image.Rectangle{Max: size})
+	draw.CatmullRom.Scale(scaled, scaled.Bounds(), source, crop, draw.Src, nil)
+	return scaled
 }
 
 // readMultipartFile 读取 multipart 文件段的全部内容
@@ -272,11 +447,7 @@ func readMultipartFile(header *multipart.FileHeader) ([]byte, error) {
 }
 
 // imageEditMask 把 OpenAI 遮罩中完全透明的像素换成白色、其余像素换成黑色，返回灰度 PNG
-func imageEditMask(header *multipart.FileHeader) ([]byte, error) {
-	data, err := readMultipartFile(header)
-	if err != nil {
-		return nil, err
-	}
+func imageEditMask(data []byte) ([]byte, error) {
 	source, err := png.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("mask must be a PNG image: %w", err)

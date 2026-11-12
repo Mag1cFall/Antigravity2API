@@ -44,21 +44,29 @@ type Conversation struct {
 // ErrIncompleteStream 表示上游流在出现 finishReason 前结束
 var ErrIncompleteStream = errors.New("upstream stream ended without finishReason")
 
-// promptBlockedText 为上游输入过滤提示的开头，该提示以不带 role 的 candidate 正文代替回答
-const promptBlockedText = "This request was blocked by Gemini's filters."
+// filterBlockedText 为上游过滤提示的开头，该提示以不带 role 的 candidate 正文代替回答
+const filterBlockedText = "This request was blocked by Gemini's filters."
 
-// PromptBlockedError 表示上游输入过滤拒绝当前请求，Message 为上游提示原文
-type PromptBlockedError struct {
+// ContentPolicyError 表示上游以内容策略类原因结束生成，Reason 为上游 finishReason（过滤提示为 OTHER），Message 为上游 finishMessage 或过滤提示原文
+type ContentPolicyError struct {
+	Reason  string
 	Message string
 }
 
-func (e *PromptBlockedError) Error() string {
-	return e.Message
+func (e *ContentPolicyError) Error() string {
+	if e.Message != "" {
+		return "上游因内容策略结束生成: " + e.Reason + ": " + e.Message
+	}
+	return "上游因内容策略结束生成: " + e.Reason
 }
 
-// HTTPStatus 返回输入被拒绝时公开协议使用的状态码
-func (e *PromptBlockedError) HTTPStatus() int {
-	return http.StatusBadRequest
+// contentPolicyFinish 判断 finishReason 是否属于内容策略类：安全、背诵、屏蔽词、禁止内容、个人敏感信息与对应的图片原因
+func contentPolicyFinish(reason string) bool {
+	switch reason {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
+		return true
+	}
+	return false
 }
 
 // NewConversation 以会话的 cascade 与 trajectory 标识和规范历史推导步序号：Turn 为历史中的模型轮数，Step 为历史按官方步骤模型展开的步骤数，Execution 为当前用户请求的序号
@@ -195,10 +203,10 @@ type WireFunctionDeclaration struct {
 	Behavior           string          `json:"behavior,omitempty"`
 }
 
-// WireThinkingConfig 表示思考档位，按目录取 thinkingLevel 或 thinkingBudget
+// WireThinkingConfig 表示思考档位，按目录取 thinkingLevel 或 thinkingBudget；thinkingLevel 为枚举名，没有枚举名的目录值以数字发出
 type WireThinkingConfig struct {
 	IncludeThoughts bool   `json:"includeThoughts"`
-	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+	ThinkingLevel   any    `json:"thinkingLevel,omitempty"`
 	ThinkingBudget  *int64 `json:"thinkingBudget,omitempty"`
 }
 
@@ -215,6 +223,7 @@ type WireGenerationConfig struct {
 	MediaResolution  string             `json:"mediaResolution,omitempty"`
 }
 
+// thinkingLevels 为目录 thinkingLevel 中有枚举名的取值，其余取值（如 XHigh 档的 100）按官方客户端以数字发出
 var thinkingLevels = map[int]string{1: "LOW", 2: "MEDIUM", 3: "HIGH"}
 
 // BuildEnvelope 按官方客户端的信封格式组装一次 Agent 生成请求，system 为已按档位组装好的系统指令，config 中只有模型族接受且生效的参数进入 generationConfig，GPT-OSS 族没有描述的函数以函数名为描述，Claude 族的参数 Schema 去掉 anyOf；函数结果无法关联到调用时返回错误
@@ -234,6 +243,8 @@ func BuildEnvelope(project string, model CatalogModel, conversation Conversation
 	}
 	if level, ok := thinkingLevels[model.ThinkingLevel]; ok {
 		request.GenerationConfig.ThinkingConfig.ThinkingLevel = level
+	} else if model.ThinkingLevel != 0 {
+		request.GenerationConfig.ThinkingConfig.ThinkingLevel = model.ThinkingLevel
 	} else {
 		request.GenerationConfig.ThinkingConfig.ThinkingBudget = model.ThinkingBudget
 	}
@@ -303,35 +314,33 @@ func labels(model CatalogModel, conversation Conversation) map[string]string {
 	return values
 }
 
-// wireContents 把规范消息转成上游消息：Claude 族没有 ID 的函数调用生成 ID，函数结果按调用补齐名称与 ID，结果所在轮的角色 Claude 族为 user、其余族为 model，相邻消息的结果并入同一轮，同一消息中的其余 part 在其他族另成 user 轮；Gemini 族缺签名的函数调用连同结果转写为文本
+// wireContents 把规范消息转成上游消息：Claude 族没有 ID 的函数调用生成 ID，函数结果按调用补齐名称与 ID，结果所在轮的角色 Claude 族为 user、其余族为 model，相邻消息的结果并入同一轮，被 user 轮隔开的结果移回调用之后，同一消息中的其余 part 在其他族另成 user 轮
 func wireContents(contents []Content, model CatalogModel) ([]WireContent, error) {
 	claude := model.ModelProvider == ProviderAnthropic
 	google := model.ModelProvider == ProviderGoogle
-	transcribed := unsignedCalls(contents, google)
+	if claude {
+		contents = slices.Clone(contents)
+		for index := range contents {
+			contents[index] = identifyCalls(contents[index], index)
+		}
+	}
+	contents = regroupResults(contents)
 	var wired []WireContent
 	var pendingCalls []FunctionCall
 	for index, content := range contents {
-		if claude {
-			content = identifyCalls(content, index)
-		}
 		content, err := linkFunctionResults(content, &pendingCalls)
 		if err != nil {
 			return nil, fmt.Errorf("contents[%d]: %w", index, err)
 		}
 		if content.Role == RoleAssistant {
-			wired = appendContent(wired, wireRoleModel, modelParts(content.Parts, claude, google, transcribed))
+			wired = appendContent(wired, wireRoleModel, modelParts(content.Parts, claude, google))
 			continue
 		}
 		var results, rest, ordered []WirePart
 		for _, part := range content.Parts {
 			item := wirePart(part, google)
-			if result := part.FunctionResult; result != nil {
-				if transcribed[result.ID] {
-					item = WirePart{Text: transcript("functionResponse", map[string]any{"name": result.Name, "response": map[string]any{"output": functionOutput(result.Content)}})}
-					rest = append(rest, item)
-				} else {
-					results = append(results, item)
-				}
+			if part.FunctionResult != nil {
+				results = append(results, item)
 			} else {
 				rest = append(rest, item)
 			}
@@ -398,24 +407,29 @@ func wirePart(part Part, google bool) WirePart {
 	return wired
 }
 
-// modelParts 转换 assistant 消息：思考文本只在 Claude 族且本轮带签名时保留，转写的函数调用写成文本，只有签名的 part 并入相邻正文
-func modelParts(parts []Part, claude, google bool, transcribed map[string]bool) []WirePart {
+// modelParts 转换 assistant 消息：思考文本只在 Claude 族且本轮带签名时保留，Gemini 族首个函数调用没有签名时带跳过校验的占位签名，只有签名的 part 并入相邻正文
+func modelParts(parts []Part, claude, google bool) []WirePart {
 	signed := slices.ContainsFunc(parts, func(part Part) bool {
 		return part.ThoughtSignature != "" || part.FunctionCall != nil && part.FunctionCall.ThoughtSignature != ""
 	})
 	var wired []WirePart
+	called := false
 	for _, part := range parts {
-		switch {
-		case part.Thought && (!claude || !signed || part.Text == ""):
+		if part.Thought && (!claude || !signed || part.Text == "") {
 			continue
-		case part.FunctionCall != nil && transcribed[part.FunctionCall.ID]:
-			wired = append(wired, WirePart{Text: transcript("functionCall", map[string]any{"name": part.FunctionCall.Name, "args": json.RawMessage(canonicalJSON(part.FunctionCall.Arguments))})})
-		default:
-			wired = append(wired, wirePart(part, google))
 		}
+		item := wirePart(part, google)
+		if google && part.FunctionCall != nil && !called && item.ThoughtSignature == "" {
+			item.ThoughtSignature = skipThoughtSignature
+		}
+		called = called || part.FunctionCall != nil
+		wired = append(wired, item)
 	}
 	return attachSignatures(wired)
 }
+
+// skipThoughtSignature 为 Gemini API 文档给出的跳过签名校验的占位签名
+const skipThoughtSignature = "skip_thought_signature_validator"
 
 // attachSignatures 把只有签名的 part 并入其后、其次其前不带签名的正文，Claude 族签名随后续回答、Gemini 族签名随前面的回答回放
 func attachSignatures(parts []WirePart) []WirePart {
@@ -441,35 +455,6 @@ func attachSignatures(parts []WirePart) []WirePart {
 	return merged
 }
 
-// unsignedCalls 返回 Gemini 族需转写为文本的函数调用 ID：assistant 消息中首个函数调用没有签名时，该消息的全部调用都转写
-func unsignedCalls(contents []Content, google bool) map[string]bool {
-	transcribed := map[string]bool{}
-	if !google {
-		return transcribed
-	}
-	for _, content := range contents {
-		if content.Role != RoleAssistant {
-			continue
-		}
-		first := slices.IndexFunc(content.Parts, func(part Part) bool { return part.FunctionCall != nil })
-		if first < 0 || content.Parts[first].ThoughtSignature != "" || content.Parts[first].FunctionCall.ThoughtSignature != "" {
-			continue
-		}
-		for _, part := range content.Parts {
-			if part.FunctionCall != nil {
-				transcribed[part.FunctionCall.ID] = true
-			}
-		}
-	}
-	return transcribed
-}
-
-// transcript 返回函数调用或结果的 Gemini JSON 文本
-func transcript(kind string, value map[string]any) string {
-	data, _ := marshal(map[string]any{kind: value})
-	return string(data)
-}
-
 // identifyCalls 为消息中没有 ID 的函数调用生成 call_<消息序号>_<part 序号>
 func identifyCalls(content Content, index int) Content {
 	cloned := false
@@ -486,6 +471,63 @@ func identifyCalls(content Content, index int) Content {
 		content.Parts[position].FunctionCall = &call
 	}
 	return content
+}
+
+// regroupResults 把与其调用之间隔着不含函数结果的 user 轮的函数结果按调用 ID 移到调用所在轮之后的结果轮
+func regroupResults(contents []Content) []Content {
+	calls := map[string]int{}
+	separated := map[string]bool{}
+	var regrouped []Content
+	for _, content := range contents {
+		if content.Role == RoleAssistant {
+			for _, part := range content.Parts {
+				if part.FunctionCall != nil && part.FunctionCall.ID != "" {
+					calls[part.FunctionCall.ID] = len(regrouped)
+					delete(separated, part.FunctionCall.ID)
+				}
+			}
+			regrouped = append(regrouped, content)
+			continue
+		}
+		if !slices.ContainsFunc(content.Parts, func(part Part) bool { return part.FunctionResult != nil }) {
+			if content.Role == RoleUser {
+				for id := range calls {
+					separated[id] = true
+				}
+			}
+			regrouped = append(regrouped, content)
+			continue
+		}
+		var kept []Part
+		for _, part := range content.Parts {
+			result := part.FunctionResult
+			if result == nil || !separated[result.ID] {
+				if result != nil {
+					delete(calls, result.ID)
+				}
+				kept = append(kept, part)
+				continue
+			}
+			target := calls[result.ID] + 1
+			delete(calls, result.ID)
+			delete(separated, result.ID)
+			if target < len(regrouped) && regrouped[target].Role != RoleAssistant && !slices.ContainsFunc(regrouped[target].Parts, func(part Part) bool { return part.FunctionResult == nil }) {
+				regrouped[target].Parts = append(slices.Clone(regrouped[target].Parts), part)
+				continue
+			}
+			regrouped = slices.Insert(regrouped, target, Content{Role: content.Role, Parts: []Part{part}})
+			for id, position := range calls {
+				if position >= target {
+					calls[id] = position + 1
+				}
+			}
+		}
+		if len(kept) > 0 {
+			content.Parts = kept
+			regrouped = append(regrouped, content)
+		}
+	}
+	return regrouped
 }
 
 // linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按调用顺序取第一个同名（结果无名称时取第一个）待返回调用补齐；不含函数结果的 user 轮清空待返回调用，无法关联时返回错误
@@ -662,11 +704,12 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 	return events, exchange, nil
 }
 
-// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；不带 role 的输入过滤提示以 PromptBlockedError 结束
+// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion，usageMetadata 没有 promptTokenCount 时输入用量取总量减去输出与思考；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；已发出函数调用后上游没有结束帧就结束或读取中断时以 STOP 结束、结束事件的 Err 带该原因；不带 role 的过滤提示记为原因 OTHER，它与内容策略类原因在已发出函数调用时以 STOP 结束、结束事件的 Err 带被忽略的 ContentPolicyError，否则以 ContentPolicyError 结束
 func DecodeStream(reader io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 64<<20)
 	var usage *Usage
+	var called, filtered bool
 	finish := Event{Kind: EventFinish}
 	for scanner.Scan() {
 		line, ok := bytes.CutPrefix(scanner.Bytes(), []byte("data: "))
@@ -689,7 +732,7 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 		}
 		if metadata := chunk.Response.UsageMetadata; metadata != nil {
 			usage = &Usage{
-				InputTokens:     metadata.PromptTokenCount,
+				InputTokens:     cmp.Or(metadata.PromptTokenCount, metadata.TotalTokenCount-metadata.CandidatesTokenCount-metadata.ThoughtsTokenCount),
 				CachedTokens:    metadata.CachedContentTokenCount,
 				OutputTokens:    metadata.CandidatesTokenCount,
 				ReasoningTokens: metadata.ThoughtsTokenCount,
@@ -697,11 +740,13 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 			}
 		}
 		for _, candidate := range chunk.Response.Candidates {
-			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, promptBlockedText) {
-				events <- Event{Kind: EventError, Err: &PromptBlockedError{Message: parts[0].Text}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
-				return
+			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, filterBlockedText) {
+				filtered = true
+				finish.FinishReason, finish.FinishMessage = "OTHER", parts[0].Text
+				continue
 			}
 			for _, part := range candidate.Content.Parts {
+				called = called || part.FunctionCall != nil
 				emitPart(part, chunk.Response.UsageMetadata != nil, usage, chunk.Response.ModelVersion, events)
 			}
 			if candidate.GroundingMetadata != nil {
@@ -716,15 +761,29 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		events <- Event{Kind: EventError, Err: err, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
-		return
+		if !called || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			events <- Event{Kind: EventError, Err: err, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+			return
+		}
+		finish.Err = err
 	}
 	if usage != nil {
 		events <- Event{Kind: EventUsage, Usage: usage}
 	}
 	if finish.FinishReason == "" {
-		events <- Event{Kind: EventError, Err: ErrIncompleteStream, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
-		return
+		if !called {
+			events <- Event{Kind: EventError, Err: ErrIncompleteStream, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+			return
+		}
+		finish.FinishReason, finish.Err = "STOP", cmp.Or(finish.Err, ErrIncompleteStream)
+	}
+	if filtered || contentPolicyFinish(finish.FinishReason) {
+		policy := &ContentPolicyError{Reason: finish.FinishReason, Message: finish.FinishMessage}
+		if !called {
+			events <- Event{Kind: EventError, Err: policy, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+			return
+		}
+		finish.FinishReason, finish.FinishMessage, finish.Err = "STOP", "", policy
 	}
 	events <- finish
 }

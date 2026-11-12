@@ -1,12 +1,11 @@
 import { CopyButton } from '@/components/ui/copy-button'
 import { endpoints, serviceOrigin } from '@/features/connect/endpoints'
-import { connectMessages } from '@/features/connect/messages'
 import { markProgress } from '@/features/connect/progress'
 import { fill, useMessages } from '@/lib/i18n'
 
 // EndpointList 列出 OpenAI、Anthropic 与 Gemini 三种协议的 base URL 与主要接口，复制任一地址即完成引导的第二步
 export function EndpointList() {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   const hints = { openai: m.openaiHint, anthropic: m.anthropicHint, gemini: m.geminiHint }
   return (
     <ul className="flex flex-col overflow-hidden rounded-md border border-border">

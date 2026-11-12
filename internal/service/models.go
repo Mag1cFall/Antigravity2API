@@ -19,13 +19,13 @@ var (
 	// effortSuffix 匹配模型名末尾括号中的思考档位或思考预算，例如 (high) 与 (8192)
 	effortSuffix = regexp.MustCompile(`\(([a-z]+|-?\d+)\)$`)
 	// levelLabel 匹配目录显示名末尾的档位，例如 " (Medium)"
-	levelLabel = regexp.MustCompile(` \((Low|Medium|High)\)$`)
+	levelLabel = regexp.MustCompile(` \((Low|Medium|High|XHigh)\)$`)
 )
 
 // defaultLevel 为请求不带思考参数时族模型使用的档位
 const defaultLevel = "medium"
 
-// resolve 把客户端模型名解析为目录条目，括号后缀不是思考档位或预算时返回 400，只在未就绪账户上一次目录中时返回 503，找不到时返回 404：先按 MODEL_MAPPING 替换，目录中有该 ID 时直接使用；否则去掉 models/ 前缀、括号档位、日期版本、-latest、-thinking 与档位后缀得到族名，档位依次取名称中指定的档位（括号中的档位或思考预算、-thinking 为 high、档位后缀）、思考参数与 medium、high、low 中目录有的第一个，最后按族名本身匹配
+// resolve 把客户端模型名解析为目录条目，括号后缀不是思考档位或预算时返回 400，只在未就绪账户上一次目录中时返回 503，找不到时返回 404：先按 MODEL_MAPPING 替换，目录中有该 ID 时直接使用；否则去掉 models/ 前缀、括号档位、日期版本、-latest、-thinking 与档位后缀得到族名，档位依次取名称中指定的档位（括号中的档位或思考预算、-thinking 为 high、档位后缀）、思考参数与 medium、high、low 中目录有的第一个，xhigh 不在目录时取 high，最后按族名本身匹配
 func (s *Service) resolve(name string, config antigravity.GenerationConfig) (antigravity.CatalogModel, error) {
 	for _, alias := range s.live.Load().ModelMapping {
 		if alias.Alias == name {
@@ -58,7 +58,9 @@ func (s *Service) resolve(name string, config antigravity.GenerationConfig) (ant
 	}
 	candidates := []string{name}
 	for _, level := range []string{implied, effortLevel(config), defaultLevel, "high", "low"} {
-		if level != "" {
+		if level == "xhigh" {
+			candidates = append(candidates, family+"-xhigh", family+"-high")
+		} else if level != "" {
 			candidates = append(candidates, family+"-"+level)
 		}
 	}
@@ -112,7 +114,7 @@ func public(catalog []antigravity.CatalogModel) []antigravity.Model {
 	}
 	for family, entries := range members {
 		var levels []string
-		for _, level := range []string{"low", "medium", "high"} {
+		for _, level := range []string{"low", "medium", "high", "xhigh"} {
 			if _, ok := entries[level]; ok {
 				levels = append(levels, level)
 			}
@@ -205,9 +207,13 @@ func (s *Service) ModelAccounts() map[string]int {
 	return counts
 }
 
-// lowerTier 判断模型是否在 PREFER_LOWER_TIER_MODELS 中，按目录 ID 或去掉档位后缀的族 ID 匹配
+// lowerTier 判断模型是否在 PREFER_LOWER_TIER_MODELS 中
 func (s *Service) lowerTier(model antigravity.CatalogModel) bool {
-	models := s.live.Load().PreferLowerTierModels
+	return listed(s.live.Load().PreferLowerTierModels, model)
+}
+
+// listed 判断模型是否在配置的模型 ID 列表中，按目录 ID 或去掉档位后缀的族 ID 匹配
+func listed(models []string, model antigravity.CatalogModel) bool {
 	family := model.ID
 	for _, suffix := range tierSuffixes {
 		if trimmed, ok := strings.CutSuffix(family, suffix); ok {

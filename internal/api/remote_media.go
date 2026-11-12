@@ -1,16 +1,22 @@
 package api
 
 import (
+	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"golang.org/x/net/http/httpproxy"
 )
 
 const (
@@ -23,12 +29,53 @@ const (
 )
 
 // remoteMediaClient 是下载外部媒体的 HTTP 客户端，每次重定向前检查目标主机
-var remoteMediaClient = &http.Client{CheckRedirect: func(request *http.Request, via []*http.Request) error {
+var remoteMediaClient = &http.Client{Transport: remoteMediaRoundTripper{direct: remoteMediaTransport()}, CheckRedirect: func(request *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("stopped after 10 redirects")
 	}
-	return checkRemoteMediaHost(request.Context(), request.URL.Hostname())
+	_, err := checkRemoteMediaHost(request.Context(), request.URL.Hostname())
+	return err
 }}
+
+// remoteMediaTransport 返回直连的 Transport，在建立连接时拒绝实际连接的非公网地址
+func remoteMediaTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+		return checkRemoteMediaAddress(netip.MustParseAddrPort(address).Addr())
+	}}
+	transport.DialContext = dialer.DialContext
+	return transport
+}
+
+// remoteMediaRoundTripper 没有代理时交给 direct；进程环境变量为请求指定代理时解析并检查目标主机，经代理连接检查过的地址，TLS 仍按原主机名校验
+type remoteMediaRoundTripper struct {
+	direct *http.Transport
+}
+
+// RoundTrip 按进程当前的代理环境变量发出请求
+func (t remoteMediaRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	proxy, err := httpproxy.FromEnvironment().ProxyFunc()(request.URL)
+	if err != nil {
+		return nil, err
+	}
+	if proxy == nil {
+		return t.direct.RoundTrip(request)
+	}
+	host := request.URL.Hostname()
+	addresses, err := checkRemoteMediaHost(request.Context(), host)
+	if err != nil {
+		return nil, err
+	}
+	pinned := request.Clone(request.Context())
+	pinned.URL.Host = net.JoinHostPort(addresses[0].Unmap().String(), cmp.Or(request.URL.Port(), map[string]string{"http": "80", "https": "443"}[request.URL.Scheme]))
+	pinned.Host = cmp.Or(request.Host, request.URL.Host)
+	transport := t.direct.Clone()
+	transport.Proxy, transport.DisableKeepAlives = http.ProxyURL(proxy), true
+	transport.DialContext = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSClientConfig = &tls.Config{ServerName: host}
+	return transport.RoundTrip(pinned)
+}
 
 // inlineRemoteMedia 把内容与函数结果中的文件引用换成内联媒体：Files API 文件 ID 读取已上传的内容，http(s) URL 下载，YouTube 视频保留为远程引用，同一 URL 只下载一次
 func inlineRemoteMedia(ctx context.Context, contents []antigravity.Content) error {
@@ -83,17 +130,25 @@ func remoteMediaURL(value string) bool {
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
-// checkRemoteMediaHost 拒绝解析到本机、私网、链路本地、组播或未指定地址的主机
-func checkRemoteMediaHost(ctx context.Context, host string) error {
+// checkRemoteMediaHost 解析主机并返回它的地址，拒绝解析到本机、私网、链路本地、组播或未指定地址的主机
+func checkRemoteMediaHost(ctx context.Context, host string) ([]netip.Addr, error) {
 	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, address := range addresses {
-		address = address.Unmap()
-		if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
-			return fmt.Errorf("host %s resolves to non-public address %s", host, address)
+		if err := checkRemoteMediaAddress(address); err != nil {
+			return nil, fmt.Errorf("host %s resolves to %w", host, err)
 		}
+	}
+	return addresses, nil
+}
+
+// checkRemoteMediaAddress 拒绝本机、私网、链路本地、组播与未指定地址
+func checkRemoteMediaAddress(address netip.Addr) error {
+	address = address.Unmap()
+	if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+		return fmt.Errorf("non-public address %s", address)
 	}
 	return nil
 }
@@ -104,7 +159,7 @@ func downloadRemoteMedia(ctx context.Context, url string, declared string) (*ant
 	if err != nil {
 		return nil, err
 	}
-	if err := checkRemoteMediaHost(ctx, request.URL.Hostname()); err != nil {
+	if _, err := checkRemoteMediaHost(ctx, request.URL.Hostname()); err != nil {
 		return nil, err
 	}
 	request.Header.Set("User-Agent", remoteMediaUserAgent)

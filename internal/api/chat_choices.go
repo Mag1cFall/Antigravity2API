@@ -121,8 +121,8 @@ func (choices *chatChoices) run(consume func(int, <-chan antigravity.Event) (gen
 	return results, choices.err
 }
 
-// sumUsage 返回各次生成用量之和，均无用量时返回 nil
-func sumUsage(results []generationResult) *antigravity.Usage {
+// choicesUsage 返回多个 choice 或候选对外报告的用量：输入与缓存按一次计，输出与思考逐个相加，均无用量时返回 nil
+func choicesUsage(results []generationResult) *antigravity.Usage {
 	var total *antigravity.Usage
 	for index := range results {
 		usage := results[index].usage
@@ -130,13 +130,13 @@ func sumUsage(results []generationResult) *antigravity.Usage {
 			continue
 		}
 		if total == nil {
-			total = &antigravity.Usage{}
+			value := *usage
+			total = &value
+			continue
 		}
-		total.InputTokens += usage.InputTokens
-		total.CachedTokens += usage.CachedTokens
 		total.OutputTokens += usage.OutputTokens
 		total.ReasoningTokens += usage.ReasoningTokens
-		total.TotalTokens += usage.TotalTokens
+		total.TotalTokens += usage.TotalTokens - usage.InputTokens
 	}
 	return total
 }

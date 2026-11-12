@@ -2,7 +2,6 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
@@ -16,10 +15,8 @@ import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
 import { useProgress } from '@/features/connect/progress'
-import { dashboardMessages } from '@/features/dashboard/messages'
 import { Pulse } from '@/features/dashboard/Pulse'
 import { SetupBanner, SetupGuide, type SetupSteps } from '@/features/dashboard/SetupGuide'
-import { quotaMessages } from '@/features/quota/messages'
 import { available, groupBuckets, groups, nameOf, type QuotaGroup } from '@/features/quota/quota'
 import { QuotaHistory } from '@/features/quota/QuotaHistory'
 import { QuotaLine } from '@/features/quota/QuotaLine'
@@ -47,8 +44,8 @@ function bestAccount(accounts: Account[], group: QuotaGroup) {
 
 // BestAccounts 是两组额度各自的推荐账户与切换官方客户端
 function BestAccounts({ accounts, now }: { accounts: Account[]; now: Date }) {
-  const m = useMessages(dashboardMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('dashboard')
+  const q = useMessages('quota')
   return (
     <Card>
       <CardHeader title={m.best} />
@@ -97,8 +94,8 @@ function BestAccounts({ accounts, now }: { accounts: Account[]; now: Date }) {
 
 // RecentRequests 是最近 5 条请求
 function RecentRequests({ now }: { now: Date }) {
-  const m = useMessages(dashboardMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('dashboard')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const recent = useQuery({
     queryKey: ['requests', 'recent'],
@@ -138,12 +135,15 @@ function RecentRequests({ now }: { now: Date }) {
           </Callout>
         </CardBody>
       ) : (
-        <ul className="flex flex-col border-t border-border">
+        <ul className="grid grid-cols-[max-content_minmax(0,1fr)_auto] border-t border-border">
           {recent.data.items.map((record) => (
-            <li key={record.id} className="border-t border-border first:border-t-0">
+            <li
+              key={record.id}
+              className="col-span-3 grid grid-cols-subgrid border-t border-border first:border-t-0"
+            >
               <Link
                 to={'/requests?id=' + encodeURIComponent(record.id)}
-                className="grid grid-cols-[96px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-4 py-2 hover:bg-muted/60"
+                className="col-span-3 grid grid-cols-subgrid items-center gap-x-3 gap-y-1 px-4 py-2 hover:bg-muted/60"
               >
                 <RequestStateBadge state={record.state} />
                 <span className="min-w-0">
@@ -169,7 +169,7 @@ function RecentRequests({ now }: { now: Date }) {
 
 // Overview 是有账户后的仪表盘：概览条、推荐账户、最近请求与额度变化
 function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
-  const m = useMessages(dashboardMessages)
+  const m = useMessages('dashboard')
   const usage = useUsage(86_400_000)
   return (
     <>
@@ -190,8 +190,8 @@ function Overview({ accounts, now }: { accounts: Account[]; now: Date }) {
 
 // DashboardPage 是仪表盘：没有账户时为三步引导，引导中添加账户后打勾并可进入总览；总览为账户与额度，接入未完成时顶部显示进度
 export function DashboardPage() {
-  const m = useMessages(dashboardMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('dashboard')
+  const app = useMessages('app')
   const now = useNow(30_000)
   const accounts = useAccounts()
   const usage = useUsage(86_400_000)

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -172,6 +173,77 @@ func mediaFileName(media antigravity.Blob) string {
 	mimeType, _, _ := strings.Cut(media.MIME, ";")
 	return hex.EncodeToString(sum[:]) + cmp.Or(mediaExtensions[strings.ToLower(strings.TrimSpace(mimeType))], ".bin")
 }
+
+// assistantMediaPattern 匹配 assistant 正文中以 data URL 或本服务 /media/ 链接写出的 Markdown 图片，第一组为 data URL，第二组为媒体文件名
+var assistantMediaPattern = regexp.MustCompile(`!\[[^\]]*\]\((?:(data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/_=\r\n-]+)|https?://[^\s)]+/media/([0-9a-f]{64}\.(?:jpg|png|webp|gif)))\)`)
+
+// restoreMediaLinks 把 assistant 正文中本服务写出的 Markdown 图片恢复为图片输入，媒体目录中已不存在的链接保留为文本
+func (s *server) restoreMediaLinks(contents []antigravity.Content) error {
+	for index := range contents {
+		if contents[index].Role != antigravity.RoleAssistant {
+			continue
+		}
+		parts := make([]antigravity.Part, 0, len(contents[index].Parts))
+		for _, part := range contents[index].Parts {
+			restored, err := s.mediaLinkParts(part)
+			if err != nil {
+				return err
+			}
+			parts = append(parts, restored...)
+		}
+		contents[index].Parts = parts
+	}
+	return nil
+}
+
+// mediaLinkParts 把文本 part 按其中的 Markdown 图片拆成文本与图片 part
+func (s *server) mediaLinkParts(part antigravity.Part) ([]antigravity.Part, error) {
+	if part.Text == "" || part.Thought {
+		return []antigravity.Part{part}, nil
+	}
+	text := part.Text
+	var parts []antigravity.Part
+	position := 0
+	for _, match := range assistantMediaPattern.FindAllStringSubmatchIndex(text, -1) {
+		var image antigravity.Part
+		if match[2] >= 0 {
+			decoded, err := dataURLPart(text[match[2]:match[3]], "")
+			if err != nil {
+				return nil, err
+			}
+			image = decoded
+		} else {
+			name := text[match[4]:match[5]]
+			if s.media.dir == "" {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(s.media.dir, name))
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			s.media.touch(name)
+			image = antigravity.Part{InlineData: &antigravity.Blob{MIME: mediaTypes[filepath.Ext(name)], Data: data}}
+		}
+		if match[0] > position {
+			parts = append(parts, antigravity.Part{Text: text[position:match[0]]})
+		}
+		parts = append(parts, image)
+		position = match[1]
+	}
+	if position == 0 {
+		return []antigravity.Part{part}, nil
+	}
+	if position < len(text) {
+		parts = append(parts, antigravity.Part{Text: text[position:]})
+	}
+	return parts, nil
+}
+
+// mediaTypes 为媒体目录中图片扩展名对应的 MIME 类型
+var mediaTypes = map[string]string{".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
 
 // handleMedia 返回链接模式下保存的生成媒体并刷新它的使用时间，内容不变，长期缓存
 func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {

@@ -46,6 +46,26 @@ type responsesRequest struct {
 		Type             string `json:"type"`
 		CompactThreshold *int64 `json:"compact_threshold"`
 	} `json:"context_management"`
+	// MaxToolCalls 为本响应内置工具调用总次数的上限
+	MaxToolCalls *int64 `json:"max_tool_calls"`
+	// ServiceTier 为请求的服务等级，响应中回显
+	ServiceTier string `json:"service_tier"`
+}
+
+// allTools 返回顶层工具与输入中 additional_tools 提供的工具
+func (request responsesRequest) allTools() []responsesTool {
+	var items []struct {
+		Type  string          `json:"type"`
+		Tools []responsesTool `json:"tools"`
+	}
+	_ = json.Unmarshal(request.Input, &items)
+	var additional []responsesTool
+	for _, item := range items {
+		if item.Type == "additional_tools" {
+			additional = append(additional, item.Tools...)
+		}
+	}
+	return mergeResponsesTools(request.Tools, additional)
 }
 
 // includesEncrypted 返回请求是否要求 reasoning 项带 encrypted_content
@@ -78,6 +98,59 @@ type responsesTool struct {
 	Tools             []responsesTool `json:"tools,omitempty"`
 	Size              string          `json:"size,omitempty"`
 	Quality           string          `json:"quality,omitempty"`
+	// InputImageMask 为 image_generation 编辑参考图时的遮罩
+	InputImageMask json.RawMessage `json:"input_image_mask,omitempty"`
+	// DisplayWidth、DisplayHeight 与 Environment 为 computer_use_preview 的屏幕尺寸与环境，shell 的 Environment 带本地 skills
+	DisplayWidth  int             `json:"display_width,omitempty"`
+	DisplayHeight int             `json:"display_height,omitempty"`
+	Environment   json.RawMessage `json:"environment,omitempty"`
+}
+
+// strict 返回函数工具是否按 strict 校验：省略 strict 时参数 Schema 已满足 strict 要求即按 strict 处理
+func (tool responsesTool) strict() bool {
+	if tool.Strict != nil {
+		return *tool.Strict
+	}
+	var schema any
+	return json.Unmarshal(tool.Parameters, &schema) == nil && strictCompatible(schema)
+}
+
+// strictCompatible 表示 Schema 满足 strict 要求：每个对象设 additionalProperties 为 false 并把全部属性列为必填，且不含 strict 不支持的组合关键字
+func strictCompatible(schema any) bool {
+	value, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, keyword := range []string{"allOf", "oneOf", "not", "if", "then", "else", "patternProperties", "dependentRequired", "dependentSchemas"} {
+		if _, ok := value[keyword]; ok {
+			return false
+		}
+	}
+	properties, _ := value["properties"].(map[string]any)
+	if value["type"] == "object" || properties != nil {
+		required, _ := value["required"].([]any)
+		if value["additionalProperties"] != false || len(required) != len(properties) {
+			return false
+		}
+		for _, name := range required {
+			if key, _ := name.(string); properties[key] == nil {
+				return false
+			}
+		}
+	}
+	children := slices.Collect(maps.Values(properties))
+	for _, key := range []string{"$defs", "definitions"} {
+		if definitions, ok := value[key].(map[string]any); ok {
+			children = slices.AppendSeq(children, maps.Values(definitions))
+		}
+	}
+	if anyOf, ok := value["anyOf"].([]any); ok {
+		children = append(children, anyOf...)
+	}
+	if items, ok := value["items"]; ok {
+		children = append(children, items)
+	}
+	return !slices.ContainsFunc(children, func(child any) bool { return !strictCompatible(child) })
 }
 
 // responsesInputItem 为 Responses 输入中的一项
@@ -92,6 +165,7 @@ type responsesInputItem struct {
 	Arguments        string          `json:"arguments"`
 	Input            string          `json:"input"`
 	Action           json.RawMessage `json:"action"`
+	Actions          json.RawMessage `json:"actions"`
 	Operation        json.RawMessage `json:"operation"`
 	Status           string          `json:"status"`
 	Output           json.RawMessage `json:"output"`
@@ -122,6 +196,8 @@ type responseRecord struct {
 	Input      []storedItem
 	Output     []storedItem
 	Background bool
+	// Include 为创建时请求的 include，查询时与查询参数的 include 合并
+	Include []string
 	// Stream 为后台流式响应写出的事件，续传请求从中回放
 	Stream *streamLog `json:"-"`
 }
@@ -300,8 +376,8 @@ func (store *responseStateStore) Stream(id string) (*streamLog, bool) {
 	return state.Record.Stream, true
 }
 
-// Response 返回 Responses 接口保存的完整响应对象及其是否以后台模式创建
-func (store *responseStateStore) Response(id string) (json.RawMessage, bool, bool) {
+// Response 返回 Responses 接口保存的完整响应对象及其是否以后台模式创建，输出项按创建与查询的 include 合并后的结果给出
+func (store *responseStateStore) Response(id string, include []string) (json.RawMessage, bool, bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	state, exists := store.states[id]
@@ -310,12 +386,15 @@ func (store *responseStateStore) Response(id string) (json.RawMessage, bool, boo
 	}
 	var shell map[string]json.RawMessage
 	_ = json.Unmarshal(state.Record.Shell, &shell)
-	output := make([]json.RawMessage, 0, len(state.Record.Output))
+	include = slices.Concat(state.Record.Include, include)
+	output := make([]any, 0, len(state.Record.Output))
 	for _, item := range state.Record.Output {
-		output = append(output, item.Raw)
+		var object map[string]any
+		_ = json.Unmarshal(item.Raw, &object)
+		output = append(output, responseIncludeView(object, include))
 	}
-	shell["output"], _ = json.Marshal(output)
-	encoded, _ := json.Marshal(shell)
+	shell["output"], _ = json.Marshal(officialOrder("responses", output))
+	encoded, _ := json.Marshal(officialOrder("responses", shell))
 	return encoded, state.Record.Background, true
 }
 
@@ -440,6 +519,11 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		s.streamBackground(w, r, request, prepared, responseID)
 		return
 	}
+	if !request.Stream {
+		var stopKeepalive func()
+		w, stopKeepalive = s.nonstreamKeepalive(w)
+		defer stopKeepalive()
+	}
 	compaction, err := s.compactOverThreshold(r, &request, &prepared, responseID)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
@@ -447,14 +531,9 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if !request.Stream {
-		var stopKeepalive func()
-		w, stopKeepalive = s.nonstreamKeepalive(w)
-		defer stopKeepalive()
-	}
 	events, err := s.generateResponses(r.Context(), request, &prepared)
 	if err == nil {
-		events = s.hostedImages(r.Context(), request.Tools, prepared.generate.Session, prepared.generate.Contents, events)
+		events = s.hostedImages(r.Context(), request.allTools(), prepared.generate.Session, prepared.generate.Contents, events)
 	}
 	if err == nil && request.Stream {
 		events, _, err = awaitStreamStart(r.Context(), events)
@@ -481,7 +560,38 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if request.storesResponse() {
 		s.storeResponse(responseID, request, prepared, result, response)
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, officialOrder("responses", responseView(response, request.Include)))
+}
+
+// responseView 返回按 include 输出各项的响应对象
+func responseView(response map[string]any, include []string) map[string]any {
+	output, ok := response["output"].([]any)
+	if !ok {
+		return response
+	}
+	view := maps.Clone(response)
+	items := make([]any, 0, len(output))
+	for _, item := range output {
+		object, _ := item.(map[string]any)
+		items = append(items, responseIncludeView(object, include))
+	}
+	view["output"] = items
+	return view
+}
+
+// responseIncludeView 返回按 include 输出的项：没有 web_search_call.action.sources 时搜索项的 action 不带 sources
+func responseIncludeView(item map[string]any, include []string) map[string]any {
+	if item["type"] != "web_search_call" {
+		return item
+	}
+	action, _ := item["action"].(map[string]any)
+	if _, ok := action["sources"]; ok && !slices.Contains(include, "web_search_call.action.sources") {
+		view, trimmed := maps.Clone(item), maps.Clone(action)
+		delete(trimmed, "sources")
+		view["action"] = trimmed
+		return view
+	}
+	return item
 }
 
 // generateResponses 发起生成；truncation 为 auto 且上游报告上下文超限时，按完整轮次从最早处删除历史后重试，删除量按本地计数与上游给出的上限估算
@@ -536,7 +646,7 @@ func (s *server) truncateTurns(ctx context.Context, request antigravity.Generate
 	return trimmed(cut), true
 }
 
-// compactOverThreshold 在 context_management 的 compaction 阈值被超过时先压缩输入，并以保留的 user 消息与 compaction 项作为本次输入；返回生成前插入输出的 compaction 项
+// compactOverThreshold 在 context_management 的 compaction 阈值被超过时先压缩输入，并以被压缩部分中的 developer 与 system 消息、保留的 user 消息与 compaction 项作为本次输入；返回生成前插入输出的 compaction 项
 func (s *server) compactOverThreshold(r *http.Request, request *responsesRequest, prepared *responsesPreparation, id string) (map[string]any, error) {
 	threshold := request.compactThreshold()
 	if threshold <= 0 {
@@ -546,12 +656,12 @@ func (s *server) compactOverThreshold(r *http.Request, request *responsesRequest
 	if err != nil || tokens <= threshold {
 		return nil, err
 	}
-	item, retained, _, err := s.compactResponses(r.Context(), *request, prepared.previous, id)
+	item, retained, instructions, _, err := s.compactResponses(r.Context(), *request, prepared.previous, id)
 	if err != nil {
 		return nil, err
 	}
 	encoded, _ := json.Marshal(item)
-	request.Input, _ = json.Marshal(append(slices.Clone(retained), encoded))
+	request.Input, _ = json.Marshal(slices.Concat(instructions, retained, []json.RawMessage{encoded}))
 	request.PreviousResponseID = ""
 	compacted, err := s.prepareResponses(r, request, id)
 	if err != nil {
@@ -579,6 +689,12 @@ func (s *server) prepareResponses(r *http.Request, request *responsesRequest, id
 		return responsesPreparation{}, err
 	}
 	request.Input = input
+	for index, tool := range request.Tools {
+		if tool.Type == "function" && tool.Strict == nil {
+			strict := tool.strict()
+			request.Tools[index].Strict = &strict
+		}
+	}
 	generateRequest, inlineInstructions, err := request.toGenerateRequest(id)
 	if err == nil {
 		err = inlineRemoteMedia(r.Context(), generateRequest.Contents)
@@ -619,8 +735,8 @@ func (request responsesRequest) storesResponse() bool {
 func (s *server) storeResponse(id string, request responsesRequest, prepared responsesPreparation, result generationResult, response map[string]any) {
 	shell := maps.Clone(response)
 	delete(shell, "output")
-	encoded, _ := json.Marshal(shell)
-	record := &responseRecord{Model: request.Model, Shell: encoded, Input: prepared.input, Background: request.Background, Stream: prepared.stream}
+	encoded, _ := json.Marshal(officialOrder("responses", shell))
+	record := &responseRecord{Model: request.Model, Shell: encoded, Input: prepared.input, Background: request.Background, Stream: prepared.stream, Include: request.Include}
 	for _, item := range response["output"].([]any) {
 		object, _ := item.(map[string]any)
 		if itemID, _ := object["id"].(string); itemID != "" {
@@ -732,9 +848,12 @@ func (request responsesRequest) toGenerateRequest(id string) (antigravity.Genera
 		instructions = append(instructions, request.Instructions)
 	}
 	instructions = append(instructions, inlineInstructions...)
-	tools, err := mapResponsesTools(mergeResponsesTools(request.Tools, input.tools), request.ToolChoice)
+	tools, err := mapResponsesTools(request.allTools(), request.ToolChoice)
 	if err != nil {
 		return antigravity.GenerateRequest{}, nil, err
+	}
+	if request.MaxToolCalls != nil && len(tools.GoogleSearch) > 0 {
+		instructions = append(instructions, fmt.Sprintf("Make at most %d built-in tool calls in this response.", *request.MaxToolCalls))
 	}
 	tools.ToolConfig.ParallelCalls = request.ParallelToolCalls
 	config := antigravity.GenerationConfig{
@@ -762,8 +881,9 @@ func (request responsesRequest) toGenerateRequest(id string) (antigravity.Genera
 	if len(request.Text) > 0 && string(request.Text) != "null" {
 		var text struct {
 			Format struct {
-				Type   string          `json:"type"`
-				Schema json.RawMessage `json:"schema"`
+				Type        string          `json:"type"`
+				Description string          `json:"description"`
+				Schema      json.RawMessage `json:"schema"`
 			} `json:"format"`
 		}
 		if err := json.Unmarshal(request.Text, &text); err != nil {
@@ -774,7 +894,9 @@ func (request responsesRequest) toGenerateRequest(id string) (antigravity.Genera
 			config.ResponseMIMEType = "application/json"
 		case "json_schema":
 			config.ResponseMIMEType = "application/json"
-			config.ResponseSchema = text.Format.Schema
+			if config.ResponseSchema, err = describedSchema(text.Format.Schema, text.Format.Description); err != nil {
+				return antigravity.GenerateRequest{}, nil, fmt.Errorf("text.format.schema: %w", err)
+			}
 		case "", "text":
 		default:
 			return antigravity.GenerateRequest{}, nil, fmt.Errorf("unsupported text format %q", text.Format.Type)
@@ -790,11 +912,10 @@ func (request responsesRequest) toGenerateRequest(id string) (antigravity.Genera
 	}, inlineInstructions, nil
 }
 
-// responsesInput 表示转换后的 Responses 输入：消息、首部的 system 与 developer 文本、additional_tools 声明的工具与最后一个 configuration_update 的 effort
+// responsesInput 表示转换后的 Responses 输入：消息、首部的 system 与 developer 文本与最后一个 configuration_update 的 effort
 type responsesInput struct {
 	contents     []antigravity.Content
 	instructions []string
-	tools        []responsesTool
 	effort       string
 }
 
@@ -857,7 +978,7 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 				return input, fmt.Errorf("compaction_trigger must be the final input item")
 			}
 			continue
-		case "web_search_call", "code_interpreter_call", "image_generation_call", "file_search_call", "computer_call", "computer_call_output",
+		case "web_search_call", "code_interpreter_call", "image_generation_call", "file_search_call",
 			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "tool_search_call", "tool_search_output", "program", "program_output":
 			content, err := responsesHostedItem(kind, rawItem)
 			if err != nil {
@@ -871,13 +992,10 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 				return input, fmt.Errorf("input item: %w", err)
 			}
 		}
-		if item.Namespace != "" {
-			item.Name = item.Namespace + "." + item.Name
-		}
+		item.Name = namespacedName(item.Namespace, item.Name)
 		call := antigravity.FunctionCall{ID: item.CallID, Name: item.Name}
 		switch item.Type {
 		case "additional_tools":
-			input.tools = append(input.tools, item.Tools...)
 			continue
 		case "configuration_update":
 			if item.Reasoning != nil && item.Reasoning.Effort != "" {
@@ -918,6 +1036,29 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 				flushReasoning()
 			}
 			add(antigravity.Content{Role: role, Parts: parts})
+			continue
+		case "agent_message":
+			parts, err := agentMessageParts(item.Content)
+			if err != nil {
+				return input, fmt.Errorf("agent_message: %w", err)
+			}
+			flushReasoning()
+			add(antigravity.Content{Role: antigravity.RoleUser, Parts: parts})
+			continue
+		case "computer_call":
+			call.Name, call.Arguments = "computer", rawObjectArguments(item.Action)
+			if rawJSONConfigured(item.Actions) {
+				call.Arguments, _ = json.Marshal(map[string]json.RawMessage{"actions": item.Actions})
+			}
+		case "computer_call_output":
+			screenshot, err := computerScreenshot(item.Output)
+			if err != nil {
+				return input, fmt.Errorf("computer_call_output: %w", err)
+			}
+			flushReasoning()
+			add(antigravity.Content{Role: antigravity.RoleTool, Parts: []antigravity.Part{{FunctionResult: &antigravity.FunctionResult{
+				ID: item.CallID, Name: "computer", Content: json.RawMessage(`{"type":"computer_screenshot"}`), Parts: screenshot,
+			}}}})
 			continue
 		case "function_call":
 			call.Arguments = functionCallArguments(item.Arguments)
@@ -973,11 +1114,55 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 		add(antigravity.Content{Role: antigravity.RoleAssistant, Parts: []antigravity.Part{{FunctionCall: &call}}})
 	}
 	flushReasoning()
-	if len(reminders) > 0 {
-		contents = append(contents, antigravity.Content{Role: antigravity.RoleUser, Parts: reminders})
-	}
+	contents = appendTrailingReminders(contents, reminders)
 	input.contents = prependSystemMedia(contents, systemMedia)
 	return input, nil
+}
+
+// agentMessageParts 把 Codex 智能体间消息的内容转为文本 part，encrypted_content 中是本服务模型写出的消息原文
+func agentMessageParts(raw json.RawMessage) ([]antigravity.Part, error) {
+	var content []struct {
+		Type             string `json:"type"`
+		Text             string `json:"text"`
+		EncryptedContent string `json:"encrypted_content"`
+	}
+	if err := json.Unmarshal(raw, &content); err != nil {
+		return nil, err
+	}
+	parts := make([]antigravity.Part, 0, len(content))
+	for _, part := range content {
+		switch part.Type {
+		case "input_text":
+			parts = append(parts, antigravity.Part{Text: part.Text})
+		case "encrypted_content":
+			parts = append(parts, antigravity.Part{Text: part.EncryptedContent})
+		default:
+			return nil, fmt.Errorf("unsupported content type %q", part.Type)
+		}
+	}
+	return parts, nil
+}
+
+// computerScreenshot 返回 computer_call_output 中 computer_screenshot 的图片 part
+func computerScreenshot(raw json.RawMessage) ([]antigravity.Part, error) {
+	var output struct {
+		ImageURL string `json:"image_url"`
+		FileID   string `json:"file_id"`
+	}
+	if err := json.Unmarshal(raw, &output); err != nil {
+		return nil, fmt.Errorf("output: %w", err)
+	}
+	switch {
+	case output.ImageURL != "":
+		part, err := mediaURLPart(output.ImageURL, "", "")
+		if err != nil {
+			return nil, fmt.Errorf("output: %w", err)
+		}
+		return []antigravity.Part{part}, nil
+	case output.FileID != "":
+		return []antigravity.Part{{File: &antigravity.FileRef{ID: output.FileID}}}, nil
+	}
+	return nil, nil
 }
 
 // responsesItemType 读取输入项的 type 字段
@@ -989,7 +1174,7 @@ func responsesItemType(raw json.RawMessage) string {
 	return head.Type
 }
 
-// responsesHostedItem 把托管工具与 computer、MCP 历史项转为文本摘要，截图与生成图片保留为图片
+// responsesHostedItem 把托管工具与 MCP 历史项转为文本摘要，生成图片保留为图片
 func responsesHostedItem(kind string, raw json.RawMessage) (antigravity.Content, error) {
 	var item map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &item); err != nil {
@@ -1007,25 +1192,6 @@ func responsesHostedItem(kind string, raw json.RawMessage) (antigravity.Content,
 			}
 			media = append(media, antigravity.Part{InlineData: &antigravity.Blob{MIME: detectMediaType("", data), Data: data}})
 			delete(item, "result")
-		}
-	case "computer_call_output":
-		content.Role = antigravity.RoleUser
-		var output struct {
-			ImageURL string `json:"image_url"`
-			FileID   string `json:"file_id"`
-		}
-		switch {
-		case json.Unmarshal(item["output"], &output) != nil:
-		case output.ImageURL != "":
-			part, err := mediaURLPart(output.ImageURL, "", "")
-			if err != nil {
-				return antigravity.Content{}, fmt.Errorf("output: %w", err)
-			}
-			media = append(media, part)
-			delete(item, "output")
-		case output.FileID != "":
-			media = append(media, antigravity.Part{File: &antigravity.FileRef{ID: output.FileID}})
-			delete(item, "output")
 		}
 	case "mcp_approval_response":
 		content.Role = antigravity.RoleUser
@@ -1062,7 +1228,7 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 			parameters = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
 		return addDeclaration(antigravity.FunctionDeclaration{
-			Name: tool.Name, Description: tool.Description, Parameters: parameters, Strict: tool.Strict != nil && *tool.Strict,
+			Name: tool.Name, Description: tool.Description, Parameters: parameters, Strict: tool.strict(),
 		})
 	}
 	for _, tool := range tools {
@@ -1072,7 +1238,11 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 				return antigravity.Tools{}, err
 			}
 		case "local_shell", "shell", "apply_patch":
-			if err := addDeclaration(clientToolDeclarations[tool.Type]); err != nil {
+			if err := addDeclaration(shellSkills(clientToolDeclarations[tool.Type], tool.Environment)); err != nil {
+				return antigravity.Tools{}, err
+			}
+		case "computer_use_preview", "computer":
+			if err := addDeclaration(computerToolDeclaration(tool)); err != nil {
 				return antigravity.Tools{}, err
 			}
 		case "namespace":
@@ -1083,7 +1253,10 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 				if inner.Type != "function" && inner.Type != "custom" {
 					return antigravity.Tools{}, fmt.Errorf("namespace %q tool type %q is not supported", tool.Name, inner.Type)
 				}
-				inner.Name = tool.Name + "." + inner.Name
+				inner.Name = namespacedName(tool.Name, inner.Name)
+				if tool.Description != "" {
+					inner.Description = strings.TrimSpace(tool.Description + "\n\n" + inner.Description)
+				}
 				if err := addTool(inner); err != nil {
 					return antigravity.Tools{}, err
 				}
@@ -1106,7 +1279,7 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 			if err := addDeclaration(imageToolDeclaration); err != nil {
 				return antigravity.Tools{}, err
 			}
-		case "code_interpreter", "file_search", "mcp", "computer", "computer_use_preview", "tool_search", "programmatic_tool_calling":
+		case "code_interpreter", "file_search", "mcp", "tool_search", "programmatic_tool_calling":
 		default:
 			return antigravity.Tools{}, fmt.Errorf("unsupported tool type %q", tool.Type)
 		}
@@ -1138,13 +1311,20 @@ func mergeResponsesTools(tools, additional []responsesTool) []responsesTool {
 
 // responsesOutput 按事件生成顺序累积 Responses 输出项：思考为 reasoning 项，正文为 message 项，函数调用为调用项；请求 encrypted_content 时签名写入其前的 reasoning 项
 type responsesOutput struct {
-	id        string
-	request   responsesRequest
+	id      string
+	request responsesRequest
+	// tools 为顶层与 additional_tools 声明的工具，决定函数调用的输出项类型
+	tools     []responsesTool
 	items     []map[string]any
 	reasoning map[string]any
 	message   map[string]any
 	images    int
 	grounding *antigravity.Grounding
+}
+
+// newResponsesOutput 返回响应 id 的输出累积器
+func newResponsesOutput(id string, request responsesRequest) *responsesOutput {
+	return &responsesOutput{id: id, request: request, tools: request.allTools()}
 }
 
 // outputText 是输出项中逐事件累积的文本，编码为 JSON 字符串
@@ -1207,7 +1387,7 @@ func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) 
 		o.message["content"].([]any)[0].(map[string]any)["text"].(*outputText).WriteString(event.Text)
 	case antigravity.EventToolCall:
 		signed("rs_"+event.ToolCall.ID, event.ToolCall.ThoughtSignature)
-		item := responseFunctionCall(*event.ToolCall, o.request.Tools)
+		item := responseFunctionCall(*event.ToolCall, o.tools)
 		o.items = append(o.items, item)
 		added = append(added, item)
 	case antigravity.EventMedia:
@@ -1223,13 +1403,11 @@ func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) 
 		if queries := event.Grounding.WebSearchQueries; len(queries) > 0 {
 			action["query"], action["queries"] = queries[0], queries
 		}
-		if slices.Contains(o.request.Include, "web_search_call.action.sources") {
-			sources := []any{}
-			for _, source := range groundingSources(event.Grounding) {
-				sources = append(sources, map[string]any{"type": "url", "url": source.URI})
-			}
-			action["sources"] = sources
+		sources := []any{}
+		for _, source := range groundingSources(event.Grounding) {
+			sources = append(sources, map[string]any{"type": "url", "url": source.URI})
 		}
+		action["sources"] = sources
 		item := map[string]any{"id": o.itemID("ws_"), "type": "web_search_call", "status": "completed", "action": action}
 		o.items = append(o.items, item)
 		added = append(added, item)
@@ -1249,13 +1427,13 @@ func (o *responsesOutput) annotate(message map[string]any) []any {
 
 // buildResponsesObject 构造完整响应对象，compaction 不为空时排在输出首位；search 为真时与流式输出相同，正文排在首个搜索来源之后
 func buildResponsesObject(id string, created int64, request responsesRequest, result generationResult, compaction map[string]any, search bool) map[string]any {
-	collected := &responsesOutput{id: id, request: request}
+	collected := newResponsesOutput(id, request)
 	add := func(event antigravity.Event) error {
 		collected.add(event)
 		return nil
 	}
 	if search {
-		add, _ = holdUntilGrounding(add)
+		add, _ = holdUntilGrounding(add, nil)
 	}
 	for _, event := range result.events {
 		_ = add(event)
@@ -1273,19 +1451,16 @@ func buildResponsesObject(id string, created int64, request responsesRequest, re
 		output = append(output, item)
 	}
 	status := "completed"
-	incompleteReason := ""
-	switch openAIFinishReason(result.finishReason, false) {
-	case "length":
+	if openAIFinishReason(result.finishReason, false) == "length" {
 		status = "incomplete"
-		incompleteReason = "max_output_tokens"
-	case "content_filter":
-		status = "incomplete"
-		incompleteReason = "content_filter"
 	}
 	response := responseShell(id, created, status, request)
-	response["completed_at"] = time.Now().Unix()
+	response["service_tier"] = "default"
+	if status == "completed" {
+		response["completed_at"] = time.Now().Unix()
+	}
 	if status == "incomplete" {
-		response["incomplete_details"] = map[string]any{"reason": incompleteReason}
+		response["incomplete_details"] = map[string]any{"reason": "max_output_tokens"}
 	}
 	response["output"] = output
 	response["output_text"] = result.text.String()
@@ -1347,6 +1522,8 @@ func responseShell(id string, created int64, status string, request responsesReq
 		"top_p":                request.TopP,
 		"truncation":           truncation,
 		"max_output_tokens":    request.MaxOutputTokens,
+		"max_tool_calls":       request.MaxToolCalls,
+		"service_tier":         cmp.Or(request.ServiceTier, "auto"),
 		"usage":                nil,
 	}
 }
@@ -1380,6 +1557,16 @@ func responseFunctionCall(call antigravity.FunctionCall, tools []responsesTool) 
 	case "apply_patch":
 		item["type"], item["operation"] = "apply_patch_call", rawJSONValue(call.Arguments, map[string]any{})
 		return item
+	case "computer_use_preview":
+		item["type"], item["action"], item["pending_safety_checks"] = "computer_call", rawJSONValue(call.Arguments, map[string]any{}), []any{}
+		return item
+	case "computer":
+		var arguments struct {
+			Actions []any `json:"actions"`
+		}
+		_ = json.Unmarshal(call.Arguments, &arguments)
+		item["type"], item["actions"], item["pending_safety_checks"] = "computer_call", arguments.Actions, []any{}
+		return item
 	case "custom":
 		item["type"], item["name"], item["input"] = "custom_tool_call", call.Name, customToolInput(call.Arguments)
 	default:
@@ -1392,6 +1579,14 @@ func responseFunctionCall(call antigravity.FunctionCall, tools []responsesTool) 
 	return item
 }
 
+// namespacedName 返回命名空间中函数的声明名：默认命名空间 functions 中的函数与顶层函数相同，用原名，其余为 <命名空间>.<名>
+func namespacedName(namespace, name string) string {
+	if namespace == "" || namespace == "functions" {
+		return name
+	}
+	return namespace + "." + name
+}
+
 // responsesNamespace 返回函数所属的命名空间工具名
 func responsesNamespace(tools []responsesTool, name string) string {
 	for _, tool := range tools {
@@ -1399,7 +1594,7 @@ func responsesNamespace(tools []responsesTool, name string) string {
 			continue
 		}
 		for _, inner := range tool.Tools {
-			if tool.Name+"."+inner.Name == name {
+			if namespacedName(tool.Name, inner.Name) == name {
 				return tool.Name
 			}
 		}
@@ -1426,13 +1621,16 @@ func responsesUsage(usage *antigravity.Usage) map[string]any {
 // responsesStreamWriter 把规范事件写成 Responses 流，输出项与非流式响应按同一顺序与内容累积
 type responsesStreamWriter struct {
 	w        http.ResponseWriter
+	mu       sync.Mutex
 	sequence int
+	status   string
 	id       string
 	created  int64
 	request  responsesRequest
 	output   *responsesOutput
 	open     []map[string]any
-	base     int
+	// compaction 为生成前写在 output 首位的 compaction 项
+	compaction map[string]any
 }
 
 // streamResponses 写出 response.created 与 response.in_progress 后流式输出生成结果
@@ -1442,14 +1640,14 @@ func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request
 	if err != nil {
 		return
 	}
-	writer := &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: &responsesOutput{id: id, request: request}}
+	writer := &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: newResponsesOutput(id, request)}
 	if err := writer.emit("response.created", map[string]any{"response": responseShell(id, created, "in_progress", request)}); err != nil {
 		return
 	}
 	if err := writer.emit("response.in_progress", map[string]any{"response": responseShell(id, created, "in_progress", request)}); err != nil {
 		return
 	}
-	stream.setFrame(writer.progressFrame())
+	stream.setPulse(writer.progress)
 	s.streamOutput(r.Context(), writer, prepared, events, compaction, func(err error) bool { return shouldWriteRequestError(r, err) })
 }
 
@@ -1457,7 +1655,7 @@ func (s *server) streamResponses(w http.ResponseWriter, r *http.Request, request
 func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter, prepared responsesPreparation, events <-chan antigravity.Event, compaction map[string]any, report func(error) bool) error {
 	id, created, request := writer.id, writer.created, writer.request
 	if compaction != nil {
-		writer.base = 1
+		writer.compaction = compaction
 		if err := writer.emit("response.output_item.added", map[string]any{"output_index": 0, "item": compaction}); err != nil {
 			return err
 		}
@@ -1467,7 +1665,7 @@ func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter
 	}
 	emit, release := writer.live, func() error { return nil }
 	if searchOnly(prepared.generate.Tools) {
-		emit, release = holdUntilGrounding(writer.live)
+		emit, release = holdUntilGrounding(writer.live, nil)
 	}
 	result, err := consumeEvents(ctx, events, emit)
 	if err != nil {
@@ -1492,24 +1690,35 @@ func (s *server) streamOutput(ctx context.Context, writer *responsesStreamWriter
 	return nil
 }
 
-// progressFrame 返回流静默时重发的 response.in_progress 帧，序号沿用开场事件，外壳不回显请求字段
-func (writer *responsesStreamWriter) progressFrame() string {
-	shell := responseShell(writer.id, writer.created, "in_progress", responsesRequest{Model: writer.request.Model})
-	data, _ := json.Marshal(map[string]any{"type": "response.in_progress", "sequence_number": 1, "response": shell})
-	return "event: response.in_progress\ndata: " + string(data) + "\n\n"
+// progress 在流静默时以下一个 sequence_number 写出最近一次的 response.queued 或 response.in_progress 状态事件，外壳不回显请求字段
+func (writer *responsesStreamWriter) progress() error {
+	writer.mu.Lock()
+	status := writer.status
+	writer.mu.Unlock()
+	return writer.emit("response."+status, map[string]any{"response": responseShell(writer.id, writer.created, status, responsesRequest{Model: writer.request.Model})})
 }
 
-// emit 以递增的 sequence_number 写出一个事件
+// emit 以递增的 sequence_number 写出一个事件，记下 response.queued 与 response.in_progress 对应的状态
 func (writer *responsesStreamWriter) emit(eventType string, payload map[string]any) error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	switch eventType {
+	case "response.queued", "response.in_progress":
+		writer.status = strings.TrimPrefix(eventType, "response.")
+	}
 	payload["type"] = eventType
 	payload["sequence_number"] = writer.sequence
 	writer.sequence++
-	return writeSSE(writer.w, eventType, payload)
+	return writeSSE(writer.w, eventType, officialOrder("responses", payload))
 }
 
 // index 返回输出项在响应 output 中的位置
 func (writer *responsesStreamWriter) index(item map[string]any) int {
-	return writer.base + slices.IndexFunc(writer.output.items, func(candidate map[string]any) bool { return candidate["id"] == item["id"] })
+	base := 0
+	if writer.compaction != nil {
+		base = 1
+	}
+	return base + slices.IndexFunc(writer.output.items, func(candidate map[string]any) bool { return candidate["id"] == item["id"] })
 }
 
 // live 写出一个事件：新输出项开始前先完成仍打开的项，带摘要的 reasoning 与 message 项保持打开到下一个输出项或结束，函数调用项与只带签名的 reasoning 项立即完成
@@ -1567,6 +1776,7 @@ func (writer *responsesStreamWriter) added(item map[string]any) error {
 		}
 		return writer.emit("response.output_item.done", map[string]any{"output_index": index, "item": item})
 	case item["type"] == "web_search_call":
+		item = responseIncludeView(item, writer.request.Include)
 		pending := map[string]any{"id": item["id"], "type": "web_search_call", "status": "in_progress", "action": item["action"]}
 		if err := writer.emit("response.output_item.added", map[string]any{"output_index": index, "item": pending}); err != nil {
 			return err
@@ -1686,15 +1896,18 @@ func (writer *responsesStreamWriter) terminal(response map[string]any) error {
 	if response["status"] == "incomplete" {
 		eventType = "response.incomplete"
 	}
-	return writer.emit(eventType, map[string]any{"response": response})
+	return writer.emit(eventType, map[string]any{"response": responseView(response, writer.request.Include)})
 }
 
-// failed 发送 response.failed：output 为已写出的输出项，error.code 取 Responses 错误枚举
+// failed 发送 response.failed：output 为已写出的 compaction 项与输出项，error.code 取 Responses 错误枚举
 func (writer *responsesStreamWriter) failed(err error) error {
 	response := responseShell(writer.id, writer.created, "failed", writer.request)
-	output := make([]any, 0, len(writer.output.items))
+	output := make([]any, 0, 1+len(writer.output.items))
+	if writer.compaction != nil {
+		output = append(output, writer.compaction)
+	}
 	for _, item := range writer.output.items {
-		output = append(output, item)
+		output = append(output, responseIncludeView(item, writer.request.Include))
 	}
 	response["output"] = output
 	response["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}

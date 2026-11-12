@@ -21,6 +21,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@server-messages': fileURLToPath(new URL('../internal/i18n/messages', import.meta.url)),
     },
   },
   build: {

@@ -27,4 +27,12 @@ export interface UpdateStatus {
   checked_at?: string
   error?: string
   updating: boolean
+  progress?: UpdateProgress
+}
+
+// UpdateProgress 是在线更新的阶段与发行包的已下载和总字节数，总字节数未知时为 0
+export interface UpdateProgress {
+  stage: 'download' | 'verify' | 'install' | 'restart'
+  downloaded: number
+  total: number
 }

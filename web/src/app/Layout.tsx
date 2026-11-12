@@ -3,7 +3,6 @@ import { Navigate, Outlet, useLocation } from 'react-router'
 import { useAdminEvents, useConnection } from '@/app/events'
 import { Header } from '@/app/Header'
 import { ListenNotice } from '@/app/ListenNotice'
-import { appMessages } from '@/app/messages'
 import { useRememberLocation } from '@/app/remember'
 import { Loading } from '@/components/ui/states'
 import { useSession } from '@/features/service/queries'
@@ -11,7 +10,7 @@ import { useMessages } from '@/lib/i18n'
 
 // Layout 是登录后的外壳：顶栏与居中的页面内容，内容区单独滚动并至少占满可视高度
 export function Layout() {
-  const m = useMessages(appMessages)
+  const m = useMessages('app')
   const location = useLocation()
   const session = useSession()
   const authenticated = session.data?.authenticated === true

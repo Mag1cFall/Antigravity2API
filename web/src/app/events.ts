@@ -9,7 +9,7 @@ import type { RequestRecord } from '@/features/requests/types'
 import type { Status } from '@/features/service/types'
 import { api } from '@/lib/api'
 
-// logsKey 保存事件流推送的服务日志，最多 2000 条
+// logsKey 保存事件流推送的服务日志，最多 2000 条，写入时不做结构共享，没有页面订阅时也保留
 export const logsKey = ['logs'] as const
 
 // runningKey 保存事件流推送的进行中请求

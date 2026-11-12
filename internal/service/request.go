@@ -45,7 +45,8 @@ func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel
 		return request, nil, err
 	}
 	out := &output{hide: request.Config.HideThinking, limit: request.Config.MaxOutputTokens, stop: newStopMatcher(request.Config.StopSequences), provider: model.ModelProvider, signed: newSignatureRecord()}
-	if request, out.tools, err = prepareTools(request); err != nil {
+	request, out.names = renameFunctions(request, model.ModelProvider == antigravity.ProviderAnthropic)
+	if request, out.tools, err = prepareTools(request, out.names); err != nil {
 		return request, nil, err
 	}
 	out.noFunctions = len(request.Tools.Functions) == 0
@@ -53,7 +54,6 @@ func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel
 		return request, nil, err
 	}
 	request, out.search = prepareSearch(request)
-	request, out.names = renameFunctions(request, model.ModelProvider == antigravity.ProviderAnthropic)
 	return request, out, nil
 }
 
@@ -98,30 +98,80 @@ func cloneContents(contents []antigravity.Content) []antigravity.Content {
 	return cloned
 }
 
-// restoreSignatures 去掉会话中记为其他模型族生成的签名，去掉后为空的 part 一并删除，再为客户端未回传签名的函数调用补回会话保存的签名
+// restoreSignatures 去掉会话中记为其他模型族生成的签名与占位签名，去掉后为空的 part 一并删除，再为客户端未回传签名的函数调用（按调用 ID）与没有签名的 assistant 轮补回会话保存的签名
 func restoreSignatures(contents []antigravity.Content, signed signatureRecord, provider string) []antigravity.Content {
 	for index := range contents {
 		parts := contents[index].Parts[:0]
 		for _, part := range contents[index].Parts {
-			if signed.foreign(part.ThoughtSignature, provider) {
+			if signed.foreign(part.ThoughtSignature, provider) || sentinelSignatures[part.ThoughtSignature] {
 				part.ThoughtSignature = ""
 				if part.Text == "" && part.InlineData == nil && part.File == nil && part.FunctionCall == nil && part.FunctionResult == nil {
 					continue
 				}
 			}
 			if call := part.FunctionCall; call != nil {
-				if signed.foreign(call.ThoughtSignature, provider) {
+				if signed.foreign(call.ThoughtSignature, provider) || sentinelSignatures[call.ThoughtSignature] {
 					call.ThoughtSignature = ""
 				}
-				if restored := signed.calls[call.ID]; call.ThoughtSignature == "" && part.ThoughtSignature == "" && !signed.foreign(restored, provider) {
+				if restored := callSignature(signed.calls, call.ID); call.ThoughtSignature == "" && part.ThoughtSignature == "" && !signed.foreign(restored, provider) {
 					call.ThoughtSignature = restored
 				}
 			}
 			parts = append(parts, part)
 		}
 		contents[index].Parts = parts
+		if contents[index].Role == antigravity.RoleAssistant && !signedContent(contents[index]) {
+			if restored := signed.calls[replySignatureKey(answerKey(parts))]; restored != "" && !signed.foreign(restored, provider) {
+				contents[index].Parts = signReply(parts, restored)
+			}
+		}
 	}
 	return contents
+}
+
+// sentinelSignatures 为 Gemini API 文档给出的跳过签名校验的占位签名，上游现场的签名不含这些值
+var sentinelSignatures = map[string]bool{"skip_thought_signature_validator": true, "context_engineering_is_the_way_to_go": true}
+
+// callSignature 返回函数调用 ID 的会话签名，没有同 ID 的记录时取只含字母与数字部分相同的 ID 的签名
+func callSignature(calls map[string]string, id string) string {
+	if signature, ok := calls[id]; ok || id == "" {
+		return signature
+	}
+	key := alphanumeric(id)
+	for saved, signature := range calls {
+		if alphanumeric(saved) == key {
+			return signature
+		}
+	}
+	return ""
+}
+
+// alphanumeric 返回字符串中的字母与数字
+func alphanumeric(text string) string {
+	return strings.Map(func(char rune) rune {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' {
+			return char
+		}
+		return -1
+	}, text)
+}
+
+// signedContent 判断消息中是否有带签名的 part 或函数调用
+func signedContent(content antigravity.Content) bool {
+	return slices.ContainsFunc(content.Parts, func(part antigravity.Part) bool {
+		return part.ThoughtSignature != "" || part.FunctionCall != nil && part.FunctionCall.ThoughtSignature != ""
+	})
+}
+
+// signReply 把回答正文的签名放到最后一个正文 part 上
+func signReply(parts []antigravity.Part, signature string) []antigravity.Part {
+	for index := len(parts) - 1; index >= 0; index-- {
+		if parts[index].Text != "" && !parts[index].Thought {
+			parts[index].ThoughtSignature = signature
+			break
+		}
+	}
+	return parts
 }
 
 // normalizeTurns 把末尾连续 assistant 轮改写为系统指令中的续写前缀，GPT-OSS 接受以 model 轮结尾时原样发送；没有对话内容时以客户端系统提示作为 user 轮
@@ -175,8 +225,8 @@ func joinInstruction(system, instruction string) string {
 	return system + "\n" + instruction
 }
 
-// prepareTools 按工具选择改写声明：none 不声明工具，指定函数与 allowed_tools 只声明所选函数，required 与单调用写入系统指令，strict 函数与 validated 模式在输出中校验参数；返回需要在输出中核对的约定
-func prepareTools(request antigravity.GenerateRequest) (antigravity.GenerateRequest, *toolContract, error) {
+// prepareTools 按工具选择改写已改名的声明：none 不声明工具，指定函数与 allowed_tools 只声明所选函数，required 与单调用以上游函数名写入系统指令，strict 函数与 validated 模式在输出中校验参数；original 为上游名到原名的映射，返回需要在输出中按原名核对的约定
+func prepareTools(request antigravity.GenerateRequest, original map[string]string) (antigravity.GenerateRequest, *toolContract, error) {
 	config := request.Tools.ToolConfig
 	if config.Mode == "none" {
 		request.Tools.Functions, request.Tools.GoogleSearch = nil, nil
@@ -185,10 +235,11 @@ func prepareTools(request antigravity.GenerateRequest) (antigravity.GenerateRequ
 	contract := &toolContract{required: config.Mode == "required", names: map[string]bool{}, schemas: map[string]*schemaValidator{}}
 	functions := make([]antigravity.FunctionDeclaration, 0, len(request.Tools.Functions))
 	for _, declaration := range request.Tools.Functions {
-		if len(config.AllowedFunctionNames) > 0 && !slices.Contains(config.AllowedFunctionNames, declaration.Name) {
+		name := cmp.Or(original[declaration.Name], declaration.Name)
+		if len(config.AllowedFunctionNames) > 0 && !slices.Contains(config.AllowedFunctionNames, name) {
 			continue
 		}
-		contract.names[declaration.Name] = true
+		contract.names[name] = true
 		functions = append(functions, declaration)
 		if !declaration.Strict && config.Mode != "validated" {
 			continue
@@ -199,9 +250,9 @@ func prepareTools(request antigravity.GenerateRequest) (antigravity.GenerateRequ
 		}
 		validator, err := compileSchema(schema)
 		if err != nil {
-			return request, nil, &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("function %q parameters: %v", declaration.Name, err)}
+			return request, nil, &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("function %q parameters: %v", name, err)}
 		}
-		contract.schemas[declaration.Name] = validator
+		contract.schemas[name] = validator
 	}
 	for _, name := range config.AllowedFunctionNames {
 		if !contract.names[name] {

@@ -1,5 +1,5 @@
-// Locale 是界面语言对应的 Intl 区域
-export type Locale = 'zh-CN' | 'zh-TW' | 'en'
+// Locale 是界面语言，同时是 Intl 区域
+export type Locale = 'zh-CN' | 'zh-TW' | 'en' | 'ja' | 'ko' | 'fr' | 'de'
 
 // formatters 缓存按区域与选项创建的 Intl 格式化器
 const formatters = new Map<string, Intl.NumberFormat | Intl.DateTimeFormat>()

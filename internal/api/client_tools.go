@@ -30,6 +30,40 @@ var clientToolDeclarations = map[string]antigravity.FunctionDeclaration{
 	},
 }
 
+// computerAction 是 computer_call 单个动作的参数 Schema
+const computerAction = `{"type":"object","properties":{"type":{"type":"string","enum":["click","double_click","drag","keypress","move","screenshot","scroll","type","wait"]},"button":{"type":"string","enum":["left","right","wheel","back","forward"]},"x":{"type":"integer"},"y":{"type":"integer"},"path":{"type":"array","items":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}},"keys":{"type":"array","items":{"type":"string"}},"scroll_x":{"type":"integer"},"scroll_y":{"type":"integer"},"text":{"type":"string"}},"required":["type"]}`
+
+// computerToolDeclaration 把 computer_use_preview 与 computer 工具声明为名为 computer 的函数：前者参数为单个动作并在描述中写屏幕尺寸与环境，后者参数为按顺序执行的动作列表
+func computerToolDeclaration(tool responsesTool) antigravity.FunctionDeclaration {
+	description := "Controls the user's computer with the mouse and keyboard. screenshot captures the screen, click presses button at x and y, double_click double-clicks at x and y, drag holds the left button along path, keypress presses keys together, move moves the mouse to x and y, scroll scrolls by scroll_x and scroll_y at x and y, type types text, wait pauses briefly."
+	if tool.Type == "computer_use_preview" {
+		var environment string
+		_ = json.Unmarshal(tool.Environment, &environment)
+		description = fmt.Sprintf("The %s screen is %dx%d pixels; x and y are pixel positions from the top-left corner. ", environment, tool.DisplayWidth, tool.DisplayHeight) + description
+		return antigravity.FunctionDeclaration{Name: "computer", Description: description, Parameters: json.RawMessage(computerAction)}
+	}
+	return antigravity.FunctionDeclaration{Name: "computer", Description: description + " The actions run in order.", Parameters: json.RawMessage(`{"type":"object","properties":{"actions":{"type":"array","items":` + computerAction + `}},"required":["actions"]}`)}
+}
+
+// shellSkills 把 shell 工具本地环境中的 skills 名称、路径与说明写入函数说明
+func shellSkills(declaration antigravity.FunctionDeclaration, environment json.RawMessage) antigravity.FunctionDeclaration {
+	var local struct {
+		Skills []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Path        string `json:"path"`
+		} `json:"skills"`
+	}
+	if json.Unmarshal(environment, &local) != nil || len(local.Skills) == 0 {
+		return declaration
+	}
+	declaration.Description += "\n\nSkills available in the local environment:"
+	for _, skill := range local.Skills {
+		declaration.Description += fmt.Sprintf("\n- %s (%s): %s", skill.Name, skill.Path, skill.Description)
+	}
+	return declaration
+}
+
 // customToolDeclaration 将 custom 工具声明为只接收字符串 input 的函数，语法格式写入描述
 func customToolDeclaration(name string, description string, format json.RawMessage) antigravity.FunctionDeclaration {
 	var spec struct {
@@ -96,9 +130,13 @@ func responsesToolKind(tools []responsesTool, name string) string {
 			if tool.Type == name {
 				return tool.Type
 			}
+		case "computer_use_preview", "computer":
+			if name == "computer" {
+				return tool.Type
+			}
 		case "namespace":
 			for _, inner := range tool.Tools {
-				if inner.Type == "custom" && tool.Name+"."+inner.Name == name {
+				if inner.Type == "custom" && namespacedName(tool.Name, inner.Name) == name {
 					return "custom"
 				}
 			}

@@ -229,12 +229,19 @@ func writeOpenAIError(w http.ResponseWriter, status int, code string, message st
 
 // openAIErrorBody 返回 OpenAI 错误体
 func openAIErrorBody(status int, code string, message string) map[string]any {
-	return map[string]any{"error": map[string]any{
-		"message": publicErrorMessage(status, message),
-		"type":    openAIErrorType(status, code),
-		"param":   nil,
-		"code":    code,
+	return map[string]any{"error": openAIError{
+		Message: publicErrorMessage(status, message),
+		Type:    openAIErrorType(status, code),
+		Code:    code,
 	}}
+}
+
+// openAIError 是 OpenAI 错误体的 error 成员，字段按官方顺序排列
+type openAIError struct {
+	Message string  `json:"message"`
+	Type    string  `json:"type"`
+	Param   *string `json:"param"`
+	Code    string  `json:"code"`
 }
 
 // writeOpenAIStreamError 在流已开始后把请求错误以 OpenAI 错误体写为一个 SSE 事件，客户端已断开时不写
@@ -274,7 +281,7 @@ func writeGeminiRequestError(w http.ResponseWriter, err error) {
 	if seconds := setRetryAfter(w, err); seconds > 0 {
 		payload["details"] = []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": strconv.FormatInt(seconds, 10) + "s"}}
 	}
-	writeJSON(w, status, map[string]any{"error": payload})
+	writeJSON(w, status, officialOrder("gemini", map[string]any{"error": payload}))
 }
 
 // setRetryAfter 在错误给出可重试时刻时写入 Retry-After 秒数并返回它，否则返回 0
@@ -296,22 +303,28 @@ func setRetryAfter(w http.ResponseWriter, err error) int64 {
 // writeAnthropicError 写出 Anthropic 错误响应
 func writeAnthropicError(w http.ResponseWriter, status int, errorType string, message string) {
 	message = publicErrorMessage(status, message)
-	writeJSON(w, status, map[string]any{
-		"type": "error",
-		"error": map[string]string{
-			"type":    errorType,
-			"message": message,
-		},
-	})
+	writeJSON(w, status, anthropicErrorResponse{Type: "error", Error: anthropicErrorBody{Type: errorType, Message: message}})
+}
+
+// anthropicErrorResponse 是 Anthropic 错误响应，字段按官方顺序排列
+type anthropicErrorResponse struct {
+	Type  string             `json:"type"`
+	Error anthropicErrorBody `json:"error"`
+}
+
+// anthropicErrorBody 是 Anthropic 错误响应的 error 成员
+type anthropicErrorBody struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 // writeGeminiError 写出 Gemini 错误响应
 func writeGeminiError(w http.ResponseWriter, status int, statusName string, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{
+	writeJSON(w, status, officialOrder("gemini", map[string]any{"error": map[string]any{
 		"code":    status,
 		"message": message,
 		"status":  statusName,
-	}})
+	}}))
 }
 
 // openAIErrorCode 返回错误对应的 OpenAI 错误码
@@ -321,10 +334,6 @@ func openAIErrorCode(err error) string {
 	}
 	if contextOverflow(err) {
 		return "context_length_exceeded"
-	}
-	var blocked *antigravity.PromptBlockedError
-	if errors.As(err, &blocked) {
-		return "invalid_prompt"
 	}
 	switch statusFromError(err) {
 	case http.StatusNotFound:

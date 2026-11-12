@@ -20,6 +20,15 @@ type backgroundRun struct {
 	done   chan struct{}
 }
 
+// stopBackground 终止进行中的后台响应并等待它保存结束状态
+func (s *server) stopBackground(id string) {
+	if value, running := s.background.Load(id); running {
+		run := value.(backgroundRun)
+		run.cancel()
+		<-run.done
+	}
+}
+
 // respondBackground 保存并返回 queued 状态的响应对象，随后在本请求内完成生成：响应带 Content-Length 与 Connection: close 使客户端立即收到完整响应，生成开始后保存为 in_progress，结束后保存最终对象，被 cancel 接口终止时保存为 cancelled
 func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, request responsesRequest, prepared responsesPreparation, id string) {
 	ctx, cancel := context.WithCancel(r.Context())
@@ -33,7 +42,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 	created := time.Now().Unix()
 	queued := responseShell(id, created, "queued", request)
 	s.storeResponse(id, request, prepared, generationResult{}, queued)
-	body, _ := json.Marshal(queued)
+	body, _ := json.Marshal(officialOrder("responses", queued))
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.Header().Set("Connection", "close")
@@ -41,6 +50,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 	_ = http.NewResponseController(w).Flush()
 
 	compaction, err := s.compactOverThreshold(r.WithContext(ctx), &request, &prepared, id)
+	prepared.generate.Background = true
 	var events <-chan antigravity.Event
 	if err == nil {
 		events, err = s.generateResponses(ctx, request, &prepared)
@@ -48,7 +58,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 	var result generationResult
 	if err == nil {
 		s.storeResponse(id, request, prepared, generationResult{}, responseShell(id, created, "in_progress", request))
-		result, err = consumeEvents(ctx, s.hostedImages(ctx, request.Tools, prepared.generate.Session, prepared.generate.Contents, events), nil)
+		result, err = consumeEvents(ctx, s.hostedImages(ctx, request.allTools(), prepared.generate.Session, prepared.generate.Contents, events), nil)
 	}
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
@@ -87,19 +97,21 @@ func (s *server) streamBackground(w http.ResponseWriter, r *http.Request, reques
 	created := time.Now().Unix()
 	queued := responseShell(id, created, "queued", request)
 	s.storeResponse(id, request, prepared, generationResult{}, queued)
-	writer := &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: &responsesOutput{id: id, request: request}}
+	writer := &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: newResponsesOutput(id, request)}
 	_ = writer.emit("response.created", map[string]any{"response": queued})
 	_ = writer.emit("response.queued", map[string]any{"response": queued})
+	stream.setPulse(writer.progress)
 
 	compaction, err := s.compactOverThreshold(r.WithContext(ctx), &request, &prepared, id)
 	prepared.stream = stream
+	prepared.generate.Background = true
 	var events <-chan antigravity.Event
 	if err == nil {
 		events, err = s.generateResponses(ctx, request, &prepared)
 	}
 	reported := func(error) bool { return !errors.Is(ctx.Err(), context.Canceled) }
 	if err == nil {
-		events = s.hostedImages(ctx, request.Tools, prepared.generate.Session, prepared.generate.Contents, events)
+		events = s.hostedImages(ctx, request.allTools(), prepared.generate.Session, prepared.generate.Contents, events)
 		inProgress := responseShell(id, created, "in_progress", request)
 		s.storeResponse(id, request, prepared, generationResult{}, inProgress)
 		_ = writer.emit("response.in_progress", map[string]any{"response": inProgress})
@@ -118,13 +130,14 @@ func (s *server) streamBackground(w http.ResponseWriter, r *http.Request, reques
 	}
 }
 
-// streamLog 是后台流式响应写出的事件帧，下标即 sequence_number；作为 http.ResponseWriter 接收写出器的帧，心跳注释帧不记录
+// streamLog 是后台流式响应写出的事件帧，下标即 sequence_number；作为 http.ResponseWriter 接收写出器的帧，心跳注释帧不记录；pulse 让写出器以新序号记录一个状态事件
 type streamLog struct {
 	header http.Header
 	mu     sync.Mutex
 	frames [][]byte
 	done   bool
 	wake   chan struct{}
+	pulse  func() error
 }
 
 // newStreamLog 返回空的事件记录
@@ -154,6 +167,13 @@ func (l *streamLog) Write(frame []byte) (int, error) {
 	return len(frame), nil
 }
 
+// setPulse 设置跟随者静默满心跳间隔时调用的 pulse
+func (l *streamLog) setPulse(pulse func() error) {
+	l.mu.Lock()
+	l.pulse = pulse
+	l.mu.Unlock()
+}
+
 // finish 标记事件已全部写出并唤醒跟随者
 func (l *streamLog) finish() {
 	l.mu.Lock()
@@ -165,7 +185,7 @@ func (l *streamLog) finish() {
 	l.mu.Unlock()
 }
 
-// follow 把序号 after 之后的事件帧写给客户端并跟随到事件写完、客户端断开或写出失败，等待新事件时按心跳间隔写心跳帧
+// follow 把序号 after 之后的事件帧写给客户端并跟随到事件写完、客户端断开或写出失败，等待新事件时按心跳间隔调用 heartbeat
 func (l *streamLog) follow(ctx context.Context, w http.ResponseWriter, after int) error {
 	next := max(after+1, 0)
 	heartbeat := time.NewTimer(streamHeartbeatInterval)
@@ -201,21 +221,13 @@ func (l *streamLog) follow(ctx context.Context, w http.ResponseWriter, after int
 	}
 }
 
-// heartbeat 写出一个心跳帧：重发开场事件中最近的 response.queued 或 response.in_progress 帧，还没有时写 SSE 注释
+// heartbeat 调用 pulse 记录一个新的状态事件，由跟随循环写给客户端；没有 pulse 时给该跟随者写 SSE 注释
 func (l *streamLog) heartbeat(w http.ResponseWriter) error {
 	l.mu.Lock()
-	var status []byte
-	for _, frame := range l.frames[:min(len(l.frames), 3)] {
-		if bytes.HasPrefix(frame, []byte("event: response.queued")) || bytes.HasPrefix(frame, []byte("event: response.in_progress")) {
-			status = frame
-		}
-	}
+	pulse := l.pulse
 	l.mu.Unlock()
-	if status == nil {
+	if pulse == nil {
 		return writeSSEHeartbeat(w)
 	}
-	if _, err := w.Write(status); err != nil {
-		return err
-	}
-	return http.NewResponseController(w).Flush()
+	return pulse()
 }

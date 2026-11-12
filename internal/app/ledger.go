@@ -25,6 +25,9 @@ const stallThreshold = 15 * time.Second
 // progressInterval 是等待超过 stallThreshold 后重复写进度日志的间隔
 const progressInterval = 30 * time.Second
 
+// accountHeader 是公开请求指定处理账户的请求头，值为账户 ID
+const accountHeader = "X-Antigravity-Account-Id"
+
 // activeKey 是 activeRequest 在 context 中的键
 type activeKey struct{}
 
@@ -38,7 +41,7 @@ type recordingService struct {
 func (service recordingService) Generate(ctx context.Context, request antigravity.GenerateRequest) (<-chan antigravity.Event, error) {
 	trace := requestdb.TraceFrom(ctx)
 	active := ctx.Value(activeKey{}).(*activeRequest)
-	request.Accounts = active.accounts
+	request.Accounts, request.AccountID = active.accounts, active.account
 	if trace.Begin(request.ID, request.Model) {
 		row := trace.Snapshot()
 		service.server.events.begin(row)
@@ -197,7 +200,7 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		}
 		ctx, cancel := context.WithCancelCause(base)
 		defer cancel(nil)
-		active := &activeRequest{trace: trace, cancel: cancel, accounts: cfg.APIKeyAccounts[key]}
+		active := &activeRequest{trace: trace, cancel: cancel, accounts: cfg.APIKeyAccounts[key], account: strings.TrimSpace(r.Header.Get(accountHeader))}
 		s.events.track(id, active)
 		capture := s.ledger.BodyCapture()
 		writer := &recordWriter{ResponseWriter: w, keep: capture}
@@ -274,7 +277,7 @@ func protocolOf(path string) string {
 	return "other"
 }
 
-// probe 从路径或请求体读取客户端是否请求流式、请求的模型与是否为 Responses 后台请求，后台请求的生成不随客户端断开而取消
+// probe 从路径或请求体读取客户端是否请求流式、请求的模型与是否为 Responses 或 Interactions 后台请求，后台请求的生成不随客户端断开而取消
 func probe(path string, body []byte) (stream bool, model string, background bool) {
 	if rest, ok := strings.CutPrefix(path, "/v1beta/models/"); ok {
 		model, action, _ := strings.Cut(rest, ":")
@@ -286,7 +289,7 @@ func probe(path string, body []byte) (stream bool, model string, background bool
 		Background bool   `json:"background"`
 	}
 	json.Unmarshal(body, &request)
-	return request.Stream, request.Model, path == "/v1/responses" && request.Background
+	return request.Stream, request.Model, (path == "/v1/responses" || strings.HasSuffix(path, "/interactions")) && request.Background
 }
 
 // errorMessage 返回错误响应体中 error.message 的文本，四个公开协议的错误体都有该字段

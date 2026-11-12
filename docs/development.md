@@ -7,7 +7,7 @@ Antigravity2API 是单个 Go 进程：公开协议适配、账户池、上游客
 | 场景 | 必需组件 |
 | --- | --- |
 | 运行 Release | 对应平台的可执行文件或安装包 |
-| 命令行版源码构建 | Go 1.26、Node.js 22.22+ 或 24+、pnpm 11.10 |
+| 命令行版源码构建 | Go 1.27、Node.js 22.22+ 或 24+、pnpm 11.10 |
 | 桌面版源码构建 | 另需 Wails v3 CLI `v3.0.0-beta.29`；macOS 与 Linux 需要 CGO |
 | Linux 桌面版 | `libgtk-3-dev`、`libwebkit2gtk-4.1-dev`，构建标签另加 `gtk3` |
 
@@ -55,7 +55,7 @@ pnpm run format:check
 | `release` | 只在推送标签时运行 | GitHub Release |
 | `docker` | 只在推送标签时运行 | `ghcr.io/mag1cfall/antigravity2api` |
 
-- 工具链：全部作业设 `GOTOOLCHAIN=local`。`web` 作业用 Node.js 22.23.3 与 `web/package.json` 的 `packageManager` 指定的 pnpm 11.10.0；`checks` 作业以 `go.mod` 的 Go 1.26.0 运行 `go test`、`go vet` 与构建；`headless`、`desktop-windows`、`desktop-macos`、`desktop-linux` 以最新稳定版 Go 构建；macOS 的最低系统版本经 `CGO_CPPFLAGS` 与 `CGO_LDFLAGS` 传入，cgo 保留默认的 `-O2 -g`
+- 工具链：全部作业设 `GOTOOLCHAIN=local`。`web` 作业用 Node.js 22.23.3 与 `web/package.json` 的 `packageManager` 指定的 pnpm 11.10.0；`checks` 作业以 `go.mod` 的 Go 1.27 运行 `go test`、`go vet` 与构建；`headless`、`desktop-windows`、`desktop-macos`、`desktop-linux` 以最新稳定版 Go 构建；macOS 的最低系统版本经 `CGO_CPPFLAGS` 与 `CGO_LDFLAGS` 传入，cgo 保留默认的 `-O2 -g`
 - 编译缓存：各 Go 作业以 `actions/cache` 按作业、Go 版本与 `go.sum` 恢复模块与编译缓存；`checks` 只在 `main` 上保存，各平台包的作业每次构建结束时保存，在 `main` 上手动触发的构建所保存的缓存可被之后的标签构建恢复
 - 包版本：标签构建为标签名，其余构建为提交号前 7 位，用于包名与可执行文件资源；资源与桌面包的数字版本去掉 `v` 与 `-` 之后的部分，非标签构建为 `0.0.0`。程序报告的版本取 Go 构建信息中的模块版本（见[在线更新](#在线更新)）
 - 命令行包：`linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`，`CGO_ENABLED=0`、`-trimpath -ldflags='-s -w'`，tar.gz 中只有 `antigravity2api`
@@ -148,6 +148,7 @@ api 层的公开接口规则：
 - 请求体上限 716876456 字节（512 MiB 文件的 base64 长度加 1 MiB），超出时读取请求体失败，返回 400
 - 浏览器来源：`API_KEYS` 为空时，`Origin` 为 `null`、无法解析，或为 `http`、`https` 且主机不是 localhost 与回环地址的请求按 API key 不匹配处理；配置了 key 时不检查来源
 - API key：依次取 `X-Goog-API-Key`、`X-API-Key`、`Authorization: Bearer`、`?key=`，任一项与配置的某个 key 相同即通过，记录与用量按该 key 统计；`API_KEY_ACCOUNTS` 为该 key 绑定了账户时，请求只调度所绑账户；都不匹配时返回所属协议的认证错误
+- 指定账户：`X-Antigravity-Account-Id` 请求头的值为账户 ID，请求只在该账户上选号、不换到其他账户；账户不在账户库中返回 400，`API_KEY_ACCOUNTS` 为该 key 绑定了账户且不含它时返回 403，账户未就绪时返回带原因的 503，冷却中返回 429 与恢复时刻
 - 认证错误的协议：路径以 `/v1beta/`、`/upload/` 或 `/v1/interactions` 开头为 Gemini（带 key 为 400 `INVALID_ARGUMENT`，不带 key 为 403 `PERMISSION_DENIED`），路径以 `/v1/messages` 开头或带 `anthropic-version` 头为 Anthropic 401 `authentication_error`，其余为 OpenAI 401 `invalid_api_key`；错误体见协议参考“错误映射”
 - 未知路径：`/v1/`、`/v1beta/`、`/upload/` 下的请求先经过上面的检查，再由 Go `ServeMux` 匹配端点；没有匹配的端点时（路径不存在，或路径存在而方法不同，如 `GET /v1/chat/completions`）以所属协议的错误体返回 404（见协议文档“API 投影”的错误映射）；任一路径的 `OPTIONS` 都返回 204
 - 客户端 IP：取直连地址
@@ -178,14 +179,14 @@ api 层的公开接口规则：
 | 单引号值 | 原文 |
 | 双引号值 | 按 Go 字符串字面量解码 |
 | 裸值 | 去掉 ` #` 之后的行尾注释 |
-| 列表项（`API_KEYS`、`API_KEY_ACCOUNTS`、`PROXY`、`PREFER_LOWER_TIER_MODELS`、`MODEL_MAPPING`） | 按逗号切分，见表下 |
+| 列表项（`API_KEYS`、`API_KEY_ACCOUNTS`、`PROXY`、`PREFER_LOWER_TIER_MODELS`、`FIRST_EVENT_HEDGE_MODELS`、`MODEL_MAPPING`） | 按逗号切分，见表下 |
 | `SYSTEM_PROMPT_TEMPLATE`、`SYSTEM_PROMPT_USER_TEMPLATE` | 解码后的原文，首尾空白与换行保留 |
 | `MODEL_MAPPING` | 每项以最后一个 `:` 分成别名与模型 ID，两边各去掉首尾空白 |
 | `API_KEY_ACCOUNTS` | 每项以最后一个 `:` 分成 API key 与账户，账户以 `\|` 分隔、去重 |
 | `REQUEST_TIMEOUT`、`QUOTA_REFRESH_INTERVAL` | Go 时长，例如 `30s`、`5m`；`QUOTA_REFRESH_INTERVAL` 另接受 `0` |
 | 布尔项（`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`WEEKLY_QUOTA_WARMUP`、`LOG_FILE`、`REQUEST_LOG_BODIES`、`ADMIN_AUTH_ENABLED`） | Go `strconv.ParseBool`，见表下 |
 | 整数项（`ACCOUNT_CONCURRENCY`、`QUOTA_RESERVE_PERCENT`、`LOG_MAX_TOTAL_MB`） | 十进制整数，其他值报错 |
-| `MEDIA_OUTPUT`、`LOG_LEVEL`、`LOG_FORMAT` | 去掉首尾空白后转小写 |
+| `MEDIA_OUTPUT`、`FIRST_EVENT_HEDGE`、`LOG_LEVEL`、`LOG_FORMAT` | 去掉首尾空白后转小写 |
 | 其他文本项 | 去掉首尾空白，大小写敏感 |
 
 - 列表项每项去掉首尾空白，空项忽略；`PROXY` 保存为去掉首尾空白的原文，使用时切分
@@ -208,6 +209,7 @@ api 层的公开接口规则：
 | `ACCOUNT_CONCURRENCY` | 正整数，没有上限 |
 | `ROUTING_STRATEGY` | `round-robin`、`fill-first` |
 | `REQUEST_TIMEOUT` | 正数时长 |
+| `FIRST_EVENT_HEDGE` | `off`、`auto` 或正整数秒 |
 | `QUOTA_REFRESH_INTERVAL` | 0 或不小于 `1m` |
 | `QUOTA_RESERVE_PERCENT` | 0 到 99 |
 | `LOG_LEVEL` | `debug`、`info`、`warn`、`error` |
@@ -372,7 +374,6 @@ api 层的公开接口规则：
 | `warmups.json` | 各账户各每周额度桶最近一次唤醒的时间 |
 | `cooldowns.json` | 各账户未到期的冷却，服务重启后恢复 |
 | `.updaterId` | 版本检查使用的更新器标识 |
-| `webview/` | 桌面版 WebView 数据 |
 
 运行目录中的 JSON 文件：
 
@@ -543,6 +544,7 @@ api 层的公开接口规则：
 - 已初始化的账户经自己的上游客户端读取，其余账户（含停用账户）以保存的 token、设备档案与代理读取；除首次成功生成后的那次外，每次读取先发 `loadCodeAssist`（端点见协议参考“`retrieveUserQuotaSummary` 的发送时机”），读到的状态按“初始化”一节写回
 - 同时最多读取 5 个账户，与账户池刷新依次进行
 - 每个账户保留最近一次读到的额度摘要及读取时间：刷新账户池时，还没有读取的账户取请求账本中 7 天内最近一次额度快照；冷启动初始化不读额度，沿用最近一次读取；账户出错或移出调度后保留
+- 账户状态中重置时刻已过的额度桶显示为剩余 100%、不带重置时刻，直到下一次读取
 
 周额度唤醒在 `WEEKLY_QUOTA_WARMUP` 开启时、每次定时读取额度之后执行，对满足下表全部条件的账户与额度桶各发一次请求：
 
@@ -632,7 +634,7 @@ api 层的公开接口规则：
 | 模型不存在 | 404 | `模型 <名称> 不在账户目录中` |
 | 周额度唤醒的账户不在账户池 | 503 | `账户 <账户> 未就绪 <原因>` |
 
-- 账户池为空时，首行之后每行一个 `<账户>: <原因>`，只列出有原因的账户（含因违反条款停用的账户），尚未完成初始化的账户不在其中，按行的字典序排列
+- 账户池为空时，首行之后按账户添加顺序每行一个 `<账户>: <原因>`，列出账户库中的全部账户：有失败原因的写原因（含因违反条款停用的账户），其余停用的账户写 `已停用`，尚未完成初始化的写 `初始化中`
 - 模型只在未就绪账户的目录中时，首行之后每行一个 `<账户>: <原因>`，列出目录含该模型的已启用未就绪账户，按添加时间排列，没有原因时写 `初始化中`
 
 图像、语音转写与 Tab 补全请求按同样的步骤选择账户，“目录中有该模型”指账户的公开目录（含 `imageGenerationModelIds`、`audioTranscriptionModelIds` 的条目与 Tab 补全条目）中有该 ID；Tab 补全不按会话粘连。
@@ -649,7 +651,8 @@ api 层的公开接口规则：
 - 结束：失败不换账户、达到换号上限或候选用尽时返回最近一次失败（候选用尽见“选择账户”第 3 步），超过 `REQUEST_TIMEOUT` 时返回 504
 - 流中错误：上游流以错误中断时，流式请求在客户端收到首个事件前、非流式请求在生成结束前（非流式请求的事件在生成结束后才写出）同样按原因换账户重新生成
 - 已写出事件：客户端已收到事件后的错误只处理账户，不换号
-- 重新生成：客户端还没有收到正文、函数调用与媒体时，流中断（没有 finishReason 或连接意外结束）、流尾 5xx，以及以 `MALFORMED_FUNCTION_CALL`、`UNEXPECTED_TOOL_CALL` 或没有内容的 `STOP` 结束的尝试最多重新生成 3 次，可再用同一账户，5xx 不冷却账户，网络错误照常请求代理检测；尝试结束前用量与结束事件暂存，错误在尝试结束后写出，已写出的思考保留
+- 备用请求：模型在 `FIRST_EVENT_HEDGE_MODELS` 中（按目录 ID 或族 ID 匹配）且 `FIRST_EVENT_HEDGE` 不为 `off` 时，原请求从发出起等待首个上游事件达到阈值后，为该请求发起一个备用请求，后台 Responses（`background: true`）不发起：正整数为固定秒数；`auto` 取该目录模型 24 小时内最近 200 个原请求首字等待的 p95，样本少于 20 个时、或请求的上游正文字节数超过这些样本正文字节数的 p95 时不发起。原请求的样本为发出到首个上游事件的时长，被备用请求取代的原请求按已等时长计入，备用请求不计入；服务启动时从请求账本补入 24 小时内的样本（被取代的原请求取其已等时长，其余取首字耗时减排队；正文字节数取账本尝试的 `request_bytes`）。备用请求不等待槽位：先用请求可用、尚未尝试且没有进行中请求的其他账户，没有时用原账户的空闲槽位，都没有时每秒再试；同时进行的备用请求最多 4 个；每个请求最多发起一次，计入换号上限，不改变会话粘连。先返回首个上游事件的一方继续，另一方取消上游请求并归还槽位；一方在流开始前失败时按下表处理该账户，继续等待另一方，两方都失败时按后失败的一方换号。账本 `attempts` 以 `hedge` 标记备用请求，以 `superseded` 标记被取代的一方
+- 重新生成：客户端还没有收到正文、函数调用与媒体时，流中断（没有 finishReason、连接意外结束或被重置、HTTP/2 流被重置、TLS 记录错误等读取错误）、流尾 5xx，以及以 `MALFORMED_FUNCTION_CALL`、`UNEXPECTED_TOOL_CALL` 或没有内容的 `STOP` 结束的尝试最多重新生成 3 次，可再用同一账户，5xx 不冷却账户，网络错误照常请求代理检测；尝试结束前用量与结束事件暂存，错误在尝试结束后写出，已写出的思考保留；被丢弃的尝试中上游已给出的用量写入该尝试的 `usage` 并计入记录的用量
 
 | 失败 | 判定 | 账户处理 | 换账户 |
 | --- | --- | --- | --- |
@@ -662,18 +665,21 @@ api 层的公开接口规则：
 | 容量不足 | `MODEL_CAPACITY_EXHAUSTED` | 不冷却 | 是 |
 | 请求内容 | 429，没有 ErrorInfo 与恢复时刻 | 不冷却 | 否 |
 | 限速 | 其他 429 | 该模型冷却到恢复时刻，没有时 1 分钟 | 是 |
-| 内部错误 | 500 `INTERNAL` | 该模型冷却 n 分钟，n 为连续次数 | 是 |
+| 内部错误 | 500 `INTERNAL` | 该模型冷却 n 分钟，n 为连续次数；该模型已在冷却时不计次 | 是 |
 | 连接错误 | 没有 Cloud Code 的 HTTP 错误响应 | 不冷却，请求检测代理池 | 是 |
 | 已下线模型 | 下线提示，见协议参考“已下线与不存在的模型 ID” | 不冷却 | 否，返回 404 |
-| 输入过滤 | 过滤提示，见协议参考“输入过滤” | 不冷却 | 否，返回 400 |
+| 客户端版本过低 | 首个事件为以 `This version of Antigravity is no longer supported.` 开头的正文 | 不冷却 | 否，返回 502 与提示原文 |
+| 内容策略 | 过滤提示与内容策略类结束原因，见协议参考“过滤提示与内容策略” | 不冷却 | 否，返回 502 |
 | 其他 | 其余上游错误 | 不冷却 | 否 |
 
 - 额度耗尽与 AI 积分不足：同一共享额度池的账户一起冷却，后台读取该账户额度；图像生成模型只冷却该账户的该模型；额度组的桶读到耗尽时，该组全部模型按额度摘要停用到桶重置
 - 连接错误：DNS、TCP、TLS 与代理失败，token 端点的 5xx 与 429，语音转写的 gRPC 错误；客户端未取消时才请求检测代理池。请求账本中这类尝试的状态码为 0，错误阶段为 `network`
 - 恢复时刻依次取 RetryInfo `retryDelay`、ErrorInfo `metadata.quotaResetDelay` 与 `quotaResetTimeStamp`；额度耗尽都没有时取目录 `quotaInfo.resetTime`，再没有时 1 分钟
-- 连续 INTERNAL 次数在该账户下一次成功生成后清零
+- 连续 INTERNAL 次数在该账户下一次成功生成后清零；同一账户上并发请求同时收到的 INTERNAL 只计一次
+- 冷却截止时刻按墙上时钟比较，系统睡眠期间冷却照常计时
 - 限速的恢复时刻在 5 秒内时，请求等到恢复时刻后再次使用该账户，同一请求在每个账户上只等一次，不计入 12 个账户的上限
-- 移出调度的原因显示在管理端；需要验证时正文中的 `validation_url` 作为验证链接
+- 初始化时 loadCodeAssist 给出 `ineligibleTiers` 且没有项目时，账户初始化失败，原因为各项 `reasonMessage` 与原文，`validationUrl` 作为验证链接
+- 移出调度的原因显示在管理端；需要验证时正文中的 `validation_url`、违反条款时的 `appeal_url` 作为链接
 - 图像、语音转写与 Tab 补全请求按同一张表处理失败；上游请求成功返回后流中出现的错误不换账户
 
 ### 共享额度池
@@ -710,6 +716,7 @@ api 层的公开接口规则：
 | `GET /api/update`、`POST /api/update` | 本程序的最新发行版本与在线更新，见第 6 节 |
 | `GET /api/proxies` | 代理池中每个代理的地址（密码替换为 `xxxxx`）、是否可用、检测时间、延迟、错误与绑定的账户 |
 | `POST /api/proxies/check` | 立即检测代理池，返回检测后的状态 |
+| `GET /api/paths` | 服务所在电脑上一个目录的子目录，设置页选择账户目录与运行数据目录时使用 |
 | `GET /api/accounts` | 全部账户 |
 | `PATCH /api/accounts/{id}` | 启用、停用，设置账户代理、优先级、备注名或 AI 积分超额使用 |
 | `DELETE /api/accounts/{id}` | 删除账户目录 |
@@ -739,6 +746,7 @@ api 层的公开接口规则：
 | `DELETE /api/logs` | 清空日志 |
 | `GET /api/prompt/templates` | 内置三档的模板与官方段原文 |
 | `POST /api/prompt/preview` | 系统提示档位的原文预览 |
+| `GET /api/first-event-latency` | 各模型近期原请求首字等待的 p95 |
 | `GET /api/settings` | `.env` 中保存的配置 |
 | `PATCH /api/settings` | 合并保存配置 |
 | `GET /api/events` | 管理事件流（SSE） |
@@ -751,9 +759,10 @@ api 层的公开接口规则：
 | `POST /api/session` | `{"username","password"}` | `{"enabled":true,"authenticated":true}` 并设置 Cookie | 400 `invalid_request`、`admin_auth_disabled`，401 `invalid_credentials`，429 `login_rate_limited` |
 | `DELETE /api/session` | — | 204 并清除 Cookie | — |
 | `GET /api/status` | — | `{"host","version","listen","reserved_listen","started_at","client_version","latest_version"}`，`listen` 为实际监听地址，`reserved_listen` 没有改用端口时为空串，`latest_version` 未读到时为空串 | — |
-| `GET /api/update` | — | `{"current","latest","available","mode","notes","url","published_at","checked_at","error","updating"}`，空值字段省略 | 502 `update_check_failed`，见“在线更新” |
+| `GET /api/update` | — | `{"current","latest","available","mode","notes","url","published_at","checked_at","error","updating","progress"}`，空值字段省略；`updating` 时 `progress` 为 `{"stage","downloaded","total"}`，`stage` 依次为 `download`、`verify`、`install`、`restart` | 502 `update_check_failed`，见“在线更新” |
 | `POST /api/update` | — | 202，同上 | 409 `update_conflict`，502 `update_failed` |
 | `GET /api/proxies`、`POST /api/proxies/check` | — | `{"proxies":[{"url","healthy","checked_at","latency_ms","error","accounts"}]}` | — |
+| `GET /api/paths` | `path`：目录，相对路径按工作目录解析，不存在时取最近的已存在上级目录，`roots` 列出文件系统根 | `{"path","parent","entries":[{"name","path"}]}`，只列不以点开头的子目录，`parent` 在根目录时为 `roots` | 400 `invalid_request` |
 | `GET /api/accounts` | — | `{"accounts":[账户]}` | — |
 | `PATCH /api/accounts/{id}` | 见下方 | 账户 | 400 `invalid_request`、`invalid_proxy`，404 `account_not_found`，500 `account_update_failed` |
 | `DELETE /api/accounts/{id}` | — | 204 | 404 `account_not_found`，500 `account_delete_failed` |
@@ -775,6 +784,7 @@ api 层的公开接口规则：
 | `GET /api/requests` | — | `{"requests":[请求记录]}`，按开始时间升序 | — |
 | `POST /api/requests/{id}/cancel` | — | 204 | 404 `request_not_found` |
 | `DELETE /api/logs` | — | 204 | 500 `logs_clear_failed` |
+| `GET /api/first-event-latency` | — | `{"latencies":[{"model","samples","p95_ms"}]}`，按目录模型 ID 排序，只列 24 小时内有原请求样本的模型 | — |
 | `GET /api/settings`、`PATCH /api/settings` | 见“设置与系统提示预览” | 设置对象 | 400 `invalid_request`、`invalid_settings`，500 `settings_unreadable`、`settings_save_failed`、`settings_apply_failed` |
 
 - 请求体不是合法 JSON 时返回 400 `invalid_request`
@@ -974,14 +984,14 @@ api 层的公开接口规则：
 - 日志页的实时日志上方每个进行中请求一行：模型、账户、已运行时长、当前阶段与“查看请求”
 - 请求记录与详情中的协议显示为 OpenAI Chat、OpenAI Responses、Anthropic Messages、Gemini
 - 记录表的列为时间、结果、状态码、模型、账户、首字、耗时、输入·缓存·输出、估算费用
-- 记录详情：失败阶段、上游状态码、协议与路径、请求模型、上游模型、账户、排队·首字·总耗时、token、估算费用、工具调用、流式、请求类型与系统提示档位、会话与步序、API key、客户端、响应 ID、客户端请求 ID、各上游尝试（账户、状态、耗时、错误、重试等待、traceId）与正文
+- 记录详情：在视口居中弹出的对话框（最宽 720px），内容为失败阶段、上游状态码、协议与路径、请求模型、上游模型、账户、排队·首字·总耗时、token、估算费用、工具调用、流式、请求类型与系统提示档位、会话与步序、API key、客户端、响应 ID、客户端请求 ID、各上游尝试（账户、备用请求与被取代标记、状态、耗时、错误、重试等待、traceId）与正文
 - 概览条：就绪账户为 `state` 为 `ready` 的账户数与账户总数，下方是按状态着色的分布条与各非就绪状态的数量（点击转到账户页该状态）；额度为各已启用账户的平均剩余比例（共享额度池只计一次），每组另有 5 小时与每周两条比例条，下方为任一额度桶低于 20% 的已启用账户数；24 小时请求为请求数、失败数与估算费用，下方逐小时柱状图（有失败的小时为红色）填满格内剩余高度
 - 用量趋势每根柱的提示为该桶的起始时间与请求数，图下方左端为范围起点、右端为“现在”
 - 模型页额度组筛选的每一项带该组的模型数
 - 用量筛选：候选为报告 `options` 中这段时间出现过的非空取值，选中的取值以逗号连接写入 URL 的 `model`、`account`、`api_key`，同样带在 `GET /api/usage` 与导出 CSV 的查询参数中；有筛选时显示“清除筛选”
 - 统计条的耗时为 p50、p95 与首字；分项表的列为请求数、占比、失败、限流、缓存、思考、回复、p50、p95、费用
 - 界面上的“首字”为请求记录的首事件耗时 `first_event_ms`：请求进入到首个正文、思考或工具调用事件的毫秒数，见运行日志文档
-- 仪表盘最近请求：读取 `GET /api/usage/records?from=<当前时间减 24 小时>&to=<当前时间加 1 秒>&limit=5`；每行为结果徽标、模型、账户（为空时 `—`）、完成时间与总耗时，点击打开 `/requests?id=<ID>`；没有记录时显示链接到接入页的提示；收到请求结束的 `request` 事件后重新读取
+- 仪表盘最近请求：读取 `GET /api/usage/records?from=<当前时间减 24 小时>&to=<当前时间加 1 秒>&limit=5`；每行为结果徽标、模型、账户（为空时 `—`）、完成时间与总耗时，各行同列对齐、徽标列宽取最宽的徽标，点击打开 `/requests?id=<ID>`；没有记录时显示链接到接入页的提示；收到请求结束的 `request` 事件后重新读取
 - 缓存命中率按 token 计，为 `cached_tokens / input_tokens`，没有输入 token 时为 0；统计条取范围合计，分项表按各行计算
 - 账户用量：账户详情的“近 30 天用量”、账户表的“最近使用”与按最近使用排序都读取 `GET /api/usage?from=<当前时间减 30 天>&to=<当前时间加 1 秒>&tz=<浏览器时区>&bucket=auto`，取 `groups.account` 中该账户的一项；详情显示 `requests`、`total_tokens` 与 `cost_usd`，标题旁显示 `last_at` 的相对时间，没有该项时显示“30 天内未使用”
 - 账户页与模型页的 `q` 去掉首尾空白后不区分大小写地按子串匹配：账户页匹配邮箱（`id`）、备注名与项目，模型页匹配模型 ID 与显示名
@@ -1001,7 +1011,7 @@ api 层的公开接口规则：
 | 服务 `service` | `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR`、API key（链接到接入页）、`MEDIA_OUTPUT`、`MEDIA_BASE_URL` |
 | 网络 `network` | `PROXY`（每行一个）与代理池状态 |
 | 系统提示 `prompt` | `SYSTEM_PROMPT`、原文预览、`SYSTEM_PROMPT_TEMPLATE`、`SYSTEM_PROMPT_USER_TEMPLATE` |
-| 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP` |
+| 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`FIRST_EVENT_HEDGE`、`FIRST_EVENT_HEDGE_MODELS`、`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP` |
 | 日志 `logging` | `LOG_LEVEL`、`LOG_FORMAT`、`LOG_FILE`、`LOG_MAX_TOTAL_MB`、`REQUEST_LOG_BODIES` |
 | 远程访问 `remote` | `ADMIN_AUTH_ENABLED`、`ADMIN_USERNAME`、`ADMIN_PASSWORD`（已设置时输入框为空并显示占位） |
 | 关于 `about` | 版本与在线更新、宿主、监听地址、API 地址、启动时间、模拟的客户端版本与官方最新版本、许可证、主页、发行页 |
@@ -1016,6 +1026,7 @@ api 层的公开接口规则：
 - 系统提示档位为 `custom` 时显示系统指令与 user 轮包装两个等宽字体的编辑框，内容即 `SYSTEM_PROMPT_TEMPLATE` 与 `SYSTEM_PROMPT_USER_TEMPLATE` 的原文；“载入预设”以 `GET /api/prompt/templates` 中内置档位的模板替换全文（user 轮另有“不包装”，即空模板），“插入”在光标处放入变量（`{{.字段}}`）或官方段落的原文并把光标移到其后；输入停下 400 ms 后以 `POST /api/prompt/preview` 渲染，编辑框下方显示代入示例数据后的字符数，返回 `invalid_prompt` 时在出错模板的编辑框下方显示错误中 `template: ` 之后的部分；系统指令为空时显示请求不带系统指令的说明；“查看原文”对话框打开时停在当前档位，`custom` 按表单中尚未保存的模板渲染
 - `.env` 中有取值无效的项时，设置页顶部列出配置项、原值与原因；进程环境变量决定的项带“环境变量”标签，悬停显示变量名，控件停用
 - 加减按钮到达范围端点时停用；输入框中直接键入的值不受按钮范围限制，按“可提交的值”校验，与服务端一致
+- `FIRST_EVENT_HEDGE` 为关闭、自动与自定义三选一，自定义时显示秒数输入框（加减按钮范围 1–3600）；切到自定义时填入 `GET /api/first-event-latency` 中样本最多的模型的 p95 向上取整的秒数，没有样本时填 60，输入框下方写出该模型的近期 p95 作参考；`FIRST_EVENT_HEDGE_MODELS` 与 `PREFER_LOWER_TIER_MODELS` 一样以开关逐个勾选模型
 - `REQUEST_TIMEOUT` 与 `QUOTA_REFRESH_INTERVAL` 为数值加单位（秒、分钟、小时）：打开时整小时用小时、整分钟用分钟、其余用秒，切换单位时只换算显示的数值（保留 6 位有效数字），改动数值后才写入；保存为 Go 时长（如 `30s`、`5m`），数值为 0 时保存 `0`
 
 #### 路由与登录
@@ -1089,6 +1100,21 @@ API key 列表取自 `GET /api/settings` 的 `API_KEYS`（逗号分隔）：
 - 添加、修改与删除都以 `PATCH /api/settings` 提交 `API_KEYS` 与 `API_KEY_ACCOUNTS`，`API_KEY_ACCOUNTS` 只保留仍在列表中的 key；删除立即保存，5 秒内可撤销，撤销时写回原列表与原绑定
 - `API_KEYS` 由进程环境变量决定时，添加、删除与修改 key 的值停用，列表下方显示该环境变量，对话框只能修改绑定的账户；`API_KEY_ACCOUNTS` 由进程环境变量决定时账户勾选停用
 
+客户端配置由 `web/src/features/connect/clients.ts` 中的客户端清单生成，配置写法与 clients runner 的实测一致：
+
+| 分组 | 客户端 | 可选协议（第一个为默认） | 导入链接 |
+| --- | --- | --- | --- |
+| 智能体 | Claude Code | Anthropic | CC Switch |
+| 智能体 | Codex | Responses | CC Switch |
+| 智能体 | OpenCode | Chat、Responses、Anthropic、Gemini | CC Switch |
+| 智能体 | OpenClaw | Chat、Responses、Anthropic、Gemini | CC Switch |
+| 智能体 | Magpie | 一次导入全部协议 | Magpie |
+| 智能体 | pi | Chat、Responses、Anthropic、Gemini | CC Switch |
+| 智能体 | omp | Chat、Responses、Anthropic、Gemini | — |
+| 智能体 | dsh | Chat、Responses、Anthropic | — |
+| 聊天客户端 | Cherry Studio | Chat、Responses、Gemini、Anthropic | Cherry Studio |
+| 连通测试 | curl | 同时给出 Chat、Anthropic、Gemini | — |
+
 客户端配置片段中的占位取值：
 
 | 占位 | 取值 |
@@ -1096,54 +1122,46 @@ API key 列表取自 `GET /api/settings` 的 `API_KEYS`（逗号分隔）：
 | `<origin>` | 页面 origin |
 | `<key>` | 选中的 API key，默认第一个；没有 key 时为 `antigravity2api` |
 | `<model>` | 选中的模型 |
-| `<small>` | Claude Code 后台任务模型 |
+| `<opus>`、`<sonnet>`、`<haiku>` | Claude Code 三档对应的模型 |
+| `<context>`、`<output>` | `<model>` 在目录中的 `input_token_limit` 与 `output_token_limit`，目录没有时为 1048576 与 65536 |
+| `<url>` | 所选协议的地址：Chat 与 Responses 为 `<origin>/v1`，Anthropic 为 `<origin>`，Gemini 为 `<origin>/v1beta` |
+| `<api>` | pi、omp、dsh 与 OpenClaw 的 `api`：Chat 为 `openai-completions`，Responses 为 `openai-responses`，Anthropic 为 `anthropic-messages`，Gemini 为 `google-generative-ai` |
 
-- 可选模型为实时目录中的 Agent 模型或普通对话模型，不含图像生成、语音转写与 Tab 补全模型；目录为空时 `<model>` 与 `<small>` 写成 `<模型 ID>`
-- `<model>` 的默认值：Claude Code 取第一个 `provider` 含 anthropic 的模型，其余客户端取第一个 ID 含 `flash` 的模型，没有时取第一个模型；`<small>` 默认取第一个 ID 含 `flash` 的模型
-- 环境变量按终端选择写法：macOS / Linux 为 `export NAME=value`，Windows PowerShell 为 `$env:NAME = "value"`；默认值按浏览器 User-Agent 是否含 `Windows` 选择
-- 客户端标签带各客户端的图标（`@lobehub/icons-static-svg`，curl 为终端图标），窗口宽度小于 640 时排成等宽两列
-- 选中的客户端写入 `?client=`，取值为 `claude-code`（默认）、`codex`、`opencode`、`cherry-studio`、`curl`
+- 可选模型为实时目录中的 Agent 模型或普通对话模型，不含图像生成、语音转写与 Tab 补全模型；目录为空时模型写成 `<模型 ID>`
+- `<model>` 的默认值：Claude Code 取第一个 `provider` 含 anthropic 的模型，其余客户端取第一个 ID 含 `flash` 的模型，没有时取第一个模型；`<opus>` 与 `<sonnet>` 默认等于 `<model>`，`<haiku>` 默认取第一个 ID 含 `flash` 的模型
+- 环境变量按终端选择写法：macOS / Linux 为 `export NAME="value"`，Windows PowerShell 为 `$env:NAME = "value"`；默认值按浏览器 User-Agent 是否含 `Windows` 选择
+- 客户端按分组排列，每个客户端带图标（`@lobehub/icons-static-svg`，pi 与 omp 为各自项目的图标，curl 为终端图标）；选中的客户端下方显示名称、全部可用协议、说明与主页链接
+- 选中的客户端写入 `?client=`，取值为 `claude-code`（默认）、`codex`、`opencode`、`openclaw`、`magpie`、`pi`、`omp`、`dsh`、`cherry-studio`、`curl`；各客户端选择的协议在本页内保留
+- 复制任一代码块、字段或点击导入链接即完成首次使用引导的第三步
 
-Claude Code 的终端命令（PowerShell 写法同上替换）与 `~/.claude/settings.json`：
+Claude Code 的终端命令与 `~/.claude/settings.json`（`env` 段为同样的变量）：
 
 ```bash
-export ANTHROPIC_BASE_URL=<origin>
-export ANTHROPIC_AUTH_TOKEN=<key>
-export ANTHROPIC_MODEL=<model>
-export ANTHROPIC_DEFAULT_HAIKU_MODEL=<small>
+export ANTHROPIC_BASE_URL="<origin>"
+export ANTHROPIC_AUTH_TOKEN="<key>"
+export ANTHROPIC_MODEL="<model>"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="<opus>"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="<sonnet>"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="<haiku>"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="<context>"
 claude
 ```
 
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "<origin>",
-    "ANTHROPIC_AUTH_TOKEN": "<key>",
-    "ANTHROPIC_MODEL": "<model>",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<small>"
-  }
-}
-```
-
-Codex 的 `~/.codex/config.toml` 与终端命令：
+Codex 的 `~/.codex/config.toml`，随后在终端设置 `ANTIGRAVITY2API_KEY` 并运行 `codex`：
 
 ```toml
 model = "<model>"
-model_provider = "antigravity"
+model_provider = "antigravity2api"
+model_context_window = <context>
 
-[model_providers.antigravity]
+[model_providers.antigravity2api]
 name = "Antigravity2API"
 base_url = "<origin>/v1"
 env_key = "ANTIGRAVITY2API_KEY"
 wire_api = "responses"
 ```
 
-```bash
-export ANTIGRAVITY2API_KEY=<key>
-codex
-```
-
-OpenCode 的 `~/.config/opencode/opencode.json`，`models` 列出全部可选模型，名称为目录中的显示名，没有时为 ID：
+OpenCode 的 `~/.config/opencode/opencode.json`，`npm` 按协议为 `@ai-sdk/openai-compatible`、`@ai-sdk/openai`、`@ai-sdk/anthropic` 或 `@ai-sdk/google`，`baseURL` 为 `<url>`（Anthropic 为 `<origin>/v1`），`models` 列出全部可选模型及其上下文与输出上限：
 
 ```json
 {
@@ -1153,21 +1171,103 @@ OpenCode 的 `~/.config/opencode/opencode.json`，`models` 列出全部可选模
       "npm": "@ai-sdk/openai-compatible",
       "name": "Antigravity2API",
       "options": { "baseURL": "<origin>/v1", "apiKey": "<key>" },
-      "models": { "<模型 ID>": { "name": "<显示名>" } }
+      "models": { "<模型 ID>": { "name": "<显示名>", "limit": { "context": <context>, "output": <output> } } }
     }
   },
   "model": "antigravity2api/<model>"
 }
 ```
 
-Cherry Studio 在“设置 › 模型服务”中添加提供商，各项单独复制：
+OpenClaw 的 `~/.openclaw/openclaw.json`：
+
+```json
+{
+  "agents": { "defaults": { "model": { "primary": "antigravity2api/<model>" } } },
+  "models": {
+    "providers": {
+      "antigravity2api": {
+        "baseUrl": "<url>",
+        "apiKey": "<key>",
+        "api": "<api>",
+        "models": [{ "id": "<model>", "name": "<显示名>", "reasoning": true, "contextWindow": <context>, "maxTokens": <output> }]
+      }
+    }
+  }
+}
+```
+
+Magpie 的导入链接一次登记全部协议，模型由 Magpie 从 `/v1/models` 读取；同一链接也以 `magpie import '<链接>'` 在终端导入，手动添加时填写名称、OpenAI 兼容地址 `<origin>/v1`、Anthropic 兼容地址 `<origin>` 与 key：
+
+```text
+magpie://import?name=Antigravity2API&chat=<origin>/v1&responses=<origin>/v1&anthropic=<origin>&gemini=<origin>/v1beta&key=<key>
+```
+
+pi 的 `~/.pi/agent/models.json`，随后在终端设置 `ANTIGRAVITY2API_KEY` 并运行 `pi --provider antigravity2api --model <model>`：
+
+```json
+{
+  "providers": {
+    "antigravity2api": {
+      "baseUrl": "<url>",
+      "api": "<api>",
+      "apiKey": "ANTIGRAVITY2API_KEY",
+      "models": [{ "id": "<model>", "name": "<显示名>", "reasoning": true, "input": ["text", "image"], "contextWindow": <context>, "maxTokens": <output> }]
+    }
+  }
+}
+```
+
+omp 的 `~/.omp/agent/models.yml` 与 `~/.omp/agent/config.yml`，随后在终端设置 `ANTIGRAVITY2API_KEY` 并运行 `omp --provider antigravity2api --model <model>`；所选协议不是 Gemini 时另加一个 Gemini 提供商，网页搜索角色指向它：
+
+```yaml
+providers:
+  antigravity2api:
+    baseUrl: <url>
+    api: <api>
+    apiKey: ANTIGRAVITY2API_KEY
+    models:
+      - id: <model>
+  antigravity2api-gemini:
+    baseUrl: <origin>/v1beta
+    api: google-generative-ai
+    apiKey: ANTIGRAVITY2API_KEY
+    models:
+      - id: <model>
+```
+
+```yaml
+modelRoles:
+  web: antigravity2api-gemini/<model>
+```
+
+dsh 的补丁文件 `antigravity2api.patch.yml`，随后在终端设置 `ANTIGRAVITY2API_KEY` 并运行 `dsh --patch antigravity2api.patch.yml`：
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      antigravity2api:
+        api: <api>
+        baseURL: <url>
+        apiKeyEnv: ANTIGRAVITY2API_KEY
+        models:
+          - id: <model>
+            contextWindow: <context>
+- id: agent-default-model
+  config:
+    provider: antigravity2api
+    model: <model>
+```
+
+Cherry Studio 在“设置 → 模型服务”中添加提供商，各项单独复制，导入链接为 `cherrystudio://providers/api-keys?v=1&data=<Base64 JSON>`：
 
 | 项 | 值 |
 | --- | --- |
-| 提供商类型 | OpenAI |
-| API 地址 | `<origin>` |
+| 提供商类型 | Chat 为 OpenAI，Responses 为 OpenAI-Response，Gemini 为 Gemini，Anthropic 为 Anthropic |
 | API 密钥 | `<key>` |
-| 模型 | 全部可选模型 ID，逗号分隔 |
+| API 地址 | Chat 与 Responses 为 `<origin>/v1`，Gemini 与 Anthropic 为 `<origin>` |
+
+CC Switch 导入链接为 `ccswitch://v1/import?resource=provider&app=<应用>&name=Antigravity2API&endpoint=<地址>&apiKey=<key>&apiFormat=<格式>&model=<model>`，Claude Code 另带三档模型。
 
 curl 给出三个请求：
 
@@ -1241,7 +1341,7 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 
 #### 数字与时间格式
 
-数字与时间用 `Intl` 按界面语言的区域格式化（简体中文 `zh-CN`、繁体中文 `zh-TW`、英文 `en`），时间按浏览器时区显示，全站使用等宽数字。
+数字与时间用 `Intl` 按界面语言的区域格式化（界面语言的代码即区域：`zh-CN`、`zh-TW`、`en`、`ja`、`ko`、`fr`、`de`），时间按浏览器时区显示，全站使用等宽数字。
 
 | 类型 | 格式 |
 | --- | --- |
@@ -1259,8 +1359,9 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 
 #### 语言、配色与快捷键
 
-- 语言：简体中文 `zh`、繁体中文（台湾）`zh-TW`、英文 `en`，保存在 `localStorage` 的 `antigravity2api.language`；没有保存值时依次查看浏览器的语言列表，第一个以 `zh` 开头的标签中 `zh-TW`、`zh-HK`、`zh-MO`、`zh-Hant` 开头的选繁体中文，其余选简体中文，先遇到 `en` 开头的标签时选英文，都没有时选英文；`html` 的 `lang` 同步为对应区域
-- 文案在 `web/src/app/messages.ts`（外壳与公共文案）与各功能目录的 `web/src/features/<功能>/messages.ts` 中，每份以 `defineMessages(简体中文, 英文, 繁体中文)` 声明，三种语言的键由类型检查保证一致
+- 语言：简体中文 `zh-CN`、繁体中文（台湾）`zh-TW`、英文 `en`、日文 `ja`、韩文 `ko`、法文 `fr`、德文 `de`，保存在 `localStorage` 的 `antigravity2api.language`；没有保存值时依次查看浏览器的语言列表，`zh-TW`、`zh-HK`、`zh-MO` 与 `zh-Hant` 开头的标签选繁体中文，其余 `zh` 开头的标签选简体中文，其他标签按语言主标签选择，第一个能选出的标签决定语言，都没有时选英文；`html` 的 `lang` 同步为界面语言，繁体中文、日文与韩文各用该语言的系统字体
+- 文案在 `web/src/locales/<语言>.ts` 中按页面与组件分组：`zh-CN.ts` 定义全部键与 `Catalog` 类型，其他语言以同一结构提供 `messages`，缺键时类型检查失败；组件以 `useMessages('<分组>')` 取当前语言的文案。每种语言打包为单独的文件，页面渲染前只加载当前语言，切换语言时先加载新语言再切换
+- 服务生成的日志、管理接口错误、账户状态与冷却原因以简体中文写成，`internal/i18n/messages/<语言>.json` 是其他六种语言的翻译表：键为 Go 源码中含中文的字符串字面量与格式串，值为译文，`{0}`、`{1}` 依次对应格式动词；新增或修改含中文的文案时，在六个翻译表中写入同一键的译文。各语言的界面文案文件引入同一语言的翻译表，两者打包在同一个文件中。`internal/i18n` 与 `web/src/lib/translator.ts` 按同一规则翻译：整句匹配格式串，格式串开头的格式动词取最长匹配，格式动词的取值递归翻译；整句没有匹配时依次按换行、` | `、`; `、`；` 分段，按第一个 `: ` 或 `：` 拆成外层说明与内层原因，按不含格式动词的文案前缀拆开，最后拆开 `键=值`。上游原文、账户、模型名与数值保持原样。管理端的日志页、进行中请求的阶段、账户状态说明、管理接口错误与预热结果按界面语言显示译文，日志搜索同时匹配原文与译文；日志文件、标准错误、管理事件流与 `logs` 表保存简体中文原文
 - 配色：浅色与深色，顶栏配色按钮点击即切换到另一种，新配色从按钮中心以圆形展开（切到浅色）或旧配色收回按钮中心（切到深色），按钮中的太阳与月亮图标旋转交替；切换结果保存在 `localStorage` 的 `antigravity2api.theme`；没有保存值时跟随系统配色并随系统配色变化切换；结果写入 `html` 的 `data-theme`；`index.html` 在样式表之前同步加载 `web/public/theme.js`，首帧绘制前写入 `data-theme`
 
 | 按键 | 作用 | 生效位置 |
@@ -1297,9 +1398,9 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 桌面版：
 
 - 单实例：Wails `SingleInstance` 的标识为 `com.mag1cfall.antigravity2api`，再次启动时显示已有实例的窗口并退出；第一个参数是子命令（`--hidden` 除外）时先执行子命令，不经过单实例检查
-- 服务开始监听后显示窗口，服务启动失败时以原生对话框显示原因并退出；Windows 上配置错误等启动前的错误以系统消息框显示
+- 服务开始监听后显示窗口，服务启动失败时以原生对话框按界面语言显示原因并退出；Windows 上配置错误等启动前的错误以系统消息框按系统界面语言显示
 - 窗口标题 `Antigravity2API`，无边框，背景色 `#e6e7ed`，1280×800，最小 960×600；Windows 与 macOS 关闭窗口后应用留在托盘，窗口与 WebView 进程一并结束，再次显示时按关闭前的位置、大小与最大化状态重建窗口，载入关闭前所在的管理端页面（页面以 `desktop:route:<路径与查询>` 消息报告当前路径）；Linux 关闭窗口即退出
-- 托盘：图标在 macOS 菜单栏为单色模板图（`tray-template.png`，系统按菜单栏配色着色），其余平台为应用图标；提示文字为 `Antigravity2API`，点击图标在新的 goroutine 中显示窗口，窗口重建期间的再次点击（如双击）等重建完成后显示同一窗口；菜单文案为固定的简体中文，依次为：
+- 托盘：图标在 macOS 菜单栏为单色模板图（`tray-template.png`，系统按菜单栏配色着色），其余平台为应用图标；提示文字为 `Antigravity2API`；Windows 上双击图标在新的 goroutine 中显示窗口、单击不做任何事，右键或键盘打开图标的上下文菜单时弹出自绘菜单，macOS 与 Linux 上单击图标在新的 goroutine 中显示窗口、右键打开系统菜单；窗口重建期间的再次点击等重建完成后显示同一窗口；菜单文字按界面语言，页面加载前为系统界面语言（Windows 为用户首选的界面语言，macOS 为首选语言，Linux 为 `LC_ALL`、`LC_MESSAGES`、`LANG`，都不支持时为英文），页面加载后跟随管理端；Windows 自绘菜单的颜色与尺寸同管理端下拉菜单（操作项高 32px、说明行高 28px，按图标所在显示器的 DPI 缩放），配色跟随管理端的浅色与深色，页面没有报告配色时跟随系统，字体按界面语言（简体中文 Microsoft YaHei UI、繁体中文 Microsoft JhengHei UI、日文 Yu Gothic UI、韩文 Malgun Gothic，其他语言 Segoe UI），子菜单在悬停或键盘高亮时展开在右侧（放不下时在左侧），方向键、Home、End 移动高亮，回车或空格执行，Esc 或菜单失去焦点时关闭；macOS 与 Linux 的菜单由系统按系统外观绘制。菜单项依次为（表中为简体中文）：
 
 | 菜单项 | 文案与行为 |
 | --- | --- |
@@ -1314,11 +1415,12 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 
 - 额度组剩余没有数据时 `<x>%` 为 `—`
 - `各账户额度` 每行为 `<备注名或邮箱>  Gemini <x>% · Claude 与 GPT <y>%`，停用账户为 `<名称>  已停用`；没有账户时省略该子菜单
-- 托盘额度经回环地址读取 `GET /api/accounts`，应用启动后每分钟与“刷新额度”完成后重建菜单：账户在一个额度组的可用比例为该组各额度桶中最低的一项；额度组的剩余为已启用账户可用比例的平均，同一共享额度池的账户只计一次；百分比向下取整；“刷新额度”之后与“开机启动”前后各有一条分隔线
+- 托盘额度经回环地址读取 `GET /api/accounts`，应用启动后每分钟、“刷新额度”完成后与界面语言变化时重建菜单（Windows 记下菜单项，下次弹出时使用）：账户在一个额度组的可用比例为该组各额度桶中最低的一项；额度组的剩余为已启用账户可用比例的平均，同一共享额度池的账户只计一次；百分比向下取整；“刷新额度”之后与“开机启动”前后各有一条分隔线
 - 带 `--hidden` 启动时只显示托盘，首次显示时创建窗口；开机启动项是否带它见下表
-- 页面中的外部链接经系统浏览器打开；拖入窗口的文件与链接不被接受，窗口停留在管理端；Windows 上 WebView 数据保存在 `RUNTIME_DIR/webview`
+- Linux 启动时查询会话总线上 `org.kde.StatusNotifierWatcher` 是否有所有者（`trayHosted`）；没有托盘宿主时服务就绪后写一条 Info 日志并打开窗口，`--hidden` 也打开；托盘项照常导出，托盘宿主出现后由 Wails 重新登记
+- 页面中的外部链接经系统浏览器打开；拖入窗口的文件与链接不被接受，窗口停留在管理端；Windows 上 WebView2 数据保存在 `%LocalAppData%\Antigravity2API\WebView2`
 - Windows 上 WebView2 以 `--disable-lcd-text` 启动，文字使用灰度抗锯齿
-- Windows 上经 Wails 查不到 WebView2 运行时版本时只创建托盘，菜单没有“显示窗口”：服务就绪后（`--hidden` 除外）在默认浏览器打开管理端，单击托盘图标或再次运行可执行文件也打开管理端
+- Windows 上经 Wails 查不到 WebView2 运行时版本时只创建托盘，菜单没有“显示窗口”：服务就绪后（`--hidden` 除外）在默认浏览器打开管理端，双击托盘图标（macOS 与 Linux 为单击）或再次运行可执行文件也打开管理端
 
 窗口地址为 `http://<实际监听地址的回环形式>?shell=desktop`，服务开始监听后创建窗口。回环形式按下表由监听地址得到，托盘“复制 API 地址”与窗口地址用实际监听地址，`status` 子命令用 `LISTEN`：
 
@@ -1342,11 +1444,13 @@ curl "<origin>/v1beta/models/<model>:generateContent" \
 | `desktop:window:minimise` | 最小化 |
 | `desktop:window:toggle-maximise` | 最大化或还原 |
 | `desktop:window:close` | 关闭窗口 |
+| `desktop:locale:<界面语言>` | 托盘菜单与对话框改用该语言 |
+| `desktop:theme:<dark 或 light>` | 之后弹出的 Windows 托盘菜单用该配色 |
 | `wails:drag` | 开始拖动窗口 |
 | `wails:resize:<方向>-resize` | 从边缘缩放，方向为 `n`、`s`、`e`、`w` 与组合 |
 
-- `desktop:open:` 与 `desktop:window:` 由 `RawMessageHandler` 按前缀 `openPrefix`、`windowPrefix` 处理，窗口动作取自 `windowActions`，其他动作名忽略；关闭窗口在 Windows 与 macOS 上结束窗口、应用留在托盘
-- 注入脚本：`target="_blank"` 或跨源链接的点击、`window.open` 都换成 `desktop:open:`，相对地址按页面地址补全；在计算样式 `--wails-draggable` 为 `drag` 的元素上按下左键并移动时发 `wails:drag`，双击时发 `desktop:window:toggle-maximise`；距窗口边缘 5px、角落 15px 内按下左键并移动时发缩放消息，鼠标经过边缘时显示对应光标；macOS 与窗口最大化时不做边缘缩放
+- `desktop:locale:` 与 `desktop:theme:` 由托盘按前缀 `localePrefix`、`themePrefix` 处理，不支持的语言忽略；`desktop:open:` 与 `desktop:window:` 由 `RawMessageHandler` 按前缀 `openPrefix`、`windowPrefix` 处理，窗口动作取自 `windowActions`，其他动作名忽略；关闭窗口在 Windows 与 macOS 上结束窗口、应用留在托盘
+- 注入脚本：`target="_blank"` 或跨源链接的点击、`window.open` 都换成 `desktop:open:`，相对地址按页面地址补全；在计算样式 `--wails-draggable` 为 `drag` 的元素上按下左键并移动时发 `wails:drag`，双击时发 `desktop:window:toggle-maximise`；注入时与 `html` 的 `lang`、`data-theme` 变化时发 `desktop:locale:` 与 `desktop:theme:`；距窗口边缘 5px、角落 15px 内按下左键并移动时发缩放消息，鼠标经过边缘时显示对应光标；macOS 与窗口最大化时不做边缘缩放
 - 最大化同步：每次窗口尺寸变化与页面加载后，桌面壳执行 `window.dispatchEvent(new CustomEvent("desktop:maximised", {detail: <是否最大化>}))`（`maximisedEvent`）；注入脚本据此停用边缘缩放，顶栏按钮在“最大化 / 还原”之间切换
 
 开机启动由托盘菜单开关，标识为 `com.mag1cfall.antigravity2api`（`enableAutostart`）：
@@ -1488,6 +1592,7 @@ bob@example.com    error  free-tier           需要验证：...
 | 读取失败 | `无法读取更新状态：<错误>` 与“检查更新” |
 | `mode` 为 `container` | `Docker 部署随镜像更新，拉取新镜像后重建容器` |
 | `mode` 为 `development` | `源码构建不支持在线更新，新版本从发布页下载` |
+| 确认更新后、`progress.stage` 不为 `restart` | `正在下载 <latest>`、`正在校验 <latest> 的发行包` 或 `正在替换程序`，已下载与总大小（MB）和下载进度条，每 250 ms 读取一次 |
 | `updating` | `正在重启到 <latest>，页面在新版本就绪后自动刷新` |
 | 带 `error` | `无法读取最新版本：<error>` |
 | `available` | `新版本 <latest> · <published_at>发布` 与“更新到 <latest>” |

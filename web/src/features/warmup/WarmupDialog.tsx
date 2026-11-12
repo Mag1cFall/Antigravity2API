@@ -3,7 +3,6 @@ import { Flame, LoaderCircle } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 import { Link } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -14,13 +13,11 @@ import { accountsKey } from '@/features/accounts/queries'
 import type { Account } from '@/features/accounts/types'
 import { useModels } from '@/features/models/queries'
 import { kindOf } from '@/features/models/types'
-import { quotaMessages } from '@/features/quota/messages'
 import { bucketParts, compareBuckets, nameOf } from '@/features/quota/quota'
 import type { QuotaBucket } from '@/features/quota/types'
-import { warmupMessages } from '@/features/warmup/messages'
 import { api, errorMessage } from '@/lib/api'
 import { formatDuration, formatPercent } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 
 // WarmupResult 对应 POST /api/warmup 的返回，request 是请求记录 ID，before 与 after 是预热前后该模型额度组的额度桶
 interface WarmupResult {
@@ -53,8 +50,8 @@ function toggle(set: ReadonlySet<string>, value: string, on: boolean) {
 
 // QuotaChange 按窗口列出额度组各额度桶预热前后的剩余比例
 function QuotaChange({ before, after }: { before: QuotaBucket[]; after: QuotaBucket[] }) {
-  const q = useMessages(quotaMessages)
-  const w = useMessages(warmupMessages)
+  const q = useMessages('quota')
+  const w = useMessages('warmup')
   const { locale } = useI18n()
   const buckets = after
     .map((bucket) => ({ ...bucket, ...bucketParts(bucket.bucket_id) }))
@@ -78,8 +75,8 @@ function QuotaChange({ before, after }: { before: QuotaBucket[]; after: QuotaBuc
 
 // WarmupDialog 选定账户与对话模型后对每个组合发一次最小生成请求，各账户并行、同一账户内依次进行，逐行显示结果、耗时、错误原因与额度变化；selected 非空时默认选中这些账户，否则默认选中就绪账户
 export function WarmupDialog({ accounts, selected }: { accounts: Account[]; selected: string[] }) {
-  const w = useMessages(warmupMessages)
-  const app = useMessages(appMessages)
+  const w = useMessages('warmup')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const queryClient = useQueryClient()
   const models = useModels()
@@ -162,7 +159,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
       <DialogContent
         title={w.title}
         description={w.description}
-        wide
+        width="wide"
         closeLabel={app.closeDialog}
         footer={
           runs ? (
@@ -242,7 +239,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                           </span>
                           {run.result.error && (
                             <p className="text-xs break-words text-error-text">
-                              {run.result.error}
+                              {serverText(run.result.error)}
                             </p>
                           )}
                           {run.result.request && (

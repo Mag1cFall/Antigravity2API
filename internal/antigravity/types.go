@@ -152,6 +152,8 @@ type GenerateRequest struct {
 	Suffix string `json:"suffix,omitempty"`
 	// Unary 标记非流式请求，生成结束后才输出
 	Unary bool `json:"-"`
+	// Background 标记客户端不等待输出的后台响应
+	Background bool `json:"-"`
 }
 
 // Model 表示实时模型目录中的模型
@@ -258,7 +260,8 @@ type Event struct {
 	StopSequence string `json:"stop_sequence,omitempty"`
 	// Grounding 为搜索事件的来源
 	Grounding *Grounding `json:"grounding,omitempty"`
-	Err       error      `json:"-"`
+	// Err 为错误事件的错误；结束事件上为已发出函数调用后被忽略的内容策略结束、缺少结束帧或读取中断
+	Err error `json:"-"`
 }
 
 // Service 定义公开协议适配器依赖的最小能力

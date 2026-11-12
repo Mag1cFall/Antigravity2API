@@ -1,7 +1,6 @@
 import { ArrowRight, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -9,7 +8,6 @@ import { Select } from '@/components/ui/select'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
-import { modelMessages } from '@/features/models/messages'
 import { useModels } from '@/features/models/queries'
 import { useSaveSettings, useSettings } from '@/features/settings/queries'
 import { parseMapping } from '@/features/settings/schema'
@@ -23,7 +21,7 @@ interface Mapping {
 
 // MappingEditor 编辑已读取的模型映射，保存时只提交 MODEL_MAPPING
 function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[] }) {
-  const m = useMessages(modelMessages)
+  const m = useMessages('models')
   const [rows, setRows] = useState(saved)
   const [checked, setChecked] = useState(false)
   const save = useSaveSettings()
@@ -157,8 +155,8 @@ function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[]
 
 // ModelMapping 是模型页的映射子页面，目录中不是别名的模型可作为映射目标
 export function ModelMapping() {
-  const m = useMessages(modelMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('models')
+  const app = useMessages('app')
   const settings = useSettings()
   const models = useModels()
   const value = settings.data?.values.MODEL_MAPPING ?? ''

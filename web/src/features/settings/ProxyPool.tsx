@@ -4,7 +4,7 @@ import { RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { FormRow } from '@/components/ui/form-row'
 import { toast } from '@/components/ui/toast'
-import { settingsMessages } from '@/features/settings/messages'
+import { Tooltip } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { fill, useMessages } from '@/lib/i18n'
 
@@ -23,7 +23,7 @@ const proxiesKey = ['proxies'] as const
 
 // ProxyPool 是设置中代理池的状态：每个代理是否可用、延迟与使用它的账户，可立即检测；有未检测的代理时每 2 秒读取一次，否则每 30 秒
 export function ProxyPool() {
-  const m = useMessages(settingsMessages)
+  const m = useMessages('settings')
   const client = useQueryClient()
   const proxies = useQuery({
     queryKey: proxiesKey,
@@ -52,25 +52,32 @@ export function ProxyPool() {
           <li key={proxy.url} className="flex flex-col gap-1 px-3 py-2 text-sm">
             <span className="font-mono break-all">{proxy.url}</span>
             <span className="flex flex-wrap gap-x-2 text-foreground-muted">
-              <span
-                className={
-                  !proxy.checked_at
-                    ? undefined
+              <Tooltip label={proxy.error}>
+                <span
+                  className={
+                    !proxy.checked_at
+                      ? undefined
+                      : proxy.healthy
+                        ? 'text-success-text'
+                        : 'text-error-text'
+                  }
+                >
+                  {!proxy.checked_at
+                    ? m.poolUnchecked
                     : proxy.healthy
-                      ? 'text-success-text'
-                      : 'text-error-text'
+                      ? fill(m.poolHealthy, { latency: proxy.latency_ms })
+                      : m.poolUnhealthy}
+                </span>
+              </Tooltip>
+              <Tooltip
+                label={
+                  proxy.accounts.length > 0 && (
+                    <span className="whitespace-pre-line">{proxy.accounts.join('\n')}</span>
+                  )
                 }
-                title={proxy.error}
               >
-                {!proxy.checked_at
-                  ? m.poolUnchecked
-                  : proxy.healthy
-                    ? fill(m.poolHealthy, { latency: proxy.latency_ms })
-                    : m.poolUnhealthy}
-              </span>
-              <span title={proxy.accounts.join('\n')}>
-                · {fill(m.poolAccounts, { count: proxy.accounts.length })}
-              </span>
+                <span>· {fill(m.poolAccounts, { count: proxy.accounts.length })}</span>
+              </Tooltip>
             </span>
           </li>
         ))}

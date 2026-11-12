@@ -2,66 +2,17 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { LineChart } from 'lucide-react'
 import { useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Callout } from '@/components/ui/callout'
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { useAccounts } from '@/features/accounts/queries'
-import { quotaMessages } from '@/features/quota/messages'
 import { nameOf, quotaHistory } from '@/features/quota/quota'
 import type { QuotaSnapshot } from '@/features/quota/types'
 import { api } from '@/lib/api'
 import { formatPercent } from '@/lib/format'
-import { defineMessages, useI18n, useMessages } from '@/lib/i18n'
-
-// historyMessages 是额度历史的文案
-const historyMessages = defineMessages(
-  {
-    title: '额度变化',
-    range: '时间范围',
-    range24h: '24 小时',
-    range7d: '7 天',
-    account: '账户',
-    allAccounts: '全部账户',
-    chart: '额度剩余比例折线图',
-    empty: '这段时间没有额度快照。账户初始化与首次成功生成后会读取额度。',
-    loadFailed: '无法读取额度历史',
-    start24h: '24 小时前',
-    start7d: '7 天前',
-    now: '现在',
-  },
-  {
-    title: 'Quota over time',
-    range: 'Time range',
-    range24h: '24 hours',
-    range7d: '7 days',
-    account: 'Account',
-    allAccounts: 'All accounts',
-    chart: 'Line chart of remaining quota',
-    empty:
-      'No quota snapshots in this period. Quota is read when an account is initialized and after its first successful generation.',
-    loadFailed: 'Could not load quota history',
-    start24h: '24 hours ago',
-    start7d: '7 days ago',
-    now: 'Now',
-  },
-  {
-    title: '額度變化',
-    range: '時間範圍',
-    range24h: '24 小時',
-    range7d: '7 天',
-    account: '帳號',
-    allAccounts: '所有帳號',
-    chart: '額度剩餘比例折線圖',
-    empty: '這段期間沒有額度快照。帳號初始化完成與首次成功產生內容後，會讀取額度。',
-    loadFailed: '無法讀取額度歷史記錄',
-    start24h: '24 小時前',
-    start7d: '7 天前',
-    now: '現在',
-  },
-)
+import { useI18n, useMessages } from '@/lib/i18n'
 
 // ranges 是额度历史的时间范围与分段数
 const ranges = { '24h': [86_400_000, 96], '7d': [604_800_000, 168] } as const
@@ -88,9 +39,9 @@ function segments(values: (number | null)[]) {
 
 // QuotaHistory 是按额度桶绘制剩余比例随时间变化的折线图，可按账户筛选
 export function QuotaHistory() {
-  const m = useMessages(historyMessages)
-  const q = useMessages(quotaMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('quotaHistory')
+  const q = useMessages('quota')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const [range, setRange] = useState<RangeKey>('24h')
   const [account, setAccount] = useState('all')

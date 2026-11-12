@@ -18,7 +18,6 @@ import {
 import { type ReactNode, useEffect, useState, useSyncExternalStore } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { lastLocation } from '@/app/remember'
 import logo from '@/assets/logo.png'
 import { Button } from '@/components/ui/button'
@@ -34,7 +33,8 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { sessionKey, useSession } from '@/features/service/queries'
 import { api } from '@/lib/api'
 import { isDesktop, maximisedEvent, windowControl } from '@/lib/desktop'
-import { type Language, languages, useI18n, useMessages } from '@/lib/i18n'
+import { type Locale } from '@/lib/format'
+import { languages, useI18n, useMessages } from '@/lib/i18n'
 import { currentTheme, subscribeTheme, toggleTheme } from '@/lib/theme'
 
 // NavItem 是一个导航目的地
@@ -114,7 +114,7 @@ function WindowButton({
 
 // WindowControls 是桌面无边框窗口右上角的最小化、最大化与关闭
 function WindowControls() {
-  const m = useMessages(appMessages)
+  const m = useMessages('app')
   const [maximised, setMaximised] = useState(false)
   useEffect(() => {
     const onChange = (event: Event) => {
@@ -157,8 +157,8 @@ function WindowControls() {
 
 // Header 是顶栏：左侧标志，居中胶囊导航，右侧语言与配色，桌面窗口中整条可拖动并带窗口按钮；minimal 时不显示导航
 export function Header({ minimal = false }: { minimal?: boolean }) {
-  const m = useMessages(appMessages)
-  const { language, setLanguage } = useI18n()
+  const m = useMessages('app')
+  const { locale, setLocale } = useI18n()
   const theme = useSyncExternalStore(subscribeTheme, currentTheme)
   const client = useQueryClient()
   const navigate = useNavigate()
@@ -212,15 +212,15 @@ export function Header({ minimal = false }: { minimal?: boolean }) {
                   aria-label={m.language}
                   className={roundButton + ' text-xs font-semibold'}
                 >
-                  {languages.find((item) => item.value === language)?.short}
+                  {languages.find((item) => item.value === locale)?.short}
                 </Button>
               </DropdownMenuTrigger>
             </Tooltip>
             <DropdownMenuContent>
               <DropdownMenuRadioGroup
-                value={language}
+                value={locale}
                 onValueChange={(value) => {
-                  setLanguage(value as Language)
+                  void setLocale(value as Locale)
                 }}
               >
                 {languages.map((item) => (

@@ -183,10 +183,11 @@ func (p *Pool) SetQuota(id string, summary antigravity.QuotaSummary) {
 	p.notify()
 }
 
-// Limit 把账户的一个额度组或一个模型冷却到 until
+// Limit 把账户的一个额度组或一个模型冷却到 until，按墙上时钟比较，系统睡眠期间冷却照常计时
 func (p *Pool) Limit(id, scope string, until time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	until = until.Round(0)
 	if cooldown := p.cooldown(id); until.After(cooldown[scope]) {
 		cooldown[scope] = until
 	}

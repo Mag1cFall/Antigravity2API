@@ -54,8 +54,9 @@ type server struct {
 	media          *mediaStore
 	mediaLinks     func() (bool, string)
 	responseModes  func() ResponseModes
-	// background 按响应 ID 保存进行中的 Responses 后台响应
+	// background 按响应或交互 ID 保存进行中的后台生成
 	background sync.Map
+	caches     *geminiCaches
 }
 
 // idSequence 是 newID 的进程内序号
@@ -63,7 +64,7 @@ var idSequence atomic.Uint64
 
 // NewHandler 返回挂载四个公开协议与目录端点的 http.Handler
 func NewHandler(service antigravity.Service, options Options) http.Handler {
-	s := &server{service: service, responseStates: newResponseStateStore(options.ResponseStates), interactions: newResponseStateStore(options.InteractionStates), files: &fileStore{dir: options.FilesDir, limit: options.FilesLimit}, uploads: &geminiUploads{sessions: make(map[string]*geminiUpload)}, media: &mediaStore{dir: options.MediaDir, limit: options.MediaLimit}, mediaLinks: options.MediaLinks, responseModes: options.ResponseModes}
+	s := &server{service: service, responseStates: newResponseStateStore(options.ResponseStates), interactions: newResponseStateStore(options.InteractionStates), files: &fileStore{dir: options.FilesDir, limit: options.FilesLimit}, uploads: &geminiUploads{sessions: make(map[string]*geminiUpload)}, media: &mediaStore{dir: options.MediaDir, limit: options.MediaLimit}, mediaLinks: options.MediaLinks, responseModes: options.ResponseModes, caches: &geminiCaches{items: make(map[string]*geminiCache)}}
 	if options.FilesDir != "" {
 		go s.files.reclaim()
 	}
@@ -104,6 +105,11 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	public.HandleFunc("GET /v1beta/models", s.handleGeminiModels)
 	public.HandleFunc("GET /v1beta/models/{model...}", s.handleGeminiModel)
 	public.HandleFunc("POST /v1beta/models/{action}", s.handleGeminiAction)
+	public.HandleFunc("POST /v1beta/cachedContents", s.handleGeminiCacheCreate)
+	public.HandleFunc("GET /v1beta/cachedContents", s.handleGeminiCacheList)
+	public.HandleFunc("GET /v1beta/cachedContents/{cache}", s.handleGeminiCacheGet)
+	public.HandleFunc("PATCH /v1beta/cachedContents/{cache}", s.handleGeminiCacheUpdate)
+	public.HandleFunc("DELETE /v1beta/cachedContents/{cache}", s.handleGeminiCacheDelete)
 	public.HandleFunc("POST /upload/v1beta/files", s.handleGeminiFileUpload)
 	public.HandleFunc("GET /v1beta/files", s.handleGeminiFileList)
 	public.HandleFunc("GET /v1beta/files/{file}", s.handleGeminiFileGet)

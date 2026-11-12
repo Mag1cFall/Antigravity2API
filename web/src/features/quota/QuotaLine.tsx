@@ -1,6 +1,5 @@
 import { Meter } from '@/components/ui/meter'
 import { Tooltip } from '@/components/ui/tooltip'
-import { quotaMessages } from '@/features/quota/messages'
 import { formatCountdown, quotaText, quotaTone } from '@/features/quota/quota'
 import { formatFullDateTime, formatPercent } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
@@ -19,7 +18,7 @@ export function QuotaLine({
   now: Date
   compact?: boolean
 }) {
-  const m = useMessages(quotaMessages)
+  const m = useMessages('quota')
   const { locale } = useI18n()
   const percent = formatPercent(fraction, locale)
   const countdown = reset ? formatCountdown(Date.parse(reset) - now.getTime()) : ''

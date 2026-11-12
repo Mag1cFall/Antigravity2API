@@ -7,6 +7,13 @@ export interface Settings {
   environment: string[]
 }
 
+// FirstEventLatency 对应 internal/service 的 FirstEventLatency，是一个目录模型近 24 小时原请求首字等待的 p95 与样本数
+export interface FirstEventLatency {
+  model: string
+  samples: number
+  p95_ms: number
+}
+
 // InvalidValue 对应 internal/config 的 InvalidValue，是取值无效、按默认值运行的配置项
 interface InvalidValue {
   key: string

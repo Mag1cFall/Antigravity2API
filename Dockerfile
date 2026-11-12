@@ -4,6 +4,7 @@ RUN corepack enable
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web/ ./
+COPY internal/i18n/messages/ /src/internal/i18n/messages/
 RUN pnpm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.27-trixie AS build

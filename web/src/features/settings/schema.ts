@@ -61,6 +61,7 @@ interface SchemaMessages {
   errAdminUser: string
   errAdminPassword: string
   errMediaBase: string
+  errHedge: string
 }
 
 // settingsSchema 与 internal/config 的 Validate 规则一致，字段名即 .env 配置项，passwordSet 表示已保存过管理密码；API_KEYS 在接入页、MODEL_MAPPING 在模型页单独保存
@@ -81,6 +82,8 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
       ROUTING_STRATEGY: z.enum(['round-robin', 'fill-first']),
       PREFER_LOWER_TIER_MODELS: z.array(z.string()),
       REQUEST_TIMEOUT: z.string().trim().regex(goDuration, m.errDuration),
+      FIRST_EVENT_HEDGE: z.string().regex(/^(off|auto|[1-9]\d*)$/, m.errHedge),
+      FIRST_EVENT_HEDGE_MODELS: z.array(z.string()),
       NONSTREAM_KEEPALIVE: z.boolean(),
       FAKE_STREAM: z.boolean(),
       QUOTA_REFRESH_INTERVAL: z
@@ -150,6 +153,8 @@ export function toForm(settings: Settings): SettingsForm {
     ROUTING_STRATEGY: v('ROUTING_STRATEGY', 'round-robin') as SettingsForm['ROUTING_STRATEGY'],
     PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS', ''),
     REQUEST_TIMEOUT: v('REQUEST_TIMEOUT', '5m'),
+    FIRST_EVENT_HEDGE: v('FIRST_EVENT_HEDGE', 'auto'),
+    FIRST_EVENT_HEDGE_MODELS: list('FIRST_EVENT_HEDGE_MODELS', 'gemini-4-argon'),
     NONSTREAM_KEEPALIVE: bool('NONSTREAM_KEEPALIVE', 'true'),
     FAKE_STREAM: bool('FAKE_STREAM', 'false'),
     QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL', '15m'),

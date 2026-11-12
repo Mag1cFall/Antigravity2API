@@ -1,7 +1,6 @@
 import { Boxes } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { CopyButton } from '@/components/ui/copy-button'
@@ -11,10 +10,8 @@ import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { stackThird, Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccounts } from '@/features/accounts/queries'
-import { modelMessages } from '@/features/models/messages'
 import { useModels } from '@/features/models/queries'
 import { kindOf, type Model } from '@/features/models/types'
-import { quotaMessages } from '@/features/quota/messages'
 import { compareBuckets, groups, nameOf } from '@/features/quota/quota'
 import { useSettings } from '@/features/settings/queries'
 import { parseMapping } from '@/features/settings/schema'
@@ -30,7 +27,7 @@ const groupTone: Record<string, string> = {
 
 // Limit 是右对齐的 token 上限，悬停显示精确值
 function Limit({ value }: { value: number | undefined }) {
-  const m = useMessages(modelMessages)
+  const m = useMessages('models')
   const { locale } = useI18n()
   if (!value) return <span className="text-foreground-subtle">—</span>
   return (
@@ -50,8 +47,8 @@ function ModelRow({
   alias: string | undefined
   ready: number
 }) {
-  const m = useMessages(modelMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('models')
+  const q = useMessages('quota')
   const kind = kindOf(model)
   const kindLabel = {
     chat: '',
@@ -143,9 +140,9 @@ function ModelRow({
 
 // ModelsPage 是模型目录：按额度组筛选（带模型数）与搜索，列出上下文、输出上限、思考档位与可用账户，宽度小于 640px 时每个模型一张卡片
 export function ModelsPage() {
-  const m = useMessages(modelMessages)
-  const q = useMessages(quotaMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('models')
+  const q = useMessages('quota')
+  const app = useMessages('app')
   const models = useModels()
   const accounts = useAccounts()
   const settings = useSettings()

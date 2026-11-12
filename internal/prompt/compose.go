@@ -30,8 +30,16 @@ const neutralIdentity = "You are an AI Agent."
 // keywordsLine 匹配客户端系统提示中含 RFC 2119 keywords 的一行与行尾换行，不区分大小写；上游拒绝带这一写法的关键词说明句
 var keywordsLine = regexp.MustCompile(`(?im)^.*RFC 2119 keywords.*\n?`)
 
-// featuredSection 为推荐插件段的段名，没有推荐插件时该段为空
-const featuredSection = "featured_plugins"
+const (
+	// featuredSection 为推荐插件段的段名，没有推荐插件时该段为空
+	featuredSection = "featured_plugins"
+	// planSection 为两阶段规划执行协议段的段名，只在所选目录条目带 planExperiment 时输出
+	planSection = "plan_execute_protocol"
+	// planExperiment 为目录条目 modelExperiments 中启用两阶段规划执行的实验名
+	planExperiment = "plan-execute-config"
+	// templatePrefix 为目录条目 modelExperiments 中以服务端模板替换一段正文的实验名前缀，后接段名
+	templatePrefix = "template__system_prompts__"
+)
 
 // clientSuffix 为 system 模板中接在官方段之后的客户端系统提示，与官方段隔一个空行
 const clientSuffix = "{{if .Client}}\n\n{{.Client}}{{end}}"
@@ -72,7 +80,7 @@ type Preview struct {
 	User   string `json:"user"`
 }
 
-// systemData 为 system 模板与官方段模板的数据，Separator 为设备系统的路径分隔符，FeaturedPlugins 为推荐插件段的货架正文
+// systemData 为 system 模板与官方段模板的数据，Separator 为设备系统的路径分隔符，FeaturedPlugins 为推荐插件段的货架正文，experiments 为账户实时的布尔实验开关，model 为所选目录条目
 type systemData struct {
 	Client           string
 	ConversationID   string
@@ -81,6 +89,32 @@ type systemData struct {
 	OS               string
 	ModelDisplayName string
 	FeaturedPlugins  string
+	experiments      map[string]bool
+	model            antigravity.CatalogModel
+}
+
+// ExperimentEnabled 判断账户实时实验开关中的布尔开关是否打开，与 language_server 段模板的同名方法对应
+func (d systemData) ExperimentEnabled(name string) bool {
+	return d.experiments[name]
+}
+
+// PlanExecute 判断所选目录条目是否带两阶段规划执行实验
+func (d systemData) PlanExecute() bool {
+	_, ok := d.model.ModelExperiments.Experiments[planExperiment]
+	return ok
+}
+
+// ModelTemplate 以官方客户端的执行配置渲染所选目录条目中替换 name 段正文的服务端模板，条目没有该模板时返回空串
+func (d systemData) ModelTemplate(name string) (string, error) {
+	source := d.model.ModelExperiments.Experiments[templatePrefix+name].StringValue
+	if source == "" {
+		return "", nil
+	}
+	t, err := parse(templatePrefix+name, source)
+	if err != nil {
+		return "", err
+	}
+	return execute(t, templateData{systemData: d})
 }
 
 // userData 为 user 模板的数据
@@ -146,9 +180,9 @@ func (c *Composer) Tier() Tier {
 	return c.tier
 }
 
-// Compose 以会话 ID、账户设备档案与推荐插件段的货架正文渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，含 RFC 2119 keywords 的行删去，工具声明保持不变；模板执行出错时返回该错误
-func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string) (antigravity.GenerateRequest, error) {
-	data := deviceData(model, conversation, device, plugins)
+// Compose 以会话 ID、账户设备档案、推荐插件段的货架正文与账户实时的布尔实验开关渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，含 RFC 2119 keywords 的行删去，工具声明保持不变；模板执行出错时返回该错误
+func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string, experiments map[string]bool) (antigravity.GenerateRequest, error) {
+	data := deviceData(model, conversation, device, plugins, experiments)
 	data.Client = keywordsLine.ReplaceAllString(clientIdentity.ReplaceAllString(request.System, "${1}"+neutralIdentity+"${2}"), "")
 	var err error
 	if request.System, err = execute(c.system, data); err != nil {
@@ -160,8 +194,8 @@ func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravit
 	return request, err
 }
 
-// deviceData 返回以会话、设备档案与推荐插件段的货架正文填写的 system 模板数据
-func deviceData(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string) systemData {
+// deviceData 返回以所选目录条目、会话、设备档案、推荐插件段的货架正文与布尔实验开关填写的 system 模板数据
+func deviceData(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string, experiments map[string]bool) systemData {
 	data := systemData{
 		ConversationID:   conversation,
 		AppDataDir:       device.AppDataDir,
@@ -169,6 +203,8 @@ func deviceData(model antigravity.CatalogModel, conversation string, device anti
 		OS:               device.OS,
 		ModelDisplayName: model.DisplayName,
 		FeaturedPlugins:  plugins,
+		experiments:      experiments,
+		model:            model,
 	}
 	if device.OS == "windows" {
 		data.Separator = `\`
@@ -176,16 +212,13 @@ func deviceData(model antigravity.CatalogModel, conversation string, device anti
 	return data
 }
 
-// SectionTokens 返回以会话、设备档案与推荐插件段的货架正文渲染的各官方段按 ceil(UTF-8 字节数/3) 计的 token 数，键为段名
-func SectionTokens(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string) map[string]int {
-	data := deviceData(model, conversation, device, plugins)
+// SectionTokens 返回以所选目录条目、会话、设备档案、推荐插件段的货架正文与布尔实验开关渲染的各官方段按 ceil(UTF-8 字节数/3) 计的 token 数，键为段名，不输出的段为 0
+func SectionTokens(model antigravity.CatalogModel, conversation string, device antigravity.Device, plugins string, experiments map[string]bool) map[string]int {
+	data := deviceData(model, conversation, device, plugins, experiments)
 	tokens := make(map[string]int, len(officialSections))
 	for name, section := range officialSections {
-		if name == featuredSection && plugins == "" {
-			tokens[name] = 0
-			continue
-		}
 		text, _ := execute(section, data)
+		text = strings.TrimPrefix(text, "\n")
 		tokens[name] = (len(text) + 2) / 3
 	}
 	return tokens
@@ -254,18 +287,22 @@ func parse(name, text string) (*template.Template, error) {
 	return t, nil
 }
 
-// parseSections 把官方原文切成各段的原文与模板，各段以 <段名> 开头、</段名> 结尾、段间以换行相连；推荐插件段的原文包在 FeaturedPlugins 的条件中
+// parseSections 把官方原文切成各段的原文与模板，各段以 <段名> 开头、</段名> 结尾、段间以换行相连；段正文在所选目录条目带该段的服务端模板时换成模板的渲染结果，推荐插件段的原文包在 FeaturedPlugins 的条件中，规划执行协议段包在 PlanExecute 的条件中并在不输出时去掉它之前的换行
 func parseSections(text string) ([]Section, map[string]*template.Template) {
 	var sections []Section
 	parsed := map[string]*template.Template{}
 	for text != "" {
 		name := text[1:strings.IndexByte(text, '>')]
-		end := strings.Index(text, "</"+name+">") + len(name) + 3
-		source := text[:end]
-		parsed[name] = template.Must(template.New(name).Parse(source))
-		if name == featuredSection {
+		open, closing := "<"+name+">\n", "</"+name+">"
+		end := strings.Index(text, closing) + len(closing)
+		source := open + `{{with .ModelTemplate "` + name + `"}}{{.}}` + "\n{{else}}" + text[len(open):end-len(closing)] + "{{end}}" + closing
+		switch name {
+		case featuredSection:
 			source = "{{if .FeaturedPlugins}}" + source + "{{end}}"
+		case planSection:
+			source = "{{- if .PlanExecute}}\n" + source + "{{end}}"
 		}
+		parsed[name] = template.Must(template.New(name).Parse(source))
 		sections = append(sections, Section{Name: name, Source: source})
 		text = strings.TrimPrefix(text[end:], "\n")
 	}

@@ -1,10 +1,8 @@
 import { Gem, UsersRound } from 'lucide-react'
 
 import { Tooltip } from '@/components/ui/tooltip'
-import { accountMessages } from '@/features/accounts/messages'
 import { tierOf } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
-import { quotaMessages } from '@/features/quota/messages'
 import { nameOf } from '@/features/quota/quota'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
@@ -19,7 +17,7 @@ const tierClass = {
 
 // TierBadge 是套餐徽标，悬停显示套餐 ID
 export function TierBadge({ tier }: { tier: string }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const kind = tierOf(tier)
   const label = {
     ultra: m.tierUltra,
@@ -29,25 +27,26 @@ export function TierBadge({ tier }: { tier: string }) {
     unknown: m.tierUnknown,
   }[kind]
   return (
-    <span
-      title={tier || undefined}
-      className={
-        'inline-flex h-icon shrink-0 items-center gap-1 rounded-sm px-2 text-xs font-semibold whitespace-nowrap ' +
-        tierClass[kind]
-      }
-    >
-      {(kind === 'ultra' || kind === 'ultraLite' || kind === 'pro') && (
-        <Gem size={12} aria-hidden />
-      )}
-      {label}
-    </span>
+    <Tooltip label={tier}>
+      <span
+        className={
+          'inline-flex h-icon shrink-0 items-center gap-1 rounded-sm px-2 text-xs font-semibold whitespace-nowrap ' +
+          tierClass[kind]
+        }
+      >
+        {(kind === 'ultra' || kind === 'ultraLite' || kind === 'pro') && (
+          <Gem size={12} aria-hidden />
+        )}
+        {label}
+      </span>
+    </Tooltip>
   )
 }
 
 // FamilyBadge 是家庭组徽标，账户与其他就绪账户共用额度池时显示，悬停列出各额度组的共用账户；compact 时只显示图标
 export function FamilyBadge({ account, compact = false }: { account: Account; compact?: boolean }) {
-  const m = useMessages(accountMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
   const { locale } = useI18n()
   const list = new Intl.ListFormat(locale, { type: 'conjunction' })
   const pools = Object.entries(account.shared ?? {}).filter(([, members]) => members.length > 0)

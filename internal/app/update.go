@@ -62,16 +62,24 @@ type githubAsset struct {
 
 // updateStatus 是 GET /api/update 的响应
 type updateStatus struct {
-	Current     string    `json:"current"`
-	Latest      string    `json:"latest,omitempty"`
-	Available   bool      `json:"available"`
-	Mode        string    `json:"mode"`
-	Notes       string    `json:"notes,omitempty"`
-	URL         string    `json:"url,omitempty"`
-	PublishedAt time.Time `json:"published_at,omitzero"`
-	CheckedAt   time.Time `json:"checked_at,omitzero"`
-	Error       string    `json:"error,omitempty"`
-	Updating    bool      `json:"updating"`
+	Current     string          `json:"current"`
+	Latest      string          `json:"latest,omitempty"`
+	Available   bool            `json:"available"`
+	Mode        string          `json:"mode"`
+	Notes       string          `json:"notes,omitempty"`
+	URL         string          `json:"url,omitempty"`
+	PublishedAt time.Time       `json:"published_at,omitzero"`
+	CheckedAt   time.Time       `json:"checked_at,omitzero"`
+	Error       string          `json:"error,omitempty"`
+	Updating    bool            `json:"updating"`
+	Progress    *updateProgress `json:"progress,omitempty"`
+}
+
+// updateProgress 是在线更新的阶段（download、verify、install、restart）与发行包的已下载和总字节数，总字节数未知时为 0
+type updateProgress struct {
+	Stage      string `json:"stage"`
+	Downloaded int64  `json:"downloaded"`
+	Total      int64  `json:"total"`
 }
 
 // updateConflict 是当前状态不允许更新时的错误，管理 API 以 409 返回
@@ -92,6 +100,7 @@ type selfUpdater struct {
 	checked    time.Time
 	checkErr   error
 	updating   bool
+	progress   updateProgress
 }
 
 // newSelfUpdater 按构建版本创建更新器，替换目标为当前可执行文件
@@ -151,6 +160,7 @@ func (u *selfUpdater) apply(ctx context.Context) (updateStatus, error) {
 		return updateStatus{}, updateConflict("更新正在进行")
 	}
 	u.updating = true
+	u.progress = updateProgress{Stage: "download"}
 	u.mu.Unlock()
 	release, err := u.fetchRelease(ctx)
 	if err == nil && semver.Compare(release.TagName, u.version) <= 0 {
@@ -168,6 +178,7 @@ func (u *selfUpdater) apply(ctx context.Context) (updateStatus, error) {
 		return updateStatus{}, err
 	}
 	u.release, u.checked, u.checkErr = release, time.Now(), nil
+	u.progress.Stage = "restart"
 	slog.Info("在线更新完成 | 版本="+release.TagName, "source", "service")
 	status := u.statusLocked()
 	u.server.deps.Restart()
@@ -177,6 +188,10 @@ func (u *selfUpdater) apply(ctx context.Context) (updateStatus, error) {
 // statusLocked 在持有锁时生成更新状态
 func (u *selfUpdater) statusLocked() updateStatus {
 	status := updateStatus{Current: u.version, Mode: u.mode, CheckedAt: u.checked, Updating: u.updating}
+	if u.updating {
+		progress := u.progress
+		status.Progress = &progress
+	}
 	if u.checkErr != nil {
 		status.Error = u.checkErr.Error()
 	}
@@ -216,15 +231,38 @@ func (u *selfUpdater) download(ctx context.Context, release *githubRelease, name
 	if err != nil {
 		return nil, fmt.Errorf("下载 %s: %w", name, err)
 	}
-	archive, err := io.ReadAll(response.Body)
+	u.mu.Lock()
+	u.progress = updateProgress{Stage: "download", Total: max(response.ContentLength, 0)}
+	u.mu.Unlock()
+	archive, err := io.ReadAll(io.TeeReader(response.Body, downloadCounter{u}))
 	response.Body.Close()
 	if err != nil {
 		return nil, fmt.Errorf("下载 %s: %w", name, err)
 	}
+	u.setStage("verify")
 	if sum := sha256.Sum256(archive); hex.EncodeToString(sum[:]) != expected {
 		return nil, fmt.Errorf("发行包 %s 的 SHA-256 与发行版本记录不一致", name)
 	}
+	u.setStage("install")
 	return archive, nil
+}
+
+// setStage 记录在线更新进入的阶段
+func (u *selfUpdater) setStage(stage string) {
+	u.mu.Lock()
+	u.progress.Stage = stage
+	u.mu.Unlock()
+}
+
+// downloadCounter 把流经的字节数计入在线更新的已下载字节数
+type downloadCounter struct{ updater *selfUpdater }
+
+// Write 累加 p 的字节数
+func (c downloadCounter) Write(p []byte) (int, error) {
+	c.updater.mu.Lock()
+	c.updater.progress.Downloaded += int64(len(p))
+	c.updater.mu.Unlock()
+	return len(p), nil
 }
 
 // get 按实时代理配置发出 GET，非 200 响应返回错误

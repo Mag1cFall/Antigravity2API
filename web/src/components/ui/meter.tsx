@@ -15,22 +15,24 @@ const fillVariants = cva('h-full rounded-full transition-[width] duration-200 ea
 // MeterTone 是比例条的语气
 type MeterTone = 'info' | 'success' | 'warning' | 'error'
 
-// Meter 是全圆角比例条，value 为 0 到 1，thin 时高 6px，否则 8px
+// Meter 是全圆角比例条，value 为 0 到 1，thin 时高 6px，否则 8px；progress 时表示任务进度
 export function Meter({
   value,
   tone,
   label,
   thin = false,
+  progress = false,
 }: {
   value: number
   tone: MeterTone
   label: string
   thin?: boolean
+  progress?: boolean
 }) {
   const clamped = Math.min(1, Math.max(0, value))
   return (
     <div
-      role="meter"
+      role={progress ? 'progressbar' : 'meter'}
       aria-label={label}
       aria-valuemin={0}
       aria-valuemax={100}

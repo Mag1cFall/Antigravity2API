@@ -41,9 +41,10 @@ func run(ctx context.Context, args []string) error {
 		alert(err)
 		return err
 	}
+	cache, _ := os.UserCacheDir()
 	return desktop.Run(desktop.Options{
 		Title:   title,
-		DataDir: filepath.Join(cfg.RuntimeDir, "webview"),
+		DataDir: filepath.Join(cache, title, "WebView2"),
 		Hidden:  *hidden,
 		Serve: func(ctx context.Context, ready func(string)) error {
 			return serve(ctx, "desktop", cfg, overrides, func(address string) { ready(loopback(address)) }, func() {

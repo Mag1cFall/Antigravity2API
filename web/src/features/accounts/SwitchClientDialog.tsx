@@ -1,13 +1,11 @@
 import { ArrowRightLeft, CircleCheck, LoaderCircle } from 'lucide-react'
 import { useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useSwitchAccount } from '@/features/accounts/actions'
-import { accountMessages } from '@/features/accounts/messages'
 import { fill, useMessages } from '@/lib/i18n'
 
 // SwitchClientDialog 确认后把本机官方客户端切换到账户 email 并重新打开，进度与结果只在对话框中显示；variant 为 icon 时触发按钮是带提示的图标按钮
@@ -18,8 +16,8 @@ export function SwitchClientDialog({
   email: string
   variant: 'icon' | 'button'
 }) {
-  const m = useMessages(accountMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('accounts')
+  const app = useMessages('app')
   const [open, setOpen] = useState(false)
   const switching = useSwitchAccount()
   const start = () => {

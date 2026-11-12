@@ -23,7 +23,7 @@ const conversationTTL = 24 * time.Hour
 // conversationTemp 为写入会话文件时同目录临时文件的名称前缀
 const conversationTemp = ".conversation-"
 
-// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、最近一次请求在摘要链中的位置与其成功生成的回答指纹、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 的思考签名与各签名摘要对应的模型族
+// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、最近一次请求在摘要链中的位置与其成功生成的回答指纹、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 与各回答指纹的思考签名、各签名摘要对应的模型族
 type conversation struct {
 	Cascade    string            `json:"cascade"`
 	Trajectory string            `json:"trajectory"`
@@ -130,6 +130,11 @@ func answerKey(parts []antigravity.Part) string {
 	return digest("", []byte(strings.Join(strings.Fields(text.String()), " ")+"\x00"+strings.Join(calls, "\x00")))
 }
 
+// replySignatureKey 返回回答正文签名在会话签名表中的键
+func replySignatureKey(answer string) string {
+	return "reply:" + answer
+}
+
 // digest 返回上一项摘要与本项内容的 SHA-256
 func digest(previous string, data []byte) string {
 	hash := sha256.New()
@@ -191,7 +196,7 @@ func (c *conversations) match(digests, answers []string, accept func(*conversati
 	return best
 }
 
-// record 记下会话一次成功生成的模型、消息条数、上游 contents 条数、上游 promptTokenCount 与输出中的思考签名，会话仍停在本次请求时记下回答指纹
+// record 记下会话一次成功生成的模型、消息条数、上游 contents 条数、上游 promptTokenCount 与输出中的思考签名，回答正文的签名以回答指纹为键，会话仍停在本次请求时记下回答指纹
 func (c *conversations) record(cascade string, digests []string, answer, model string, contents int, tokens int64, signed signatureRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -204,10 +209,13 @@ func (c *conversations) record(cascade string, digests []string, answer, model s
 	if item.Length == length && item.Digest == digests[length] {
 		item.Answer = answer
 	}
-	if len(signed.calls) > 0 && item.Signatures == nil {
+	if (len(signed.calls) > 0 || signed.reply != "") && item.Signatures == nil {
 		item.Signatures = map[string]string{}
 	}
 	maps.Copy(item.Signatures, signed.calls)
+	if signed.reply != "" {
+		item.Signatures[replySignatureKey(answer)] = signed.reply
+	}
 	if len(signed.origins) > 0 && item.Origins == nil {
 		item.Origins = map[string]string{}
 	}

@@ -1,7 +1,6 @@
 import { Dices, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -9,13 +8,12 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { SearchInput } from '@/components/ui/search-input'
 import { ErrorState, Loading } from '@/components/ui/states'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useAccounts } from '@/features/accounts/queries'
-import { connectMessages } from '@/features/connect/messages'
 import { markProgress } from '@/features/connect/progress'
-import { settingsMessages } from '@/features/settings/messages'
 import { splitList, useSaveSettings, useSettings } from '@/features/settings/queries'
 import { fill, useMessages } from '@/lib/i18n'
 
@@ -43,7 +41,7 @@ function parseBindings(value: string | undefined) {
 
 // useApiKeys 返回 .env 中保存的 API key、各 key 绑定的账户、两者是否由进程环境变量决定与保存方法，保存时去掉已不存在的 key 的绑定
 export function useApiKeys() {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   const settings = useSettings()
   const save = useSaveSettings()
   const keys = splitList(settings.data?.values.API_KEYS)
@@ -80,13 +78,18 @@ function KeyDialog({
   trigger: ReactNode
   tooltip?: string
 }) {
-  const m = useMessages(connectMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('connect')
+  const app = useMessages('app')
   const { keys, bindings, keysLocked, bindingsLocked, write, saving } = useApiKeys()
   const accounts = useAccounts()
   const [open, setOpen] = useState(false)
   const [value, setValue] = useState('')
   const [bound, setBound] = useState<string[]>([])
+  const [query, setQuery] = useState('')
+  const needle = query.trim().toLowerCase()
+  const shown = (accounts.data?.accounts ?? []).filter((account) =>
+    [account.id, account.label ?? ''].some((text) => text.toLowerCase().includes(needle)),
+  )
   const [error, setError] = useState<string>()
   const editing = index !== undefined
   const submit = () => {
@@ -122,6 +125,7 @@ function KeyDialog({
         if (next) {
           setValue(editing ? (keys[index] ?? '') : generateKey())
           setBound(editing ? (bindings[keys[index] ?? ''] ?? []) : [])
+          setQuery('')
           setError(undefined)
         }
         setOpen(next)
@@ -194,22 +198,38 @@ function KeyDialog({
             <fieldset className="mt-4 flex flex-col gap-2">
               <legend className="text-sm font-medium">{m.keyAccounts}</legend>
               <p className="text-sm text-foreground-muted">{m.keyAccountsHint}</p>
-              {accounts.data.accounts.map((account) => (
-                <label key={account.id} className="flex items-center gap-2 text-sm">
-                  <Checkbox
-                    checked={bound.includes(account.id)}
-                    disabled={bindingsLocked}
-                    onCheckedChange={(checked) => {
-                      setBound((current) =>
-                        checked === true
-                          ? [...current, account.id]
-                          : current.filter((id) => id !== account.id),
-                      )
-                    }}
-                  />
-                  <span className="truncate">{account.label ?? account.id}</span>
-                </label>
-              ))}
+              <SearchInput
+                aria-label={m.keyAccountsSearch}
+                placeholder={m.keyAccountsSearch}
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value)
+                }}
+              />
+              <ul className="flex max-h-[264px] flex-col overflow-y-auto rounded-md border border-border py-1">
+                {shown.length === 0 ? (
+                  <li className="px-3 py-2 text-sm text-foreground-muted">{m.keyAccountsNone}</li>
+                ) : (
+                  shown.map((account) => (
+                    <li key={account.id}>
+                      <label className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-hover">
+                        <Checkbox
+                          checked={bound.includes(account.id)}
+                          disabled={bindingsLocked}
+                          onCheckedChange={(checked) => {
+                            setBound((current) =>
+                              checked === true
+                                ? [...current, account.id]
+                                : current.filter((id) => id !== account.id),
+                            )
+                          }}
+                        />
+                        <span className="truncate">{account.label ?? account.id}</span>
+                      </label>
+                    </li>
+                  ))
+                )}
+              </ul>
             </fieldset>
           )}
         </form>
@@ -220,7 +240,7 @@ function KeyDialog({
 
 // AddKeyButton 打开添加 API key 的对话框
 export function AddKeyButton({ primary = false }: { primary?: boolean }) {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   const { settings, keysLocked } = useApiKeys()
   return (
     <KeyDialog
@@ -240,9 +260,9 @@ export function AddKeyButton({ primary = false }: { primary?: boolean }) {
 
 // ApiKeyList 列出 API key，可复制、修改与删除，删除后 5 秒内可撤销；API_KEYS 由进程环境变量决定时只能修改绑定的账户
 export function ApiKeyList() {
-  const m = useMessages(connectMessages)
-  const app = useMessages(appMessages)
-  const settingsText = useMessages(settingsMessages)
+  const m = useMessages('connect')
+  const app = useMessages('app')
+  const settingsText = useMessages('settings')
   const { settings, keys, bindings, keysLocked, write } = useApiKeys()
   if (settings.isPending) return <Loading label={app.loading} rows={2} />
   if (settings.isError) {

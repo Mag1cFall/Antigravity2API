@@ -129,15 +129,14 @@ func detectMediaType(name string, data []byte) string {
 	return detected
 }
 
-// audioMIME 返回 input_audio 格式名对应的 MIME
+// audioMIME 返回 input_audio 格式名或完整 MIME 对应的 MIME
 func audioMIME(format string) string {
-	switch strings.ToLower(format) {
+	format = strings.TrimPrefix(strings.ToLower(format), "audio/")
+	switch format {
 	case "mp3", "mpeg":
 		return "audio/mpeg"
-	case "wav":
-		return "audio/wav"
 	default:
-		return "audio/" + strings.ToLower(format)
+		return "audio/" + format
 	}
 }
 

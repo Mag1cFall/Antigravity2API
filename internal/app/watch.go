@@ -72,10 +72,10 @@ type quotaBucket struct {
 	ResetTime         *time.Time `json:"reset_time,omitempty"`
 }
 
-// validationURL 匹配上游错误正文 ErrorInfo.metadata 中的 validation_url
-var validationURL = regexp.MustCompile(`"validation_url"\s*:\s*("(?:[^"\\]|\\.)*")`)
+// validationURL 匹配上游错误正文 ErrorInfo.metadata 中的 validation_url、违反条款时的 appeal_url 与不能使用的套餐的 validationUrl
+var validationURL = regexp.MustCompile(`"(?:validation_url|appeal_url|validationUrl)"\s*:\s*("(?:[^"\\]|\\.)*")`)
 
-// verifyURL 返回账户错误中上游给出的验证链接
+// verifyURL 返回账户错误中上游给出的验证或申诉链接
 func verifyURL(message string) string {
 	match := validationURL.FindStringSubmatch(message)
 	if match == nil {

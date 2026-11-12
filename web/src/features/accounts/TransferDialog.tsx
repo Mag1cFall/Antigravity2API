@@ -8,60 +8,7 @@ import { Textarea } from '@/components/ui/input'
 import { keepAccounts } from '@/features/accounts/actions'
 import { accountsKey } from '@/features/accounts/queries'
 import { api, errorMessage } from '@/lib/api'
-import { defineMessages, fill, useMessages } from '@/lib/i18n'
-
-// transferMessages 是账户文件导入与导出的文案
-export const transferMessages = defineMessages(
-  {
-    export: '导出 JSON',
-    exportSelected: '导出所选（{count}）',
-    description: '支持 Antigravity Manager、CLIProxyAPI、sub2api 等项目导出的账户文件',
-    files: '账户文件',
-    drop: '把文件拖到这里，或',
-    choose: '选择文件',
-    removeFile: '移除 {name}',
-    paste: '或粘贴内容',
-    placeholder: '[{"email": "...", "refresh_token": "1//..."}]',
-    submit: '导入',
-    pasted: '粘贴的内容',
-    done: '已导入 {count} 个账户',
-    partial: '已导入 {count} 个账户，{failed} 项失败',
-    failure: '{account}：{error}',
-  },
-  {
-    export: 'Export JSON',
-    exportSelected: 'Export selected ({count})',
-    description:
-      'Account files exported by Antigravity Manager, CLIProxyAPI, sub2api and similar tools',
-    files: 'Account files',
-    drop: 'Drop files here, or',
-    choose: 'choose files',
-    removeFile: 'Remove {name}',
-    paste: 'Or paste',
-    placeholder: '[{"email": "...", "refresh_token": "1//..."}]',
-    submit: 'Import',
-    pasted: 'Pasted text',
-    done: 'Imported {count} accounts',
-    partial: 'Imported {count} accounts, {failed} failed',
-    failure: '{account}: {error}',
-  },
-  {
-    export: '匯出 JSON',
-    exportSelected: '匯出所選（{count}）',
-    description: '支援 Antigravity Manager、CLIProxyAPI、sub2api 等專案匯出的帳號檔案',
-    files: '帳號檔案',
-    drop: '把檔案拖曳到這裡，或',
-    choose: '選擇檔案',
-    removeFile: '移除 {name}',
-    paste: '或貼上內容',
-    placeholder: '[{"email": "...", "refresh_token": "1//..."}]',
-    submit: '匯入',
-    pasted: '貼上的內容',
-    done: '已匯入 {count} 個帳號',
-    partial: '已匯入 {count} 個帳號，{failed} 項失敗',
-    failure: '{account}：{error}',
-  },
-)
+import { fill, serverText, useMessages } from '@/lib/i18n'
 
 // TransferResult 是 POST /api/accounts/import/json 的响应
 interface TransferResult {
@@ -79,7 +26,7 @@ export function exportURL(ids: readonly string[]) {
 
 // ImportAccountFiles 是添加账户对话框中的导入账户文件：拖入或选择文件（透明的文件输入框盖住整块区域）、粘贴内容，每个文件与粘贴内容各发一次请求，结果合并显示在下方
 export function ImportAccountFiles() {
-  const m = useMessages(transferMessages)
+  const m = useMessages('transfer')
   const client = useQueryClient()
   const [files, setFiles] = useState<File[]>([])
   const [text, setText] = useState('')
@@ -215,7 +162,7 @@ export function ImportAccountFiles() {
           <ul className="overflow-y-auto text-xs text-error-text">
             {result.failed.map((item) => (
               <li key={item.account + item.error} className="break-words">
-                {fill(m.failure, { account: item.account, error: item.error })}
+                {fill(m.failure, { account: item.account, error: serverText(item.error) })}
               </li>
             ))}
           </ul>

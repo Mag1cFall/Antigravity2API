@@ -1,7 +1,6 @@
 import { ExternalLink, Network, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
@@ -19,12 +18,10 @@ import {
   useSetLabel,
   useSetPriority,
 } from '@/features/accounts/actions'
-import { accountMessages } from '@/features/accounts/messages'
 import { creditsShort, statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { FamilyBadge, TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
-import { quotaMessages } from '@/features/quota/messages'
 import { groups, nameOf } from '@/features/quota/quota'
 import type { UsageStats } from '@/features/usage/types'
 import {
@@ -69,7 +66,7 @@ function Block({
 
 // PriorityField 编辑账户的调度优先级，改动后点保存提交
 function PriorityField({ account }: { account: Account }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const save = useSetPriority()
   const [value, setValue] = useState(account.priority)
   const unchanged = Number.isNaN(value) || value === account.priority
@@ -105,7 +102,7 @@ function PriorityField({ account }: { account: Account }) {
 
 // LabelField 编辑账户的备注名，改动后点保存或按 Enter 提交，留空时清除
 function LabelField({ account }: { account: Account }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const save = useSetLabel()
   const [value, setValue] = useState(account.label ?? '')
   const unchanged = value.trim() === (account.label ?? '')
@@ -145,7 +142,7 @@ function LabelField({ account }: { account: Account }) {
 
 // CreditsField 开启或关闭账户的 AI 积分超额使用
 function CreditsField({ account }: { account: Account }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const save = useSetCredits()
   return (
     <label className="flex items-center gap-2 text-sm">
@@ -180,9 +177,9 @@ export function AccountDetailSheet({
   actions: RowActions
   onClose: () => void
 }) {
-  const m = useMessages(accountMessages)
-  const q = useMessages(quotaMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const status = account ? statusOf(account) : undefined
   const quotaRefresh = useQuotaRefresh()
@@ -287,6 +284,17 @@ export function AccountDetailSheet({
                     {m.verifyAction}
                   </Button>
                 </div>
+              </Callout>
+            )}
+            {status === 'disabled' && account.verify_url && (
+              <Callout tone="muted" role="status">
+                <p>{m.disabledLink}</p>
+                <Button size="sm" asChild>
+                  <a href={account.verify_url} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink size={16} aria-hidden />
+                    {m.openUpstream}
+                  </a>
+                </Button>
               </Callout>
             )}
             <Block

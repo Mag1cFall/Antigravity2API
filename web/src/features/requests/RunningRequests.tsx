@@ -9,7 +9,6 @@ import { toast } from '@/components/ui/toast'
 import { requestStages } from '@/features/logs/filter'
 import type { LogEntry } from '@/features/logs/types'
 import { protocolName } from '@/features/requests/filters'
-import { requestMessages } from '@/features/requests/messages'
 import { api } from '@/lib/api'
 import { formatDateTime, formatElapsed } from '@/lib/format'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
@@ -17,7 +16,7 @@ import { useNow } from '@/lib/time'
 
 // RunningRequests 是事件流推送的进行中请求，显示已运行秒数与最近一条进度日志所写的阶段，可逐个停止；宽度小于 640px 时每个请求一张卡片，模型与账户在下方单独成行
 export function RunningRequests() {
-  const m = useMessages(requestMessages)
+  const m = useMessages('requests')
   const { locale } = useI18n()
   const now = useNow(1000)
   const running = useRunning()

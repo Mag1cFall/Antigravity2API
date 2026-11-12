@@ -15,12 +15,11 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { matchLog, type MinimumLevel, parseLogFilter, requestStages } from '@/features/logs/filter'
-import { logMessages } from '@/features/logs/messages'
 import type { LogEntry, LogLevel, LogPage } from '@/features/logs/types'
 import { rangeQuery } from '@/features/usage/queries'
 import { api, errorMessage } from '@/lib/api'
 import { dateFormat, formatElapsed } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { changeParams } from '@/lib/params'
 import { useNow } from '@/lib/time'
 
@@ -40,7 +39,7 @@ const LogLine = memo(function LogLine({
   entry: LogEntry
   timeFormat: Intl.DateTimeFormat
 }) {
-  const m = useMessages(logMessages)
+  const m = useMessages('logs')
   return (
     <div
       className={
@@ -58,7 +57,7 @@ const LogLine = memo(function LogLine({
         <span className="truncate text-foreground-muted">{entry.source}</span>
       </Tooltip>
       <span className="col-span-3 min-w-0 break-words whitespace-pre-wrap text-foreground select-text sm:col-span-1">
-        {entry.message}
+        {serverText(entry.message)}
         {entry.request_id && (
           <>
             {' '}
@@ -75,6 +74,22 @@ const LogLine = memo(function LogLine({
   )
 })
 
+// logKeys 是各条实时日志在虚拟列表中的键，日志缓存满后整体前移时每条日志的键不变
+const logKeys = new WeakMap<LogEntry, number>()
+
+// nextLogKey 是下一条实时日志的键
+let nextLogKey = 0
+
+// logKey 返回实时日志的虚拟列表键，第一次遇到的日志分配新键
+function logKey(entry: LogEntry) {
+  let key = logKeys.get(entry)
+  if (key === undefined) {
+    key = nextLogKey++
+    logKeys.set(entry, key)
+  }
+  return key
+}
+
 // reducedMotion 判断系统是否要求减少动态效果
 function reducedMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -82,7 +97,7 @@ function reducedMotion() {
 
 // RunningStrip 是实时日志上方的进行中请求：模型、账户、已运行秒数与最近一条进度日志所写的阶段，每秒更新
 function RunningStrip({ logs }: { logs: LogEntry[] }) {
-  const m = useMessages(logMessages)
+  const m = useMessages('logs')
   const { locale } = useI18n()
   const now = useNow(1000)
   const running = useRunning()
@@ -141,7 +156,7 @@ function savedQuery(
 
 // SavedLogs 检索写入账本的 WARN 以上日志，按时间范围、级别、请求 ID 与关键词筛选，条件保存在 URL；toolbar 是视图切换等通用控件
 function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
-  const m = useMessages(logMessages)
+  const m = useMessages('logs')
   const { locale } = useI18n()
   const [params, setParams] = useSearchParams()
   const range =
@@ -257,7 +272,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
 
 // LogsPage 是服务日志：实时尾随与已保存日志检索，视图与筛选条件保存在 URL；实时日志区占满页面剩余高度，上方列出进行中的请求，重新打开跟随时平滑滚到最新
 export function LogsPage() {
-  const m = useMessages(logMessages)
+  const m = useMessages('logs')
   const { locale } = useI18n()
   const connection = useConnection()
   const client = useQueryClient()
@@ -279,6 +294,10 @@ export function LogsPage() {
     count: visible.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 29,
+    getItemKey: (index) => {
+      const entry = visible[index]
+      return entry ? logKey(entry) : index
+    },
     overscan: 16,
   })
   const timeFormat = dateFormat(locale, {

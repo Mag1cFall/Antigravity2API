@@ -5,7 +5,9 @@ import (
 	"compress/gzip"
 	"context"
 	crand "crypto/rand"
+	"crypto/sha256"
 	"embed"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"io/fs"
@@ -20,34 +22,18 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// preloginErrorOffset 为登录前错误上报相对虚拟进程启动的最早时刻，官方新安装现场为 5.1–5.7 s
+// preloginErrorOffset 为登录前第一个 clearcut 批次相对虚拟进程启动的最早时刻，官方新安装现场为 5.1–5.7 s
 const preloginErrorOffset = 5100 * time.Millisecond
 
-//go:embed prelogin_windows_src327.bin.gz
-var preloginWindows327 []byte
-
-//go:embed prelogin_windows_src2747.bin.gz
-var preloginWindows2747 []byte
-
-//go:embed prelogin_linux_src327.bin.gz
-var preloginLinux327 []byte
-
-//go:embed prelogin_linux_src2747.bin.gz
-var preloginLinux2747 []byte
-
-// preloginLater 为登录前错误上报之后各系统继续发出的批次，文件名为 prelogin_<系统>_after<序号>.bin.gz
+// preloginFiles 为各系统登录前 clearcut 批次的正文模板，文件名为 prelogin_<系统>_<序号>.bin.gz，序号为现场中的发出顺序
 //
-//go:embed prelogin_*_after*.bin.gz
-var preloginLater embed.FS
+//go:embed prelogin_*.bin.gz
+var preloginFiles embed.FS
 
-// preloginTemplate 为一个系统的登录前错误上报模板：日志源 327 的结构化帧批次与 2747 的事件批次，install 为模板中的 installation_id，later 为之后继续发出的批次
+// preloginTemplate 为一个系统的登录前 clearcut 模板：install 为模板中的 installation_id，batches 为按发出顺序排列的批次
 type preloginTemplate struct {
-	src327   []byte
-	src2747  []byte
-	install  []byte
-	sent327  uint64
-	sent2747 uint64
-	later    []preloginBatch
+	install []byte
+	batches []preloginBatch
 }
 
 // preloginBatch 为一个登录前批次的正文模板与其中的上报时刻
@@ -56,10 +42,10 @@ type preloginBatch struct {
 	sent uint64
 }
 
-// preloginTemplates 为各系统的登录前错误上报模板，登录只在本机系统上发起，故只含 windows 与 linux
+// preloginTemplates 为各系统的登录前模板，登录只在本机系统上发起，故只含 windows 与 linux
 var preloginTemplates = map[string]preloginTemplate{
-	"windows": loadPreloginTemplate("windows", preloginWindows327, preloginWindows2747),
-	"linux":   loadPreloginTemplate("linux", preloginLinux327, preloginLinux2747),
+	"windows": loadPreloginTemplate("windows"),
+	"linux":   loadPreloginTemplate("linux"),
 }
 
 // gunzip 解压一段 gzip 字节
@@ -75,35 +61,27 @@ func gunzip(data []byte) []byte {
 	return out
 }
 
-// loadPreloginTemplate 解压一个系统的各批次并取出模板中的 installation_id 与上报时刻
-func loadPreloginTemplate(system string, gz327, gz2747 []byte) preloginTemplate {
-	src327, src2747 := gunzip(gz327), gunzip(gz2747)
-	t := preloginTemplate{src327: src327, src2747: src2747}
-	names, _ := fs.Glob(preloginLater, "prelogin_"+system+"_after*.bin.gz")
+// loadPreloginTemplate 解压一个系统的各批次，取出上报时刻与日志源 327 事件中的 installation_id
+func loadPreloginTemplate(system string) preloginTemplate {
+	var t preloginTemplate
+	names, _ := fs.Glob(preloginFiles, "prelogin_"+system+"_*.bin.gz")
 	slices.Sort(names)
 	for _, name := range names {
-		gz, _ := preloginLater.ReadFile(name)
+		gz, _ := preloginFiles.ReadFile(name)
 		data := gunzip(gz)
 		batch := preloginBatch{data: data}
+		var source uint64
 		for _, node := range pbParse(data) {
-			if node.num == 4 && node.wire == 0 {
+			switch {
+			case node.num == 2 && node.wire == 0:
+				source = node.u
+			case node.num == 4 && node.wire == 0:
 				batch.sent = node.u
+			case node.num == 3 && node.wire == 2 && source == 327 && t.install == nil:
+				t.install = preloginInstall(node.raw)
 			}
 		}
-		t.later = append(t.later, batch)
-	}
-	for _, node := range pbParse(src327) {
-		if node.num == 4 && node.wire == 0 {
-			t.sent327 = node.u
-		}
-		if node.num == 3 && node.wire == 2 {
-			t.install = preloginInstall(node.raw)
-		}
-	}
-	for _, node := range pbParse(src2747) {
-		if node.num == 4 && node.wire == 0 {
-			t.sent2747 = node.u
-		}
+		t.batches = append(t.batches, batch)
 	}
 	return t
 }
@@ -182,8 +160,8 @@ func shiftTime(v uint64, deltaMs int64) uint64 {
 	return v
 }
 
-// rewritePrelogin 以设备 installation_id、当前时刻与随机标识改写一个登录前批次：时刻整体平移、模板 installation_id 换设备 installation_id、界面会话标识换新、错误追踪标识换新、goroutine 栈地址按本进程固定偏移平移
-func rewritePrelogin(template, templateInstall, deviceInstall []byte, deltaMs int64, browser []byte, imgDelta, heapDelta uint64) []byte {
+// rewritePrelogin 以设备 installation_id、当前时刻与随机标识改写一个登录前批次：时刻整体平移、模板 installation_id 换设备 installation_id、界面会话标识换新、错误追踪标识换新、goroutine 栈指针按本进程固定偏移平移
+func rewritePrelogin(template, templateInstall, deviceInstall []byte, deltaMs int64, browser []byte, shift stackShift) []byte {
 	return pbWalk(template, func(n *pbNode) {
 		switch {
 		case n.wire == 0:
@@ -192,7 +170,7 @@ func rewritePrelogin(template, templateInstall, deviceInstall []byte, deltaMs in
 		case bytes.Equal(n.raw, templateInstall):
 			n.raw = deviceInstall
 		case bytes.HasPrefix(n.raw, []byte("goroutine ")):
-			n.raw = shiftAddresses(n.raw, imgDelta, heapDelta)
+			n.raw = shift.apply(n.raw)
 		case digits(n.raw):
 			if v, err := strconv.ParseUint(string(n.raw), 10, 64); err == nil {
 				if s := shiftTime(v, deltaMs); s != v {
@@ -226,36 +204,72 @@ func isUUID(b []byte) bool {
 	return true
 }
 
-// shiftAddresses 把 goroutine 栈文本中的映像地址与堆地址分别加本进程固定偏移，低于 0x400000000000 视为堆地址
-func shiftAddresses(text []byte, imgDelta, heapDelta uint64) []byte {
+// stackShift 为一个虚拟进程改写 goroutine 栈指针的偏移：image 为映像，heap 为 Go 堆，native 为 Go 堆之外的系统分配
+type stackShift struct {
+	image, heap, native uint64
+}
+
+// newStackShift 返回一个虚拟进程的栈指针偏移：Windows 的映像基址同一次开机内各进程相同，按 installation_id 固定，Linux 的映像每个进程随机，为 [0, 0x1000) 中的整数乘 0x10000；Go 运行时把堆基址随机放在低 46 位地址空间，堆地址落在 [2^44, 2^46) 内循环平移，堆偏移为其中按 8 KB 页对齐的随机值；系统分配偏移为 [0, 0x40) 中的随机整数乘 0x4000000
+func newStackShift(device Device) stackShift {
+	image := uint64(rand.N(0x1000)) * 0x10000
+	if device.OS == "windows" {
+		sum := sha256.Sum256([]byte(device.InstallationID))
+		image = binary.LittleEndian.Uint64(sum[:]) % 0x1000 * 0x10000
+	}
+	return stackShift{image: image, heap: rand.Uint64N(3<<31) << 13, native: uint64(rand.N(0x40)) * 0x4000000}
+}
+
+// stackPointer 返回栈文本中一个十六进制数作为指针的值：低于 2^32 的代码偏移与长度等参数值各进程相同，不是指针
+func stackPointer(match []byte) (uint64, bool) {
+	v, err := strconv.ParseUint(string(match[2:]), 16, 64)
+	return v, err == nil && v >= 1<<32
+}
+
+// apply 改写 goroutine 栈文本中的指针：不低于 0x400000000000 的为映像地址，加映像偏移取低 48 位；其余指针中高 32 位与文本中最常见的高 32 位相差不超过 1 的为 Go 堆地址，加堆偏移后在 [2^44, 2^46) 内取模，保持 12 位十六进制，其他为系统分配，加系统分配偏移取低 48 位
+func (s stackShift) apply(text []byte) []byte {
+	counts := map[uint64]int{}
+	for _, match := range hexAddress.FindAll(text, -1) {
+		if v, ok := stackPointer(match); ok && v < 0x400000000000 {
+			counts[v>>32]++
+		}
+	}
+	var arena uint64
+	for high, count := range counts {
+		if count > counts[arena] {
+			arena = high
+		}
+	}
 	return hexAddress.ReplaceAllFunc(text, func(match []byte) []byte {
-		v, err := strconv.ParseUint(string(match[2:]), 16, 64)
-		if err != nil {
+		v, ok := stackPointer(match)
+		switch {
+		case !ok:
 			return match
+		case v >= 0x400000000000:
+			v = (v + s.image) & (1<<48 - 1)
+		case v>>32+1 >= arena && v>>32 <= arena+1:
+			v = (v+s.heap)%(3<<44) + 1<<44
+		default:
+			v = (v + s.native) & (1<<48 - 1)
 		}
-		delta := heapDelta
-		if v >= 0x400000000000 {
-			delta = imgDelta
-		}
-		return []byte("0x" + strconv.FormatUint((v+delta)&0xffffffffffff, 16))
+		return []byte("0x" + strconv.FormatUint(v, 16))
 	})
 }
 
-// Prelogin 代登录开始时生成的设备在拿到 token 前发出官方 language_server 的登录前请求：一次不带 Bearer 的 clearcut 错误上报与其后的 clearcut 批次；browser、imgDelta、heapDelta 为本进程改写模板用的界面会话标识与地址偏移
+// Prelogin 代登录开始时生成的设备在拿到 token 前发出官方 language_server 的登录前请求：按现场顺序与间隔发出的不带 Bearer 的 clearcut 批次；browser 与 shift 为本进程改写模板用的界面会话标识与栈指针偏移
 type Prelogin struct {
-	client              *Client
-	browser             []byte
-	imgDelta, heapDelta uint64
+	client  *Client
+	browser []byte
+	shift   stackShift
 }
 
 // NewPrelogin 以登录开始的设备档案创建登录前虚拟进程，日志中的账户记为 login
 func NewPrelogin(device Device, proxy Proxy) *Prelogin {
 	client := NewClient("login", staticToken{}, device, proxy)
 	client.SetHub(HubState{}, nil)
-	return &Prelogin{client: client, browser: []byte(uuid.NewString()), imgDelta: uint64(rand.N(0x1000)) * 0x10000, heapDelta: uint64(rand.N(0x40)) * 0x4000000}
+	return &Prelogin{client: client, browser: []byte(uuid.NewString()), shift: newStackShift(device)}
 }
 
-// Run 在启动后 5.1–5.7 s 用设备 installation_id 发出一次登录前错误上报，之后按模板中的上报时刻继续发出该系统的后续批次；ctx 结束时返回
+// Run 在启动后 5.1–5.7 s 用设备 installation_id 发出该系统的第一个登录前批次，之后按模板中的上报时刻继续发出其余批次；ctx 结束时返回
 func (p *Prelogin) Run(ctx context.Context) {
 	template, ok := preloginTemplates[p.client.device.OS]
 	if !ok {
@@ -268,10 +282,9 @@ func (p *Prelogin) Run(ctx context.Context) {
 		return
 	}
 	reported := time.Now()
-	p.reportErrors(ctx)
-	for _, batch := range template.later {
+	for _, batch := range template.batches {
 		select {
-		case <-time.After(time.Until(reported.Add(time.Duration(batch.sent-template.sent2747) * time.Millisecond))):
+		case <-time.After(time.Until(reported.Add(time.Duration(batch.sent-template.batches[0].sent) * time.Millisecond))):
 		case <-ctx.Done():
 			return
 		}
@@ -280,17 +293,10 @@ func (p *Prelogin) Run(ctx context.Context) {
 	<-ctx.Done()
 }
 
-// reportErrors 发出登录前的两个 clearcut 批次：日志源 327 的结构化帧与 2747 的事件，均不带 Bearer
-func (p *Prelogin) reportErrors(ctx context.Context) {
-	template := preloginTemplates[p.client.device.OS]
-	p.send(ctx, template.src327, template.sent327)
-	p.send(ctx, template.src2747, template.sent2747)
-}
-
 // send 以本进程的界面会话标识与地址偏移改写一个登录前批次并不带 Bearer 发出，时刻平移到当前
 func (p *Prelogin) send(ctx context.Context, data []byte, sent uint64) {
 	template := preloginTemplates[p.client.device.OS]
-	body := rewritePrelogin(data, template.install, []byte(p.client.device.InstallationID), time.Now().UnixMilli()-int64(sent), p.browser, p.imgDelta, p.heapDelta)
+	body := rewritePrelogin(data, template.install, []byte(p.client.device.InstallationID), time.Now().UnixMilli()-int64(sent), p.browser, p.shift)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointClearcut, bytes.NewReader(body))
 	if err != nil {
 		return

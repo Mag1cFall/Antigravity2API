@@ -3,7 +3,6 @@ import { Download, History } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 
 import { useConnection } from '@/app/events'
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { SearchInput } from '@/components/ui/search-input'
@@ -23,21 +22,20 @@ import {
   ranges,
   states,
 } from '@/features/requests/filters'
-import { requestMessages } from '@/features/requests/messages'
-import { RequestDetailSheet } from '@/features/requests/RequestDetailSheet'
+import { RequestDetailDialog } from '@/features/requests/RequestDetailDialog'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import { RunningRequests } from '@/features/requests/RunningRequests'
 import type { RequestPage } from '@/features/requests/types'
 import { api } from '@/lib/api'
 import { formatCompact, formatCost, formatDateTime, formatDuration } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { changeParams } from '@/lib/params'
 import { useNow } from '@/lib/time'
 
 // RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL；事件流的初始快照到达后进行中的请求与记录一起显示；宽度小于 640px 时每个请求一张卡片
 export function RequestsPage() {
-  const m = useMessages(requestMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('requests')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const now = useNow(30_000)
   const [params, setParams] = useSearchParams()
@@ -272,21 +270,20 @@ export function RequestsPage() {
                       {record.status || m.none}
                     </Td>
                     <Td className="max-sm:basis-full">
-                      <div className="truncate font-mono text-xs" title={record.model}>
-                        {record.model}
-                      </div>
+                      <Tooltip label={record.model}>
+                        <div className="truncate font-mono text-xs">{record.model}</div>
+                      </Tooltip>
                       {record.error && (
                         <div className="mt-1 line-clamp-2 text-xs break-words text-error-text">
-                          {record.error}
+                          {serverText(record.error)}
                         </div>
                       )}
                     </Td>
-                    <Td
-                      className="truncate text-xs text-foreground-muted max-xl:hidden"
-                      title={record.account}
-                    >
-                      {record.account || m.none}
-                    </Td>
+                    <Tooltip label={record.account}>
+                      <Td className="truncate text-xs text-foreground-muted max-xl:hidden">
+                        {record.account || m.none}
+                      </Td>
+                    </Tooltip>
                     <Td className="text-right whitespace-nowrap max-xl:hidden">
                       {record.first_event_ms
                         ? formatDuration(record.first_event_ms, locale)
@@ -309,9 +306,9 @@ export function RequestsPage() {
                     </Td>
                     <Td label={m.cost} className="text-right whitespace-nowrap max-sm:text-left">
                       {record.cost_usd === null ? (
-                        <span title={m.unpriced} className="text-foreground-muted">
-                          {m.none}
-                        </span>
+                        <Tooltip label={m.unpriced}>
+                          <span className="text-foreground-muted">{m.none}</span>
+                        </Tooltip>
                       ) : (
                         formatCost(record.cost_usd, locale)
                       )}
@@ -350,7 +347,7 @@ export function RequestsPage() {
           </>
         )}
       </Card>
-      <RequestDetailSheet
+      <RequestDetailDialog
         id={params.get('id')}
         onClose={() => {
           update({ id: '', cursor: filter.cursor })

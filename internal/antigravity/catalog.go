@@ -60,10 +60,18 @@ type CatalogModel struct {
 	TabJumpPrintLineRange    bool            `json:"tabJumpPrintLineRange"`
 	Disabled                 bool            `json:"disabled"`
 	QuotaInfo                QuotaInfo       `json:"quotaInfo"`
+	ModelExperiments         struct {
+		Experiments map[string]ModelExperiment `json:"experiments"`
+	} `json:"modelExperiments"`
 	// Agent 表示条目列在 Agent 模型选择器中
 	Agent bool `json:"-"`
 	// Kind 为图像生成、语音转写用途列表中的条目用途或 Tab 补全条目，其余条目为空
 	Kind string `json:"-"`
+}
+
+// ModelExperiment 表示目录条目 modelExperiments 中的一项实验，StringValue 为字符串取值
+type ModelExperiment struct {
+	StringValue string `json:"stringValue"`
 }
 
 // ModelGroup 表示选择器中的一组模型
@@ -107,7 +115,7 @@ func (c *Client) FetchAvailableModels(ctx context.Context) (Catalog, error) {
 }
 
 // retiredLabel 匹配选择器外旧 Agent 条目显示名末尾的档位，这类条目请求时返回下线提示
-var retiredLabel = regexp.MustCompile(` \((Low|Medium|High)\)$`)
+var retiredLabel = regexp.MustCompile(` \((Low|Medium|High|XHigh)\)$`)
 
 // PublicModels 返回可请求的条目：先按选择器顺序列出未禁用的 Agent 模型，再列出图像生成与语音转写用途列表中的条目（目录没有对应模型条目时只有 ID），最后按 ID 列出其余非内部、未禁用、有输出上限的条目：有显示名且显示名不带档位的条目，以及没有显示名、要求预填续写且不打印行范围的 Tab 补全条目；套餐不含的模型在目录中为 disabled
 func (catalog Catalog) PublicModels() []CatalogModel {
@@ -192,7 +200,7 @@ func (m CatalogModel) Public() Model {
 		ID:               m.ID,
 		Name:             cmp.Or(m.DisplayName, m.ID),
 		Description:      m.TagDescription,
-		Methods:          []string{"generateContent", "streamGenerateContent"},
+		Methods:          []string{"generateContent", "countTokens", "createCachedContent"},
 		InputTokenLimit:  m.MaxTokens,
 		OutputTokenLimit: m.MaxOutputTokens,
 		Capabilities:     capabilities,

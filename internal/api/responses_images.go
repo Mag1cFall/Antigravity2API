@@ -87,6 +87,13 @@ func (s *server) hostedImage(ctx context.Context, tool responsesTool, session st
 		}
 		break
 	}
+	if rawJSONConfigured(tool.InputImageMask) {
+		mask, err := imageGenerationMask(ctx, tool.InputImageMask)
+		if err != nil {
+			return []antigravity.Event{{Kind: antigravity.EventError, Err: fmt.Errorf("image_generation tool: %w", err)}}
+		}
+		parts = append(parts, antigravity.Part{InlineData: &antigravity.Blob{MIME: "image/png", Data: mask}}, antigravity.Part{Text: imageEditMaskInstruction})
+	}
 	result, err := s.generateResult(ctx, antigravity.GenerateRequest{
 		ID: newID("ig"), Model: catalogModel(models, "image_generation"), Session: session,
 		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: parts}},
@@ -103,6 +110,32 @@ func (s *server) hostedImage(ctx context.Context, tool responsesTool, session st
 		events = append(events, antigravity.Event{Kind: antigravity.EventMedia, Media: &media})
 	}
 	return events
+}
+
+// imageGenerationMask 读取 input_image_mask 的 image_url 或 file_id 指向的 PNG 并转换为编辑遮罩
+func imageGenerationMask(ctx context.Context, raw json.RawMessage) ([]byte, error) {
+	var mask struct {
+		ImageURL string `json:"image_url"`
+		FileID   string `json:"file_id"`
+	}
+	if err := json.Unmarshal(raw, &mask); err != nil {
+		return nil, fmt.Errorf("input_image_mask: %w", err)
+	}
+	parts := []antigravity.Part{{File: &antigravity.FileRef{ID: mask.FileID}}}
+	if mask.ImageURL != "" {
+		part, err := mediaURLPart(mask.ImageURL, "", "")
+		if err != nil {
+			return nil, fmt.Errorf("input_image_mask: %w", err)
+		}
+		parts[0] = part
+	}
+	if err := inlineRemoteParts(ctx, parts, map[string]*antigravity.Blob{}); err != nil {
+		return nil, fmt.Errorf("input_image_mask: %w", err)
+	}
+	if parts[0].InlineData == nil {
+		return nil, fmt.Errorf("input_image_mask must be a PNG image")
+	}
+	return imageEditMask(parts[0].InlineData.Data)
 }
 
 // generateResult 完成一次生成并返回汇总结果

@@ -84,6 +84,10 @@ type Service struct {
 	warmed map[string]map[string]time.Time
 	// saving 串行化冷却的读取与写入
 	saving sync.Mutex
+	// firstEvents 是各模型近期原请求的首字等待，启动时从请求账本补入
+	firstEvents *firstEventStats
+	// hedges 是正在进行的备用请求数
+	hedges atomic.Int32
 }
 
 // composerCache 表示按档位与自定义档模板缓存的 Composer，key 由档位、system 模板与 user 模板组成
@@ -105,7 +109,7 @@ type account struct {
 	internal int
 }
 
-// New 创建服务并读取 RUNTIME_DIR 下的会话记录与各账户上一次的目录，账户在 Refresh 完成初始化后接收请求
+// New 创建服务，读取 RUNTIME_DIR 下的会话记录与各账户上一次的目录，从请求账本补入近期首字样本，账户在 Refresh 完成初始化后接收请求
 func New(store *auth.Store, options Options) (*Service, error) {
 	cfg := options.Live.Load()
 	conversations, err := openConversations(filepath.Join(cfg.RuntimeDir, "conversations"))
@@ -123,7 +127,7 @@ func New(store *auth.Store, options Options) (*Service, error) {
 			pool.RestoreCooldowns(saved)
 		}
 	}
-	return &Service{
+	service := &Service{
 		store:         store,
 		live:          options.Live,
 		ledger:        options.Ledger,
@@ -137,7 +141,12 @@ func New(store *auth.Store, options Options) (*Service, error) {
 		proxyCheck:    make(chan struct{}, 1),
 		warmed:        loadWarmups(filepath.Join(cfg.RuntimeDir, warmupsFile)),
 		launched:      make(chan struct{}),
-	}, nil
+		firstEvents:   &firstEventStats{samples: make(map[string][]firstEventSample)},
+	}
+	if err := service.seedFirstEvents(); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 // markLaunched 结束启动期间的等待
@@ -279,7 +288,7 @@ func (s *Service) Accounts() []AccountStatus {
 	s.mu.Unlock()
 	statuses := make([]AccountStatus, 0, len(records))
 	for _, record := range records {
-		status := AccountStatus{Account: *record, Error: failures[record.ID], Quota: usableQuota(quotas[record.ID].summary.Groups, catalogs[record.ID]), QuotaAt: quotas[record.ID].at}
+		status := AccountStatus{Account: *record, Error: failures[record.ID], Quota: renewed(usableQuota(quotas[record.ID].summary.Groups, catalogs[record.ID]), time.Now()), QuotaAt: quotas[record.ID].at}
 		if state, ok := s.pool.Status(record.ID); ok {
 			status.Ready, status.Active = true, state.Active
 			if len(state.Cooldown) != 0 {
@@ -297,6 +306,21 @@ func (s *Service) Accounts() []AccountStatus {
 		statuses = append(statuses, status)
 	}
 	return statuses
+}
+
+// renewed 返回额度组的副本，重置时刻已过的桶剩余比例为 1 且不带重置时刻，与调度把该桶视为可用一致
+func renewed(groups []antigravity.QuotaGroup, now time.Time) []antigravity.QuotaGroup {
+	result := make([]antigravity.QuotaGroup, len(groups))
+	for index, group := range groups {
+		group.Buckets = slices.Clone(group.Buckets)
+		for bucket := range group.Buckets {
+			if reset, err := time.Parse(time.RFC3339, group.Buckets[bucket].ResetTime); err == nil && !now.Before(reset) {
+				group.Buckets[bucket].RemainingFraction, group.Buckets[bucket].ResetTime = 1, ""
+			}
+		}
+		result[index] = group
+	}
+	return result
 }
 
 // usableQuota 返回额度摘要中账户目录有对应模型的额度桶，没有目录时原样返回；失去第三方模型权限的账户上游仍返回 3p 桶
@@ -510,7 +534,7 @@ func (s *Service) tokenSource(record *auth.Account, token *oauth2.Token, proxy a
 	})
 }
 
-// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），成功且账户仍在账户库中启用时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接；账户已从账户库删除时不初始化
+// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），loadCodeAssist 给出不能使用的套餐且没有项目时按初始化失败处理、原因为 reasonMessage 与套餐原文，成功且账户仍在账户库中启用时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接；账户已从账户库删除时不初始化
 func (s *Service) initialize(ctx context.Context, record *auth.Account) error {
 	token := s.store.Token(record.ID)
 	if token == nil {
@@ -537,6 +561,17 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account) error {
 		}
 		s.stop(record.ID, reason)
 		return fmt.Errorf("%s: %w", record.ID, err)
+	}
+	if assist := initialization.Assist; assist.CloudAICompanionProject == "" && len(assist.IneligibleTiers) > 0 {
+		cancel()
+		messages := make([]string, len(assist.IneligibleTiers))
+		for index, tier := range assist.IneligibleTiers {
+			messages[index] = tier.ReasonMessage
+		}
+		detail, _ := json.Marshal(assist.IneligibleTiers)
+		slog.ErrorContext(ctx, "账户不能使用套餐 | 原因="+strings.Join(messages, "；"), "source", record.ID)
+		s.stop(record.ID, "不能使用套餐："+strings.Join(messages, "；")+" "+string(detail))
+		return fmt.Errorf("%s: %s", record.ID, strings.Join(messages, "；"))
 	}
 	if !s.store.Enabled(record.ID) {
 		cancel()

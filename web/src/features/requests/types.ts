@@ -2,7 +2,7 @@
 export type RequestState =
   'running' | 'completed' | 'tool_calls' | 'limited' | 'blocked' | 'failed' | 'cancelled'
 
-// Attempt 对应 internal/requestdb 的 Attempt，status 为 0 表示连接失败
+// Attempt 对应 internal/requestdb 的 Attempt，status 为 0 表示连接失败，hedge 为首字超时后发起的备用请求，superseded 为另一方先返回首个上游事件后被取消的尝试
 interface Attempt {
   account: string
   url: string
@@ -13,6 +13,8 @@ interface Attempt {
   response_id?: string
   error?: string
   duration_ms: number
+  hedge?: boolean
+  superseded?: boolean
 }
 
 // RequestRecord 对应 internal/requestdb 的 Row，cost_usd 为按官方单价估算的美元费用，模型没有单价时为 null

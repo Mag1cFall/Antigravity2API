@@ -6,7 +6,7 @@ import { type ReactNode, useRef } from 'react'
 export const Dialog = Primitive.Root
 export const DialogTrigger = Primitive.Trigger
 
-// contentVariants 区分居中对话框与右侧详情面板
+// contentVariants 区分居中对话框与右侧详情面板，居中对话框有普通、加宽与详情三种宽度
 const contentVariants = cva(
   'fixed z-modal flex flex-col bg-surface text-foreground shadow-modal focus:outline-none',
   {
@@ -17,17 +17,17 @@ const contentVariants = cva(
         sheet:
           'inset-y-0 right-0 w-full max-w-sheet data-[state=closed]:animate-sheet-out data-[state=open]:animate-sheet-in',
       },
-      width: { normal: 'max-w-dialog', wide: 'max-w-dialog-wide' },
+      width: { normal: 'max-w-dialog', wide: 'max-w-dialog-wide', detail: 'max-w-sheet' },
     },
   },
 )
 
-// DialogContent 是带遮罩、标题栏与关闭按钮的弹层，焦点锁定在弹层内；详情面板打开时焦点落在面板本身，returnFocus 是没有 DialogTrigger 时关闭后接收焦点的元素
+// DialogContent 是带遮罩、标题栏与关闭按钮的弹层，焦点锁定在弹层内；详情面板与详情宽度的对话框打开时焦点落在弹层本身，returnFocus 是没有 DialogTrigger 时关闭后接收焦点的元素
 export function DialogContent({
   title,
   description,
   layout = 'center',
-  wide = false,
+  width = 'normal',
   closeLabel,
   footer,
   returnFocus,
@@ -36,7 +36,7 @@ export function DialogContent({
   title: ReactNode
   description?: ReactNode
   layout?: 'center' | 'sheet'
-  wide?: boolean
+  width?: 'normal' | 'wide' | 'detail'
   closeLabel: string
   footer?: ReactNode
   returnFocus?: HTMLElement
@@ -48,7 +48,7 @@ export function DialogContent({
       <Primitive.Overlay className="fixed inset-0 z-overlay bg-overlay data-[state=closed]:animate-fade-out data-[state=open]:animate-fade-in" />
       <Primitive.Content
         ref={content}
-        {...(layout === 'sheet'
+        {...(layout === 'sheet' || width === 'detail'
           ? {
               onOpenAutoFocus: (event: Event) => {
                 event.preventDefault()
@@ -66,7 +66,7 @@ export function DialogContent({
           : {})}
         className={contentVariants({
           layout,
-          width: layout === 'center' ? (wide ? 'wide' : 'normal') : undefined,
+          width: layout === 'center' ? width : undefined,
         })}
       >
         <header className="flex min-h-12 shrink-0 items-start gap-4 px-6 pt-4">

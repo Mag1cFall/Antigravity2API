@@ -2,13 +2,12 @@ import { RefreshCw } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
 import { useQuotaRefresh, useRefreshAll } from '@/features/accounts/actions'
-import { accountMessages } from '@/features/accounts/messages'
 import type { Account } from '@/features/accounts/types'
 import { fill, useMessages } from '@/lib/i18n'
 
 // RefreshAllButton 是刷新全部按钮：逐个读取 accounts 的额度，进行中图标旋转、显示进度并停用
 export function RefreshAllButton({ accounts }: { accounts: Account[] }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const progress = useQuotaRefresh()
   const refreshAll = useRefreshAll()
   const running = progress.total > 0

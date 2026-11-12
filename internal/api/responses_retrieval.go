@@ -33,7 +33,7 @@ func (s *server) handleResponsesInputTokens(w http.ResponseWriter, r *http.Reque
 		writeOpenAIRequestError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "response.input_tokens", "input_tokens": tokens})
+	writeJSON(w, http.StatusOK, officialOrder("responses", map[string]any{"object": "response.input_tokens", "input_tokens": tokens}))
 }
 
 // handleResponseGet 返回已保存的响应对象；stream=true 时按 starting_after 续传后台流式响应的事件
@@ -42,7 +42,8 @@ func (s *server) handleResponseGet(w http.ResponseWriter, r *http.Request) {
 		s.resumeResponseStream(w, r)
 		return
 	}
-	response, _, ok := s.responseStates.Response(r.PathValue("response"))
+	query := r.URL.Query()
+	response, _, ok := s.responseStates.Response(r.PathValue("response"), slices.Concat(query["include[]"], query["include"]))
 	if !ok {
 		writeResponseNotFound(w, r.PathValue("response"))
 		return
@@ -55,7 +56,7 @@ func (s *server) resumeResponseStream(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("response")
 	stream, ok := s.responseStates.Stream(id)
 	if !ok {
-		if _, _, exists := s.responseStates.Response(id); exists {
+		if _, _, exists := s.responseStates.Response(id, nil); exists {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "Only responses created with background=true and stream=true can be streamed.")
 			return
 		}
@@ -77,24 +78,21 @@ func (s *server) resumeResponseStream(w http.ResponseWriter, r *http.Request) {
 	_ = stream.follow(r.Context(), w, after)
 }
 
-// handleResponseDelete 删除已保存的响应
+// handleResponseDelete 终止进行中的后台响应后删除已保存的响应
 func (s *server) handleResponseDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("response")
+	s.stopBackground(id)
 	if !s.responseStates.Delete(id) {
 		writeResponseNotFound(w, id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "object": "response", "deleted": true})
+	writeJSON(w, http.StatusOK, officialOrder("responses", map[string]any{"id": id, "object": "response.deleted", "deleted": true}))
 }
 
 // handleResponseCancel 终止进行中的后台响应并返回保存的 cancelled 对象，已结束的后台响应返回最终对象，其他响应不可取消
 func (s *server) handleResponseCancel(w http.ResponseWriter, r *http.Request) {
-	if value, running := s.background.Load(r.PathValue("response")); running {
-		run := value.(backgroundRun)
-		run.cancel()
-		<-run.done
-	}
-	response, background, ok := s.responseStates.Response(r.PathValue("response"))
+	s.stopBackground(r.PathValue("response"))
+	response, background, ok := s.responseStates.Response(r.PathValue("response"), nil)
 	if !ok {
 		writeResponseNotFound(w, r.PathValue("response"))
 		return
@@ -162,7 +160,7 @@ func (s *server) handleResponseInputItems(w http.ResponseWriter, r *http.Request
 	if len(page) > 0 {
 		list["first_id"], list["last_id"] = page[0].ID, page[len(page)-1].ID
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, officialOrder("responses", list))
 }
 
 // writeResponseNotFound 返回响应不存在的 404

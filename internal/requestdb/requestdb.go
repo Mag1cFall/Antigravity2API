@@ -101,8 +101,16 @@ type Attempt struct {
 	ResponseID string `json:"response_id,omitempty"`
 	Error      string `json:"error,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
-	Request    []byte `json:"-"`
-	Response   []byte `json:"-"`
+	// Hedge 表示原请求首字超时后发起的备用请求
+	Hedge bool `json:"hedge,omitempty"`
+	// Superseded 表示另一方先返回首个上游事件后被取消的尝试
+	Superseded bool `json:"superseded,omitempty"`
+	// RequestBytes 是发往上游的请求正文字节数
+	RequestBytes int `json:"request_bytes,omitempty"`
+	// Usage 是被丢弃的尝试（重新生成或换账户前）中上游已给出的用量，计入记录的用量汇总
+	Usage    *antigravity.Usage `json:"usage,omitempty"`
+	Request  []byte             `json:"-"`
+	Response []byte             `json:"-"`
 }
 
 // Row 是一条请求记录，Time 为完成时间，进行中的请求为开始时间

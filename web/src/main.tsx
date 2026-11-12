@@ -5,14 +5,14 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router'
 
-import { appMessages } from '@/app/messages'
+import { logsKey } from '@/app/events'
 import { router } from '@/app/router'
 import { syncQueries } from '@/app/sync'
 import { Toaster } from '@/components/ui/toast'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { sessionKey } from '@/features/service/queries'
 import { ApiError } from '@/lib/api'
-import { I18nProvider, useMessages } from '@/lib/i18n'
+import { I18nProvider, loadInitialLocale, useMessages } from '@/lib/i18n'
 import { applyTheme, initialTheme, watchSystemTheme } from '@/lib/theme'
 
 applyTheme(initialTheme())
@@ -34,16 +34,18 @@ const queryClient: QueryClient = new QueryClient({
     },
   },
 })
+queryClient.setQueryDefaults(logsKey, { structuralSharing: false, gcTime: Infinity })
 
 syncQueries(queryClient)
 
 // AppToaster 以当前语言渲染提示
 function AppToaster() {
-  return <Toaster closeLabel={useMessages(appMessages).dismiss} />
+  return <Toaster closeLabel={useMessages('app').dismiss} />
 }
 
 const root = document.getElementById('root')
 if (root) {
+  await loadInitialLocale()
   createRoot(root).render(
     <StrictMode>
       <QueryClientProvider client={queryClient}>

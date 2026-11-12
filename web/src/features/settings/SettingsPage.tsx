@@ -15,7 +15,6 @@ import { type ReactNode, useEffect, useState } from 'react'
 import { Controller, type FieldErrors, useForm, useWatch } from 'react-hook-form'
 import { Link, NavLink, useNavigate, useParams } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
@@ -35,18 +34,25 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { useModels } from '@/features/models/queries'
 import { kindOf } from '@/features/models/types'
 import { AboutSection } from '@/features/settings/AboutSection'
-import { settingsMessages } from '@/features/settings/messages'
+import { DirectoryPicker } from '@/features/settings/DirectoryPicker'
 import {
   PromptPreviewDialog,
   PromptTemplateFields,
   PromptTierField,
 } from '@/features/settings/PromptSection'
 import { ProxyPool } from '@/features/settings/ProxyPool'
-import { splitList, useSaveSettings, useSettings } from '@/features/settings/queries'
+import {
+  splitList,
+  useFirstEventLatency,
+  useSaveSettings,
+  useSettings,
+} from '@/features/settings/queries'
 import { type SettingsForm, settingsSchema, toForm, toValues } from '@/features/settings/schema'
-import type { Settings } from '@/features/settings/types'
+import type { FirstEventLatency, Settings } from '@/features/settings/types'
 import { isDesktop } from '@/lib/desktop'
+import { formatDuration } from '@/lib/format'
 import { codeText, fill, useI18n, useMessages } from '@/lib/i18n'
+import type { Catalog } from '@/locales/zh-CN'
 
 // sections 是设置分区，顺序即左侧目录顺序
 const sections = [
@@ -86,6 +92,8 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   ROUTING_STRATEGY: 'scheduling',
   PREFER_LOWER_TIER_MODELS: 'scheduling',
   REQUEST_TIMEOUT: 'scheduling',
+  FIRST_EVENT_HEDGE: 'scheduling',
+  FIRST_EVENT_HEDGE_MODELS: 'scheduling',
   NONSTREAM_KEEPALIVE: 'scheduling',
   FAKE_STREAM: 'scheduling',
   QUOTA_REFRESH_INTERVAL: 'scheduling',
@@ -105,7 +113,7 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
 const restartKeys = new Set(['LISTEN', 'AUTH_DIR', 'RUNTIME_DIR'])
 
 // restartLabels 返回重启后生效的配置项在界面上的名称
-function restartLabels(m: (typeof settingsMessages)['zh'], keys: string[]) {
+function restartLabels(m: Catalog['settings'], keys: string[]) {
   const names: Record<string, string> = {
     LISTEN: m.listen,
     AUTH_DIR: m.authDir,
@@ -149,16 +157,20 @@ function LinkRow({
   )
 }
 
-// LowerTierField 勾选优先用低套餐账户的模型，列出就绪账户目录中的对话模型与已选但当前不在目录中的模型
-function LowerTierField({
+// ModelSwitches 以开关勾选模型，列出就绪账户目录中的对话模型与已选但当前不在目录中的模型；listId 为列表的 ID，prefix 为各开关 ID 的前缀
+function ModelSwitches({
+  listId,
+  prefix,
   value,
   onChange,
 }: {
+  listId: string
+  prefix: string
   value: string[]
   onChange: (value: string[]) => void
 }) {
-  const m = useMessages(settingsMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('settings')
+  const app = useMessages('app')
   const models = useModels()
   if (models.isPending) return <Loading label={app.loading} />
   if (models.isError) {
@@ -179,18 +191,15 @@ function LowerTierField({
   if (ids.length === 0) return <p className="text-sm text-foreground-muted">{m.lowerTierEmpty}</p>
   return (
     <ul
-      id="PREFER_LOWER_TIER_MODELS"
-      aria-describedby="PREFER_LOWER_TIER_MODELS-hint"
+      id={listId}
+      aria-describedby={listId + '-hint'}
       className="flex max-h-[264px] flex-col divide-y divide-border overflow-y-auto rounded-md border border-border"
     >
       {ids.map((id) => (
         <li key={id}>
-          <label
-            htmlFor={'lower-tier-' + id}
-            className="flex cursor-pointer items-center gap-3 px-3 py-1"
-          >
+          <label htmlFor={prefix + id} className="flex cursor-pointer items-center gap-3 px-3 py-1">
             <Switch
-              id={'lower-tier-' + id}
+              id={prefix + id}
               checked={value.includes(id)}
               onCheckedChange={(checked) => {
                 onChange(ids.filter((item) => (item === id ? checked : value.includes(item))))
@@ -200,9 +209,9 @@ function LowerTierField({
               <span className="shrink-0 text-sm">
                 {chat.find((model) => model.id === id)?.name ?? id}
               </span>
-              <span className="truncate font-mono text-xs text-foreground-muted" title={id}>
-                {id}
-              </span>
+              <Tooltip label={id}>
+                <span className="truncate font-mono text-xs text-foreground-muted">{id}</span>
+              </Tooltip>
             </span>
           </label>
         </li>
@@ -211,9 +220,72 @@ function LowerTierField({
   )
 }
 
+// HedgeField 选择首字超时备用请求的等待：关闭、按近期 p95 自动或自定义秒数；切到自定义时填入近期样本最多的模型的 p95 向上取整的秒数，没有样本时为 60，自定义时列出该模型的 p95 作参考
+function HedgeField({
+  value,
+  onChange,
+  onBlur,
+}: {
+  value: string
+  onChange: (value: string) => void
+  onBlur: () => void
+}) {
+  const m = useMessages('settings')
+  const { locale } = useI18n()
+  const latency = useFirstEventLatency()
+  const busiest = latency.data?.reduce<FirstEventLatency | undefined>(
+    (best, item) => (best === undefined || item.samples > best.samples ? item : best),
+    undefined,
+  )
+  const suggested = busiest ? Math.max(1, Math.ceil(busiest.p95_ms / 1000)) : 60
+  const mode = value === 'off' || value === 'auto' ? value : 'custom'
+  return (
+    <div className="flex w-full flex-col gap-2">
+      <Select
+        id="FIRST_EVENT_HEDGE"
+        label={m.hedge}
+        value={mode}
+        onValueChange={(next) => {
+          onChange(next === 'custom' ? String(suggested) : next)
+        }}
+        options={[
+          { value: 'off', label: m.hedgeOff },
+          { value: 'auto', label: m.hedgeAuto },
+          { value: 'custom', label: m.hedgeCustom },
+        ]}
+      />
+      {mode === 'custom' && (
+        <NumberInput
+          aria-label={m.hedgeSeconds}
+          aria-describedby="FIRST_EVENT_HEDGE-hint"
+          value={Number(value)}
+          onChange={(seconds) => {
+            onChange(String(seconds))
+          }}
+          onBlur={onBlur}
+          min={1}
+          max={3600}
+          decreaseLabel={m.decrease}
+          increaseLabel={m.increase}
+          minReason={fill(m.minReason, { min: 1 })}
+          maxReason={fill(m.maxReason, { max: 3600 })}
+        />
+      )}
+      {mode === 'custom' && busiest && (
+        <p className="text-sm text-foreground-muted">
+          {fill(m.hedgeReference, {
+            model: busiest.model,
+            p95: formatDuration(busiest.p95_ms, locale),
+          })}
+        </p>
+      )}
+    </div>
+  )
+}
+
 // SectionNav 是设置卡片左侧的分区目录，窄屏时在卡片顶部换行排列，含错误的分区带红点
 function SectionNav({ section, invalid }: { section: Section; invalid: Set<Section> }) {
-  const m = useMessages(settingsMessages)
+  const m = useMessages('settings')
   return (
     <nav
       aria-label={m.sections}
@@ -252,7 +324,7 @@ function SectionNav({ section, invalid }: { section: Section; invalid: Set<Secti
 
 // SectionTitle 是右侧当前分区的标题与说明
 function SectionTitle({ section }: { section: Section }) {
-  const m = useMessages(settingsMessages)
+  const m = useMessages('settings')
   const descriptions: Record<Section, string> = {
     service: m.serviceDescription,
     network: m.networkDescription,
@@ -282,7 +354,7 @@ function SettingsEditor({
   section: Section
   onInvalid: (sections: Set<Section>) => void
 }) {
-  const m = useMessages(settingsMessages)
+  const m = useMessages('settings')
   const navigate = useNavigate()
   const form = useForm<SettingsForm>({
     resolver: zodResolver(settingsSchema(m, settings.admin_password_set)),
@@ -371,9 +443,27 @@ function SettingsEditor({
     key: 'LISTEN' | 'AUTH_DIR' | 'RUNTIME_DIR' | 'MEDIA_BASE_URL' | 'ADMIN_USERNAME',
     label: string,
     hint: string,
-    extra?: { placeholder?: string; disabledReason?: string | false; autoComplete?: string },
-  ) =>
-    lock(
+    extra?: {
+      placeholder?: string
+      disabledReason?: string | false
+      autoComplete?: string
+      browse?: boolean
+    },
+  ) => {
+    const input = (
+      <Tooltip disabledReason={extra?.disabledReason}>
+        <Input
+          {...describe(key)}
+          {...form.register(key)}
+          spellCheck={false}
+          autoComplete={extra?.autoComplete ?? 'off'}
+          placeholder={extra?.placeholder}
+          disabled={Boolean(extra?.disabledReason)}
+          className="font-mono"
+        />
+      </Tooltip>
+    )
+    return lock(
       key,
       <FormRow
         id={key}
@@ -382,19 +472,23 @@ function SettingsEditor({
         tag={restartTag(key)}
         error={errors[key]?.message}
       >
-        <Tooltip disabledReason={extra?.disabledReason}>
-          <Input
-            {...describe(key)}
-            {...form.register(key)}
-            spellCheck={false}
-            autoComplete={extra?.autoComplete ?? 'off'}
-            placeholder={extra?.placeholder}
-            disabled={Boolean(extra?.disabledReason)}
-            className="font-mono"
-          />
-        </Tooltip>
+        {extra?.browse ? (
+          <div className="flex gap-2">
+            {input}
+            <DirectoryPicker
+              label={label}
+              value={form.watch(key)}
+              onChoose={(path) => {
+                form.setValue(key, path, { shouldDirty: true, shouldValidate: true })
+              }}
+            />
+          </div>
+        ) : (
+          input
+        )}
       </FormRow>,
     )
+  }
   const duration = (
     key: 'REQUEST_TIMEOUT' | 'QUOTA_REFRESH_INTERVAL',
     label: string,
@@ -501,8 +595,8 @@ function SettingsEditor({
     service: (
       <>
         {text('LISTEN', m.listen, m.listenHint)}
-        {text('AUTH_DIR', m.authDir, m.authDirHint)}
-        {text('RUNTIME_DIR', m.runtimeDir, m.runtimeDirHint)}
+        {text('AUTH_DIR', m.authDir, m.authDirHint, { browse: true })}
+        {text('RUNTIME_DIR', m.runtimeDir, m.runtimeDirHint, { browse: true })}
         <LinkRow
           label={m.apiKeys}
           hint={m.apiKeysHint}
@@ -624,13 +718,52 @@ function SettingsEditor({
               control={form.control}
               name="PREFER_LOWER_TIER_MODELS"
               render={({ field }) => (
-                <LowerTierField value={field.value} onChange={field.onChange} />
+                <ModelSwitches
+                  listId="PREFER_LOWER_TIER_MODELS"
+                  prefix="lower-tier-"
+                  value={field.value}
+                  onChange={field.onChange}
+                />
               )}
             />
           </FormRow>,
         )}
         {number('ACCOUNT_CONCURRENCY', m.concurrency, m.concurrencyHint, 1, 64)}
         {duration('REQUEST_TIMEOUT', m.timeout, m.timeoutHint)}
+        {lock(
+          'FIRST_EVENT_HEDGE',
+          <FormRow
+            id="FIRST_EVENT_HEDGE"
+            label={m.hedge}
+            hint={m.hedgeHint}
+            error={errors.FIRST_EVENT_HEDGE?.message}
+          >
+            <Controller
+              control={form.control}
+              name="FIRST_EVENT_HEDGE"
+              render={({ field }) => (
+                <HedgeField value={field.value} onChange={field.onChange} onBlur={field.onBlur} />
+              )}
+            />
+          </FormRow>,
+        )}
+        {lock(
+          'FIRST_EVENT_HEDGE_MODELS',
+          <FormRow id="FIRST_EVENT_HEDGE_MODELS" label={m.hedgeModels} hint={m.hedgeModelsHint}>
+            <Controller
+              control={form.control}
+              name="FIRST_EVENT_HEDGE_MODELS"
+              render={({ field }) => (
+                <ModelSwitches
+                  listId="FIRST_EVENT_HEDGE_MODELS"
+                  prefix="hedge-model-"
+                  value={field.value}
+                  onChange={field.onChange}
+                />
+              )}
+            />
+          </FormRow>,
+        )}
         {toggle('NONSTREAM_KEEPALIVE', m.keepalive, m.keepaliveHint)}
         {toggle('FAKE_STREAM', m.fakeStream, m.fakeStreamHint)}
         {duration('QUOTA_REFRESH_INTERVAL', m.quotaRefresh, m.quotaRefreshHint)}
@@ -781,8 +914,8 @@ function SettingsEditor({
 
 // SettingsPage 是设置页：左侧分区目录，右侧当前分区，分区来自 URL
 export function SettingsPage() {
-  const m = useMessages(settingsMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('settings')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const params = useParams()
   const section = sections.find((item) => item === params.section) ?? 'service'

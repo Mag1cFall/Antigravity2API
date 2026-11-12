@@ -14,7 +14,6 @@ import {
 import { ApiKeyList } from '@/features/connect/ApiKeys'
 import { ClientConfigs } from '@/features/connect/ClientConfigs'
 import { EndpointList } from '@/features/connect/EndpointList'
-import { connectMessages } from '@/features/connect/messages'
 import { markProgress } from '@/features/connect/progress'
 import { fill, useMessages } from '@/lib/i18n'
 
@@ -61,7 +60,7 @@ function Step({
   action?: ReactNode
   children: ReactNode
 }) {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   return (
     <Card aria-label={title}>
       <div className="flex flex-wrap items-start gap-4 px-6 pt-6 pb-4 max-sm:px-4 max-sm:pt-4">
@@ -129,7 +128,7 @@ function AccountMethods() {
 
 // SetupGuide 是首次使用的仪表盘：添加账户、复制接口地址与 API key、选择客户端复制配置三步，每步完成后打勾；添加账户后第一步标题行出现进入总览的按钮
 export function SetupGuide({ steps, onEnter }: { steps: SetupSteps; onEnter: () => void }) {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   return (
     <>
       <header className="flex flex-col items-center gap-3 pt-6 pb-2 text-center">
@@ -167,7 +166,7 @@ export function SetupGuide({ steps, onEnter }: { steps: SetupSteps; onEnter: () 
 
 // SetupBanner 是有账户但还没完成接入时仪表盘顶部的进度条，可隐藏
 export function SetupBanner({ steps }: { steps: SetupSteps }) {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   const items: [string, boolean][] = [
     [m.stepAccounts, steps.accounts],
     [m.stepEndpoint, steps.endpoint],

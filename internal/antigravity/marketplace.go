@@ -21,8 +21,10 @@ const (
 	flagPluginMarketplaces = "agy-plugin-marketplaces"
 	// flagPluginShelves 为推荐插件货架的实验开关，取值为货架 JSON
 	flagPluginShelves = "agy-plugin-shelves"
-	// featuredPerShelf 为每个货架列出的插件数上限
-	featuredPerShelf = 10
+	// featuredTotal 为推荐插件段各货架合计列出的插件数上限
+	featuredTotal = 20
+	// moreShelf 为列出未进入任何货架的目录插件的末尾货架一行
+	moreShelf = "More Plugins: Explore other marketplace customizations"
 	// featuredDescription 为推荐插件说明保留的字符数上限
 	featuredDescription = 150
 )
@@ -228,11 +230,19 @@ func (c *Client) Plugins() string {
 		}
 	}
 	flag, _ := findFlag(flags, flagPluginShelves)
-	return featuredPlugins(flag.value(), catalogs)
+	marketplaces, _ := findFlag(flags, flagPluginMarketplaces)
+	var names []string
+	if marketplaces.StringListValue != nil {
+		for _, value := range marketplaces.StringListValue.Values {
+			name, _, _ := strings.Cut(value, "=")
+			names = append(names, name)
+		}
+	}
+	return featuredPlugins(flag.value(), names, catalogs)
 }
 
-// featuredPlugins 生成推荐插件段的货架正文：货架按 position 排序，每个货架一行“名称: 说明”，其后列出目录中找得到的前 featuredPerShelf 个插件“- 名称 (ID): 说明”，货架后空一行；没有可列出插件的货架略去
-func featuredPlugins(shelves string, catalogs map[string]marketplaceCatalog) string {
+// featuredPlugins 生成推荐插件段的货架正文：货架按 position 排序，未列入任何货架的目录插件按 names 的目录顺序组成末尾的 moreShelf 货架；各货架逐轮各取下一个目录中找得到的插件，合计 featuredTotal 个；每个货架一行“名称: 说明”，其后为取到的插件“- 名称 (ID): 说明”，货架后空一行；没有取到插件的货架略去
+func featuredPlugins(shelves string, names []string, catalogs map[string]marketplaceCatalog) string {
 	var parsed struct {
 		Shelves []marketplaceShelf `json:"shelves"`
 	}
@@ -240,26 +250,56 @@ func featuredPlugins(shelves string, catalogs map[string]marketplaceCatalog) str
 		return ""
 	}
 	slices.SortStableFunc(parsed.Shelves, func(a, b marketplaceShelf) int { return a.Position - b.Position })
-	var out strings.Builder
+	var headers []string
+	var groups [][]string
+	shelved := map[string]bool{}
 	for _, shelf := range parsed.Shelves {
-		var lines strings.Builder
-		listed := 0
+		var lines []string
 		for _, id := range shelf.CustomizationIDs {
+			shelved[id] = true
 			parts := strings.Split(id, "/")
-			if listed == featuredPerShelf || len(parts) != 3 || parts[1] != "plugin" {
+			if len(parts) != 3 || parts[1] != "plugin" {
 				continue
 			}
 			plugins := catalogs[parts[0]].Plugins
 			if index := slices.IndexFunc(plugins, func(plugin marketplacePlugin) bool { return plugin.Name == parts[2] }); index >= 0 {
-				lines.WriteString("- " + plugins[index].DisplayName + " (" + id + "): " + featuredText(plugins[index].Description) + "\n")
-				listed++
+				lines = append(lines, featuredLine(plugins[index], id))
 			}
 		}
-		if listed > 0 {
-			out.WriteString(shelf.DisplayName + ": " + shelf.Description + "\n" + lines.String() + "\n")
+		headers, groups = append(headers, shelf.DisplayName+": "+shelf.Description), append(groups, lines)
+	}
+	var more []string
+	for _, name := range names {
+		for _, plugin := range catalogs[name].Plugins {
+			if id := name + "/plugin/" + plugin.Name; !shelved[id] {
+				more = append(more, featuredLine(plugin, id))
+			}
+		}
+	}
+	headers, groups = append(headers, moreShelf), append(groups, more)
+	counts := make([]int, len(groups))
+	for total, progress := 0, true; progress; {
+		progress = false
+		for index, lines := range groups {
+			if total < featuredTotal && counts[index] < len(lines) {
+				counts[index]++
+				total++
+				progress = true
+			}
+		}
+	}
+	var out strings.Builder
+	for index, header := range headers {
+		if counts[index] > 0 {
+			out.WriteString(header + "\n" + strings.Join(groups[index][:counts[index]], "\n") + "\n\n")
 		}
 	}
 	return out.String()
+}
+
+// featuredLine 返回推荐插件段中一个插件的一行，不带换行
+func featuredLine(plugin marketplacePlugin, id string) string {
+	return "- " + plugin.DisplayName + " (" + id + "): " + featuredText(plugin.Description)
 }
 
 // featuredText 返回插件说明的第一句，超过 featuredDescription 个字符时截断并加省略号

@@ -16,6 +16,13 @@
   }
   window.addEventListener("popstate", route);
   route();
+  const root = document.documentElement;
+  const appearance = () => {
+    invoke("desktop:locale:" + root.lang);
+    invoke("desktop:theme:" + (root.dataset.theme === "dark" ? "dark" : "light"));
+  };
+  new MutationObserver(appearance).observe(root, { attributeFilter: ["lang", "data-theme"] });
+  appearance();
   document.addEventListener("click", (event) => {
     const link = event.target.closest("a[href]");
     if (!link || event.defaultPrevented) return;

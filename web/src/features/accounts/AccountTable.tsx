@@ -28,17 +28,16 @@ import { Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
 import { AccountReason, AccountStatusBadge } from '@/features/accounts/AccountStatus'
 import { quotaFailure, type QuotaRefresh } from '@/features/accounts/actions'
-import { accountMessages } from '@/features/accounts/messages'
 import { creditsShort, statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { FamilyBadge, TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
-import { quotaMessages } from '@/features/quota/messages'
 import { cellBuckets, groups, nameOf } from '@/features/quota/quota'
 import { QuotaLine } from '@/features/quota/QuotaLine'
 import { formatFullDateTime, formatNumber, formatRelative, type Locale } from '@/lib/format'
-import { fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { usePhone } from '@/lib/media'
+import type { Catalog } from '@/locales/zh-CN'
 
 // RowActions 是账户行可执行的操作，onSelect 勾选或取消勾选账户
 export interface RowActions {
@@ -63,8 +62,8 @@ export function QuotaCell({
   now: Date
   compact?: boolean
 }) {
-  const m = useMessages(accountMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
   const buckets = cellBuckets(account.quota, group)
   if (buckets.length === 0) {
     return (
@@ -94,7 +93,7 @@ export function QuotaCell({
 }
 
 // creditsTip 是 AI 积分标签的提示：开启超额使用、积分余额与使用积分所需的最低余额
-function creditsTip(m: (typeof accountMessages)['zh'], account: Account, locale: Locale) {
+function creditsTip(m: Catalog['accounts'], account: Account, locale: Locale) {
   if (account.credit_balance === undefined || account.credit_minimum === undefined) {
     return m.creditsTag
   }
@@ -136,7 +135,7 @@ function IconTag({
 
 // CreditsTag 是开启 AI 积分超额使用的账户的积分标签，显示余额，余额低于最低余额时为警示色
 function CreditsTag({ account }: { account: Account }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const { locale } = useI18n()
   return (
     <IconTag
@@ -185,7 +184,7 @@ const wideQuery = '(min-width: 80rem)'
 
 // RefreshQuotaItem 是行内没有刷新额度按钮时菜单中的刷新额度，菜单打开时按窗口宽度决定是否显示
 function RefreshQuotaItem({ onSelect }: { onSelect: () => void }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   if (window.matchMedia(wideQuery).matches) return null
   return (
     <DropdownMenuItem onSelect={onSelect}>
@@ -197,7 +196,7 @@ function RefreshQuotaItem({ onSelect }: { onSelect: () => void }) {
 
 // MoreActions 是行尾的更多操作菜单：设置代理与删除，窗口宽度不足 1280px 时另含刷新额度
 function MoreActions({ account, actions }: { account: Account; actions: RowActions }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const trigger = useRef<HTMLButtonElement>(null)
   return (
     <DropdownMenu>
@@ -274,8 +273,8 @@ const AccountRow = memo(function AccountRow({
   phone: boolean
   actions: RowActions
 }) {
-  const m = useMessages(accountMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
   const { locale } = useI18n()
   return (
     <tr className="max-sm:grid max-sm:grid-cols-[minmax(0,1fr)_auto] max-sm:gap-x-3 max-sm:gap-y-1 max-sm:py-2">
@@ -304,12 +303,11 @@ const AccountRow = memo(function AccountRow({
             <div className="relative mt-1 flex h-[72px] min-w-0 flex-col gap-1 overflow-hidden text-xs text-foreground-muted max-sm:hidden xl:h-6 xl:flex-row xl:items-center xl:gap-1">
               <div className="flex h-6 min-w-0 items-center gap-2 xl:gap-1">
                 {account.label && (
-                  <span
-                    className="max-w-[120px] min-w-8 truncate font-medium text-foreground"
-                    title={account.label}
-                  >
-                    {account.label}
-                  </span>
+                  <Tooltip label={account.label}>
+                    <span className="max-w-[120px] min-w-8 truncate font-medium text-foreground">
+                      {account.label}
+                    </span>
+                  </Tooltip>
                 )}
                 {!phone && <TierBadge tier={account.tier} />}
               </div>
@@ -413,7 +411,7 @@ const AccountRow = memo(function AccountRow({
             </span>
           )}
           {statusOf(account) === 'error' ? (
-            <Tooltip label={account.error}>
+            <Tooltip label={serverText(account.error ?? '')}>
               <button
                 type="button"
                 aria-label={fill(m.errorOf, { email: account.id })}
@@ -426,7 +424,7 @@ const AccountRow = memo(function AccountRow({
               </button>
             </Tooltip>
           ) : statusOf(account) === 'verify' && !phone ? (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <div className="flex flex-wrap items-center gap-x-3 text-xs">
               <AccountReason account={account} now={now} />
               <button
                 type="button"
@@ -514,8 +512,8 @@ export function AccountTable({
   quotaRefresh: QuotaRefresh
   actions: RowActions
 }) {
-  const m = useMessages(accountMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
   const phone = usePhone()
   const picked = accounts.filter((account) => selected.has(account.id)).length
   return (

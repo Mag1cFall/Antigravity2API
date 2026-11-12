@@ -2,7 +2,6 @@ import { Download, Trash2, Users } from 'lucide-react'
 import { useCallback, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page'
@@ -27,12 +26,11 @@ import {
   useVerifyingAccounts,
 } from '@/features/accounts/actions'
 import { AddAccountButton } from '@/features/accounts/AddAccountDialog'
-import { accountMessages } from '@/features/accounts/messages'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { useAccounts } from '@/features/accounts/queries'
 import { RefreshAllButton } from '@/features/accounts/RefreshAllButton'
 import { type Status, statuses, statusOf } from '@/features/accounts/status'
-import { exportURL, transferMessages } from '@/features/accounts/TransferDialog'
+import { exportURL } from '@/features/accounts/TransferDialog'
 import type { Account } from '@/features/accounts/types'
 import { WarmupDialog } from '@/features/warmup/WarmupDialog'
 import { fill, useMessages } from '@/lib/i18n'
@@ -85,9 +83,9 @@ function sortAccounts(accounts: Account[], sort: Sort, lastUsed: Map<string, str
 
 // AccountsPage 是账户表：状态筛选、搜索、分页、详情与行内操作，筛选、页码与打开的详情保存在 URL
 export function AccountsPage() {
-  const m = useMessages(accountMessages)
-  const app = useMessages(appMessages)
-  const transfer = useMessages(transferMessages)
+  const m = useMessages('accounts')
+  const app = useMessages('app')
+  const transfer = useMessages('transfer')
   const now = useNow(30_000)
   const accounts = useAccounts()
   const usage = useAccountUsage()

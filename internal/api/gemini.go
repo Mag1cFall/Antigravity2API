@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -128,8 +129,17 @@ type geminiResponseFormat struct {
 	Image *struct {
 		AspectRatio string `json:"aspectRatio"`
 		ImageSize   string `json:"imageSize"`
+		// Delivery 为 URI 时生成的图片存入 Files API，响应以 fileData 引用
+		Delivery string `json:"delivery"`
 	} `json:"image"`
 	Audio json.RawMessage `json:"audio"`
+}
+
+// imageURIDelivery 判断 responseFormat 是否要求以 Files API 文件 URI 返回生成的图片
+func (formats geminiResponseFormats) imageURIDelivery() bool {
+	return slices.ContainsFunc(formats, func(format geminiResponseFormat) bool {
+		return format.Image != nil && strings.EqualFold(format.Image.Delivery, "URI")
+	})
 }
 
 // geminiResponseFormats 为 responseFormat，REST 写法为单个对象，SDK 写法为数组
@@ -225,7 +235,7 @@ func (s *server) handleGeminiModels(w http.ResponseWriter, r *http.Request) {
 	if next != "" {
 		response["nextPageToken"] = next
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, officialOrder("gemini", response))
 }
 
 // geminiPage 按 pageSize 与 pageToken 返回列表的一页与下一页令牌，pageSize 为 0 时取 defaultSize、最多 maxSize，pageToken 为下一页的起始位置
@@ -265,7 +275,7 @@ func (s *server) handleGeminiModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if model, ok := lookupPublicModel(models, modelID); ok {
-		writeJSON(w, http.StatusOK, geminiModelObject(model))
+		writeJSON(w, http.StatusOK, officialOrder("gemini", geminiModelObject(model)))
 		return
 	}
 	writeGeminiError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("model %q is unavailable", modelID))
@@ -305,23 +315,12 @@ func (s *server) handleGeminiAction(w http.ResponseWriter, r *http.Request) {
 	model := strings.TrimPrefix(action[:separator], "models/")
 	method := action[separator+1:]
 	var request geminiRequest
-	body, err := io.ReadAll(r.Body)
-	if err == nil {
-		body, _, err = geminiCamelKeys(body)
-	}
-	if err == nil {
-		err = json.Unmarshal(body, &request)
-	}
-	if err != nil {
+	if err := decodeGeminiJSON(r, &request); err != nil {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
 	if method == "countTokens" && request.GenerateContentRequest != nil {
 		request = *request.GenerateContentRequest
-	}
-	if request.CachedContent != "" {
-		writeGeminiError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("cachedContent %q was not found: this service does not store cached contents", request.CachedContent))
-		return
 	}
 	generateRequest, err := request.toGenerateRequest(newID("resp"), model)
 	if err == nil {
@@ -338,16 +337,42 @@ func (s *server) handleGeminiAction(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "unknown method: "+method)
 		return
 	}
+	cache, ok := s.applyGeminiCache(w, request.CachedContent, &generateRequest)
+	if !ok {
+		return
+	}
 	if method == "countTokens" {
 		tokens, err := s.service.CountTokens(r.Context(), generateRequest)
 		if err != nil {
 			writeGeminiRequestError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]int64{"totalTokens": tokens})
+		response := map[string]any{"totalTokens": tokens}
+		if cache != nil {
+			response["cachedContentTokenCount"] = cache.tokens
+		}
+		writeJSON(w, http.StatusOK, officialOrder("gemini", response))
 		return
 	}
-	s.handleGeminiGenerate(w, r, generateRequest, method == "streamGenerateContent", request.GenerationConfig.candidates())
+	s.handleGeminiGenerate(w, r, generateRequest, method == "streamGenerateContent", request.GenerationConfig.candidates(), geminiOutput{imageURI: request.GenerationConfig.ResponseFormat.imageURIDelivery(), cache: cache})
+}
+
+// decodeGeminiJSON 读取 Gemini 请求体，按 proto3 JSON 规则把字段名转为 lowerCamelCase 后解码到 target
+func decodeGeminiJSON(r *http.Request, target any) error {
+	body, err := io.ReadAll(r.Body)
+	if err == nil {
+		body, err = geminiCamelKeys(body)
+	}
+	if err == nil {
+		err = json.Unmarshal(body, target)
+	}
+	return err
+}
+
+// geminiOutput 是 Gemini 生成响应的输出选项：imageURI 时生成的图片存入 Files API 并以 fileData 返回，cache 为请求引用的显式缓存
+type geminiOutput struct {
+	imageURI bool
+	cache    *geminiCache
 }
 
 // geminiOpaqueFields 为取值是自由 JSON 的字段，其中的键名属于用户数据
@@ -357,59 +382,137 @@ var geminiOpaqueFields = map[string]bool{
 }
 
 // geminiCamelKeys 按 proto3 JSON 规则把各层消息字段名转为 lowerCamelCase，同层两种写法并存时保留驼峰字段，自由 JSON 字段的取值原样保留
-func geminiCamelKeys(raw []byte) ([]byte, bool, error) {
+func geminiCamelKeys(raw []byte) ([]byte, error) {
 	value := bytes.TrimSpace(raw)
 	if len(value) == 0 || value[0] != '{' && value[0] != '[' {
-		return raw, false, nil
+		return raw, nil
 	}
-	changed := false
-	if value[0] == '[' {
-		var items []json.RawMessage
-		if err := json.Unmarshal(value, &items); err != nil {
-			return nil, false, err
+	if camel, err := geminiKeysCamel(value); err == nil && camel {
+		return raw, nil
+	}
+	output := bytes.NewBuffer(make([]byte, 0, len(value)))
+	if err := writeGeminiCamelKeys(output, value); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+// writeGeminiCamelKeys 把 JSON 对象或数组 value 中各层消息字段名转为 lowerCamelCase 后写入 output，字段取值按原字节写出，根值之后还有其他内容时返回错误
+func writeGeminiCamelKeys(output *bytes.Buffer, value []byte) error {
+	decoder := jsontext.NewDecoder(bytes.NewBuffer(value), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	// end 读取根值的结束括号，确认其后只有空白
+	end := func() error {
+		if _, err := decoder.ReadToken(); err != nil {
+			return err
 		}
-		for index, item := range items {
-			converted, itemChanged, err := geminiCamelKeys(item)
+		if _, err := decoder.ReadToken(); err != io.EOF {
+			return cmp.Or(err, errors.New("unexpected data after top-level value"))
+		}
+		return nil
+	}
+	// next 读取下一个值，返回它在 value 中的原字节
+	next := func() ([]byte, error) {
+		item, err := decoder.ReadValue()
+		end := decoder.InputOffset()
+		return value[end-int64(len(item)) : end], err
+	}
+	write := func(item []byte, opaque bool) error {
+		if opaque || item[0] != '{' && item[0] != '[' {
+			output.Write(item)
+			return nil
+		}
+		return writeGeminiCamelKeys(output, item)
+	}
+	open, err := decoder.ReadToken()
+	if err != nil {
+		return err
+	}
+	if open.Kind() == '[' {
+		output.WriteByte('[')
+		for index := 0; decoder.PeekKind() != ']'; index++ {
+			item, err := next()
 			if err != nil {
-				return nil, false, err
+				return err
 			}
-			items[index], changed = converted, changed || itemChanged
-		}
-		if !changed {
-			return raw, false, nil
-		}
-		encoded, err := json.Marshal(items)
-		return encoded, true, err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(value, &fields); err != nil {
-		return nil, false, err
-	}
-	converted := make(map[string]json.RawMessage, len(fields))
-	for key, field := range fields {
-		name := geminiJSONName(key)
-		if name != key {
-			changed = true
-			if _, exists := fields[name]; exists {
-				continue
+			if index > 0 {
+				output.WriteByte(',')
+			}
+			if err := write(item, false); err != nil {
+				return err
 			}
 		}
-		if !geminiOpaqueFields[name] {
-			var fieldChanged bool
-			var err error
-			field, fieldChanged, err = geminiCamelKeys(field)
-			if err != nil {
-				return nil, false, err
-			}
-			changed = changed || fieldChanged
+		output.WriteByte(']')
+		return end()
+	}
+	type member struct {
+		key   string
+		value []byte
+	}
+	var members []member
+	keys := make(map[string]bool)
+	for decoder.PeekKind() != '}' {
+		token, err := decoder.ReadToken()
+		if err != nil {
+			return err
 		}
-		converted[name] = field
+		key := token.String()
+		item, err := next()
+		if err != nil {
+			return err
+		}
+		members = append(members, member{key: key, value: item})
+		keys[key] = true
 	}
-	if !changed {
-		return raw, false, nil
+	output.WriteByte('{')
+	written := 0
+	for _, field := range members {
+		name := geminiJSONName(field.key)
+		if name != field.key && keys[name] {
+			continue
+		}
+		if written > 0 {
+			output.WriteByte(',')
+		}
+		written++
+		quoted, err := jsontext.AppendQuote(output.AvailableBuffer(), name)
+		if err != nil {
+			return err
+		}
+		output.Write(quoted)
+		output.WriteByte(':')
+		if err := write(field.value, geminiOpaqueFields[name]); err != nil {
+			return err
+		}
 	}
-	encoded, err := json.Marshal(converted)
-	return encoded, true, err
+	output.WriteByte('}')
+	return end()
+}
+
+// geminiKeysCamel 逐个读取 JSON token，判断各层消息字段名是否都已是 lowerCamelCase，不读取自由 JSON 字段的取值
+func geminiKeysCamel(raw []byte) (bool, error) {
+	decoder := jsontext.NewDecoder(bytes.NewBuffer(raw))
+	for {
+		kind, length := decoder.StackIndex(decoder.StackDepth())
+		token, err := decoder.ReadToken()
+		if err == io.EOF {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if kind != '{' || length%2 != 0 || token.Kind() != '"' {
+			continue
+		}
+		name := token.String()
+		if geminiJSONName(name) != name {
+			return false, nil
+		}
+		if geminiOpaqueFields[name] {
+			if err := decoder.SkipValue(); err != nil {
+				return false, err
+			}
+		}
+	}
 }
 
 // geminiJSONName 返回 proto 字段名对应的 JSON 名
@@ -447,7 +550,8 @@ func (request geminiRequest) toGenerateRequest(id string, model string) (antigra
 		var text strings.Builder
 		for _, part := range parts {
 			if part.FunctionCall != nil || part.FunctionResult != nil {
-				return antigravity.GenerateRequest{}, fmt.Errorf("systemInstruction cannot contain function calls or responses")
+				text.WriteString(geminiToolTranscript(part))
+				continue
 			}
 			if part.Text == "" && (part.InlineData != nil || part.File != nil) {
 				systemMedia = append(systemMedia, part)
@@ -524,6 +628,18 @@ func (request geminiRequest) toGenerateRequest(id string, model string) (antigra
 	return antigravity.GenerateRequest{
 		ID: id, Model: model, System: system, Contents: contents, Config: config, Tools: tools,
 	}, nil
+}
+
+// geminiToolTranscript 把系统指令中的 functionCall 或 functionResponse part 写成 Gemini JSON 文本
+func geminiToolTranscript(part antigravity.Part) string {
+	value := map[string]any{}
+	if call := part.FunctionCall; call != nil {
+		value["functionCall"] = map[string]any{"name": call.Name, "args": rawJSONValue(call.Arguments, map[string]any{})}
+	} else {
+		value["functionResponse"] = map[string]any{"name": part.FunctionResult.Name, "response": rawJSONValue(part.FunctionResult.Content, map[string]any{})}
+	}
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 // geminiMaxCandidates 是 candidateCount 的上限
@@ -757,8 +873,8 @@ func mapGeminiTools(groups []geminiToolGroup, config geminiToolConfig) (antigrav
 	return mapped, nil
 }
 
-// handleGeminiGenerate 为每个候选启动一次生成，任一候选失败时整个请求按首个错误失败
-func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, stream bool, count int) {
+// handleGeminiGenerate 为每个候选启动一次生成，任一候选失败时整个请求按首个错误失败，按 output 输出图片与缓存用量
+func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, stream bool, count int, output geminiOutput) {
 	if !stream {
 		var stopKeepalive func()
 		w, stopKeepalive = s.nonstreamKeepalive(w)
@@ -767,54 +883,62 @@ func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, re
 	candidates := s.startChatChoices(r.Context(), request, count, stream)
 	defer candidates.cancel()
 	if err := candidates.err; err != nil {
-		writeGeminiFailure(w, r, request, err, stream)
+		writeGeminiFailure(w, r, err)
 		return
 	}
 	if stream {
-		s.streamGemini(w, r, request, candidates)
+		s.streamGemini(w, r, request, candidates, output)
 		return
 	}
 	results, err := candidates.run(func(_ int, events <-chan antigravity.Event) (generationResult, error) {
 		return consumeEvents(candidates.ctx, events, nil)
 	})
 	if err != nil {
-		writeGeminiFailure(w, r, request, err, false)
+		writeGeminiFailure(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, buildGeminiResponse(request, results))
-}
-
-// writeGeminiFailure 写出响应头之前的生成失败，上游输入过滤按 Gemini API 返回 200 与不含候选的 promptFeedback，流式时作为唯一一块
-func writeGeminiFailure(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, err error, stream bool) {
-	if !shouldWriteRequestError(r, err) {
-		return
-	}
-	response, ok := geminiPromptFeedback(request, err)
-	switch {
-	case !ok:
-		writeGeminiRequestError(w, err)
-	case !stream:
-		writeJSON(w, http.StatusOK, response)
-	case r.URL.Query().Get("alt") == "sse":
-		if streamHeaders(w) == nil {
-			_ = writeSSE(w, "", response)
+	response := buildGeminiResponse(request, output.cache, results)
+	if output.imageURI {
+		for _, candidate := range response["candidates"].([]any) {
+			if content, ok := candidate.(map[string]any)["content"].(map[string]any); ok {
+				if err := s.deliverGeminiImages(content["parts"].([]map[string]any)); err != nil {
+					writeGeminiRequestError(w, err)
+					return
+				}
+			}
 		}
-	default:
-		writeJSON(w, http.StatusOK, []any{response})
+	}
+	writeJSON(w, http.StatusOK, officialOrder("gemini", response))
+}
+
+// deliverGeminiImages 把 part 中的内联图片存入 Files API，改为引用该文件的 fileData
+func (s *server) deliverGeminiImages(parts []map[string]any) error {
+	for _, part := range parts {
+		inline, ok := part["inlineData"].(map[string]any)
+		if !ok {
+			continue
+		}
+		mimeType := inline["mimeType"].(string)
+		data, _ := base64.StdEncoding.DecodeString(inline["data"].(string))
+		file, err := s.files.save("image"+cmp.Or(mediaExtensions[mimeType], ".bin"), mimeType, defaultFilePurpose, geminiFileRetention, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		delete(part, "inlineData")
+		part["fileData"] = map[string]any{"mimeType": mimeType, "fileUri": geminiFilesURIPrefix + file.ID}
+	}
+	return nil
+}
+
+// writeGeminiFailure 写出响应头之前的生成失败
+func writeGeminiFailure(w http.ResponseWriter, r *http.Request, err error) {
+	if shouldWriteRequestError(r, err) {
+		writeGeminiRequestError(w, err)
 	}
 }
 
-// geminiPromptFeedback 把上游输入过滤投影为 blockReason 为 OTHER、不含候选的 Gemini 响应
-func geminiPromptFeedback(request antigravity.GenerateRequest, err error) (map[string]any, bool) {
-	var blocked *antigravity.PromptBlockedError
-	if !errors.As(err, &blocked) {
-		return nil, false
-	}
-	return map[string]any{"promptFeedback": map[string]any{"blockReason": "OTHER", "blockReasonMessage": blocked.Message}, "modelVersion": request.Model, "responseId": request.ID}, true
-}
-
-// buildGeminiResponse 按候选序号输出各候选内容与终止原因，用量为全部候选之和
-func buildGeminiResponse(request antigravity.GenerateRequest, results []generationResult) map[string]any {
+// buildGeminiResponse 按候选序号输出各候选内容与终止原因，用量为全部候选之和，cache 非空时计入缓存部分
+func buildGeminiResponse(request antigravity.GenerateRequest, cache *geminiCache, results []generationResult) map[string]any {
 	candidates := make([]any, 0, len(results))
 	for index, result := range results {
 		candidate := map[string]any{"index": index}
@@ -832,8 +956,8 @@ func buildGeminiResponse(request antigravity.GenerateRequest, results []generati
 	if results[0].providerModel != "" {
 		response["modelVersion"] = results[0].providerModel
 	}
-	if usage := sumUsage(results); usage != nil {
-		response["usageMetadata"] = geminiUsage(usage)
+	if usage := choicesUsage(results); usage != nil {
+		response["usageMetadata"] = geminiUsage(cache.usage(usage))
 	}
 	return response
 }
@@ -985,22 +1109,25 @@ func setGeminiCandidateEnd(candidate map[string]any, result generationResult) {
 	}
 }
 
-// geminiUsage 把用量投影为 usageMetadata
+// geminiUsage 把用量投影为 usageMetadata，与官方一样省略值为 0 的计数
 func geminiUsage(usage *antigravity.Usage) map[string]any {
-	metadata := map[string]any{
-		"promptTokenCount":     usage.InputTokens,
-		"candidatesTokenCount": usage.OutputTokens,
-		"thoughtsTokenCount":   usage.ReasoningTokens,
-		"totalTokenCount":      usage.TotalTokens,
-	}
-	if usage.CachedTokens > 0 {
-		metadata["cachedContentTokenCount"] = usage.CachedTokens
+	metadata := map[string]any{}
+	for name, value := range map[string]int64{
+		"promptTokenCount":        usage.InputTokens,
+		"candidatesTokenCount":    usage.OutputTokens,
+		"thoughtsTokenCount":      usage.ReasoningTokens,
+		"totalTokenCount":         usage.TotalTokens,
+		"cachedContentTokenCount": usage.CachedTokens,
+	} {
+		if value != 0 {
+			metadata[name] = value
+		}
 	}
 	return metadata
 }
 
-// streamGemini 按到达顺序输出各候选的增量块，最后一块携带全部候选的终止原因与用量之和；alt=sse 时为 SSE，否则与官方一样为逐个对象写出的 JSON 数组
-func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, candidates *chatChoices) {
+// streamGemini 按到达顺序输出各候选的增量块，各块带所在上游块的累计用量；单个候选时最后一个内容块与终止原因、用量同在最后一块，多个候选时最后一块携带全部候选的终止原因与用量之和；alt=sse 时为 SSE，否则与官方一样为逐个对象写出的 JSON 数组
+func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, candidates *chatChoices, output geminiOutput) {
 	sse := r.URL.Query().Get("alt") == "sse"
 	if sse {
 		stream, err := openStream(w, geminiHeartbeat)
@@ -1012,7 +1139,11 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 	} else {
 		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
+		if http.NewResponseController(w).Flush() != nil {
+			return
+		}
 	}
 	var writing sync.Mutex
 	written := false
@@ -1020,9 +1151,9 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 		writing.Lock()
 		defer writing.Unlock()
 		if sse {
-			return writeSSE(w, "", value)
+			return writeSSE(w, "", officialOrder("gemini", value))
 		}
-		data, err := json.Marshal(value)
+		data, err := json.Marshal(officialOrder("gemini", value))
 		if err != nil {
 			return err
 		}
@@ -1036,6 +1167,22 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 		}
 		return http.NewResponseController(w).Flush()
 	}
+	// fail 写出流内错误：SSE 按官方 SDK 的解析方式写成不带 data: 前缀的整块 JSON，JSON 数组中写为一个元素
+	fail := func(value map[string]any) error {
+		if !sse {
+			return write(value)
+		}
+		writing.Lock()
+		defer writing.Unlock()
+		data, err := json.Marshal(officialOrder("gemini", value))
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(append(data, '\n')); err != nil {
+			return err
+		}
+		return http.NewResponseController(w).Flush()
+	}
 	if !sse {
 		defer func() {
 			tail := "\r\n]"
@@ -1045,24 +1192,39 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 			io.WriteString(w, tail)
 		}()
 	}
+	single := len(candidates.events) == 1
+	var last map[string]any
 	results, err := candidates.run(func(index int, events <-chan antigravity.Event) (generationResult, error) {
 		return consumeEvents(candidates.ctx, events, func(event antigravity.Event) error {
 			candidate := geminiStreamCandidate(event, index)
 			if candidate == nil {
 				return nil
 			}
-			return write(map[string]any{"responseId": request.ID, "modelVersion": cmp.Or(event.ProviderModel, request.Model), "candidates": []any{candidate}})
+			if output.imageURI {
+				if err := s.deliverGeminiImages(candidate["content"].(map[string]any)["parts"].([]map[string]any)); err != nil {
+					return err
+				}
+			}
+			chunk := map[string]any{"responseId": request.ID, "modelVersion": cmp.Or(event.ProviderModel, request.Model), "candidates": []any{candidate}}
+			if single && event.Usage != nil {
+				chunk["usageMetadata"] = geminiUsage(output.cache.usage(event.Usage))
+			}
+			if !single {
+				return write(chunk)
+			}
+			previous := last
+			last = chunk
+			if previous == nil {
+				return nil
+			}
+			return write(previous)
 		})
 	})
 	if err != nil {
-		if !shouldWriteRequestError(r, err) {
+		if !shouldWriteRequestError(r, err) || last != nil && write(last) != nil {
 			return
 		}
-		if response, ok := geminiPromptFeedback(request, err); ok {
-			_ = write(response)
-			return
-		}
-		_ = write(map[string]any{"error": map[string]any{
+		_ = fail(map[string]any{"error": map[string]any{
 			"code": statusFromError(err), "message": err.Error(), "status": geminiErrorStatus(err),
 		}})
 		return
@@ -1070,6 +1232,14 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 	model := request.Model
 	if results[0].providerModel != "" {
 		model = results[0].providerModel
+	}
+	if last != nil {
+		setGeminiCandidateEnd(last["candidates"].([]any)[0].(map[string]any), results[0])
+		if results[0].usage != nil {
+			last["usageMetadata"] = geminiUsage(output.cache.usage(results[0].usage))
+		}
+		_ = write(last)
+		return
 	}
 	finished := make([]any, 0, len(results))
 	for index, result := range results {
@@ -1081,8 +1251,8 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 		"responseId": request.ID, "modelVersion": model,
 		"candidates": finished,
 	}
-	if usage := sumUsage(results); usage != nil {
-		final["usageMetadata"] = geminiUsage(usage)
+	if usage := choicesUsage(results); usage != nil {
+		final["usageMetadata"] = geminiUsage(output.cache.usage(usage))
 	}
 	_ = write(final)
 }
@@ -1107,5 +1277,5 @@ func geminiStreamCandidate(event antigravity.Event, index int) map[string]any {
 	default:
 		return nil
 	}
-	return map[string]any{"index": index, "content": map[string]any{"role": "model", "parts": []any{part}}}
+	return map[string]any{"index": index, "content": map[string]any{"role": "model", "parts": []map[string]any{part}}}
 }

@@ -240,7 +240,7 @@ func readGeminiFileMetadata(body io.Reader) (geminiFileMetadata, error) {
 	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
 		return metadata, err
 	}
-	raw, _, err = geminiCamelKeys(doubleQuotedJSON(raw))
+	raw, err = geminiCamelKeys(doubleQuotedJSON(raw))
 	if err == nil {
 		err = json.Unmarshal(raw, &metadata)
 	}

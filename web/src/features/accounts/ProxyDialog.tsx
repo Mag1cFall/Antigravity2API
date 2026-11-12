@@ -1,7 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
@@ -9,7 +8,6 @@ import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
 import { accountPath, replaceAccount } from '@/features/accounts/actions'
-import { accountMessages } from '@/features/accounts/messages'
 import type { Account } from '@/features/accounts/types'
 import { validProxy } from '@/features/settings/schema'
 import { api } from '@/lib/api'
@@ -25,8 +23,8 @@ export function ProxyDialog({
   trigger: HTMLElement
   onClose: () => void
 }) {
-  const m = useMessages(accountMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('accounts')
+  const app = useMessages('app')
   const client = useQueryClient()
   const [value, setValue] = useState(account.proxy ?? '')
   const proxy = value.trim()

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -48,7 +49,7 @@ type output struct {
 	answer      []antigravity.Part
 }
 
-// process 返回一个上游事件处理后应转发的事件，并把转发的正文与函数调用记入回答
+// process 返回一个上游事件处理后应转发的事件，把转发的正文与函数调用记入回答，并记下正文上与正文之后的最后一个签名
 func (o *output) process(event antigravity.Event) []antigravity.Event {
 	if o == nil {
 		return []antigravity.Event{event}
@@ -66,6 +67,9 @@ func (o *output) process(event antigravity.Event) []antigravity.Event {
 			o.answer = append(o.answer, antigravity.Part{Text: forwarded.Text})
 		case antigravity.EventToolCall:
 			o.answer = append(o.answer, antigravity.Part{FunctionCall: forwarded.ToolCall})
+		}
+		if forwarded.Kind == antigravity.EventText || forwarded.Kind == antigravity.EventThoughtSignature && len(o.answer) > 0 && o.answer[len(o.answer)-1].FunctionCall == nil {
+			o.signed.reply = cmp.Or(forwarded.ThoughtSignature, o.signed.reply)
 		}
 	}
 	return out
@@ -209,10 +213,11 @@ func (o *output) signatures() signatureRecord {
 	return o.signed
 }
 
-// signatureRecord 表示思考签名：calls 为各函数调用 ID 的签名，origins 为各签名摘要对应的模型族
+// signatureRecord 表示思考签名：calls 为各函数调用 ID 与各回答指纹的签名，origins 为各签名摘要对应的模型族，reply 为本次回答正文上与正文之后的签名
 type signatureRecord struct {
 	calls   map[string]string
 	origins map[string]string
+	reply   string
 }
 
 // newSignatureRecord 返回空的签名记录

@@ -267,7 +267,22 @@ func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 			mergeSchema(output, variant.(map[string]any))
 		}
 	}
+	p.dropMismatchedKeywords(output)
 	return output, nil
+}
+
+// dropMismatchedKeywords 去掉与节点类型不符的 items、properties 与 required，上游只在 ARRAY 接受 items、只在 OBJECT 接受后两者
+func (p *schemaProjector) dropMismatchedKeywords(output map[string]any) {
+	upstreamType, _ := output["type"].(string)
+	if upstreamType == "" {
+		return
+	}
+	for name, owner := range map[string]string{"items": "ARRAY", "properties": "OBJECT", "required": "OBJECT"} {
+		if _, ok := output[name]; ok && upstreamType != owner {
+			delete(output, name)
+			p.lossy = true
+		}
+	}
 }
 
 // projectPrefixItems 把 prefixItems 的各位置 Schema 与 items 合为一个元素 Schema，items=false 时以位置数为 maxItems
@@ -582,7 +597,8 @@ func flattenUnions(schema map[string]any) bool {
 		var required []string
 		for index, variant := range variants {
 			object := variant.(map[string]any)
-			for name, property := range object["properties"].(map[string]any) {
+			branch, _ := object["properties"].(map[string]any)
+			for name, property := range branch {
 				if _, exists := properties[name]; !exists {
 					properties[name] = property
 				}

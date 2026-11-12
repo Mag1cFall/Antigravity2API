@@ -210,11 +210,15 @@ func (c *Client) notify(observed Observed) {
 	}
 }
 
-// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode 走只开 HTTP/1 的 Transport，Authorization 由 oauth2.Transport 注入；头像、tokeninfo 与 clearcut 走克隆的 http.DefaultTransport，clearcut 另由 oauth2.Transport 注入 Authorization
+// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode 走 ALPN 为 h2、http/1.1 的 Transport（每个代理各用一个），Authorization 由 oauth2.Transport 注入；头像、tokeninfo 与 clearcut 走克隆的 http.DefaultTransport，clearcut 另由 oauth2.Transport 注入 Authorization
 func NewClient(account string, source oauth2.TokenSource, device Device, proxy Proxy) *Client {
-	transport := &http.Transport{Proxy: proxy}
-	transport.Protocols = new(http.Protocols)
-	transport.Protocols.SetHTTP1(true)
+	transport := newProxyTransport(proxy, func(proxy Proxy) *http.Transport {
+		transport := &http.Transport{Proxy: proxy}
+		transport.Protocols = new(http.Protocols)
+		transport.Protocols.SetHTTP1(true)
+		transport.Protocols.SetHTTP2(true)
+		return transport
+	})
 	web := webTransport(proxy)
 	return &Client{
 		account: account,
@@ -228,11 +232,49 @@ func NewClient(account string, source oauth2.TokenSource, device Device, proxy P
 	}
 }
 
-// webTransport 返回克隆 http.DefaultTransport 并使用账户代理的 Transport，token 与头像请求经它以 HTTP/2 发出
-func webTransport(proxy Proxy) *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = proxy
-	return transport
+// webTransport 返回按账户代理使用克隆 http.DefaultTransport 的 RoundTripper，token 与头像请求经它以 HTTP/2 发出
+func webTransport(proxy Proxy) http.RoundTripper {
+	return newProxyTransport(proxy, func(proxy Proxy) *http.Transport {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = proxy
+		return transport
+	})
+}
+
+// proxyTransport 为每个请求按代理选择函数选出的代理使用各自的 Transport，HTTP/2 连接只在经同一代理的请求间复用
+type proxyTransport struct {
+	proxy      Proxy
+	build      func(Proxy) *http.Transport
+	mu         sync.Mutex
+	transports map[string]*http.Transport
+}
+
+// newProxyTransport 返回按 proxy 选出的代理以 build 创建 Transport 的 proxyTransport
+func newProxyTransport(proxy Proxy, build func(Proxy) *http.Transport) *proxyTransport {
+	return &proxyTransport{proxy: proxy, build: build, transports: make(map[string]*http.Transport)}
+}
+
+// RoundTrip 以请求所选代理对应的 Transport 发出请求，没有代理选择函数或选出空代理时直连
+func (t *proxyTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	var proxy *url.URL
+	if t.proxy != nil {
+		var err error
+		if proxy, err = t.proxy(request); err != nil {
+			return nil, err
+		}
+	}
+	key := ""
+	if proxy != nil {
+		key = proxy.String()
+	}
+	t.mu.Lock()
+	transport, ok := t.transports[key]
+	if !ok {
+		transport = t.build(func(*http.Request) (*url.URL, error) { return proxy, nil })
+		t.transports[key] = transport
+	}
+	t.mu.Unlock()
+	return transport.RoundTrip(request)
 }
 
 // traced 给请求挂上 httptrace，在 debug 级记录连接复用、空闲时长与代理方案
@@ -273,11 +315,20 @@ type Credit struct {
 
 // LoadCodeAssistResponse 表示账户的套餐与项目
 type LoadCodeAssistResponse struct {
-	CurrentTier             Tier   `json:"currentTier"`
-	PaidTier                *Tier  `json:"paidTier"`
-	AllowedTiers            []Tier `json:"allowedTiers"`
-	CloudAICompanionProject string `json:"cloudaicompanionProject"`
-	GCPManaged              bool   `json:"gcpManaged"`
+	CurrentTier             Tier             `json:"currentTier"`
+	PaidTier                *Tier            `json:"paidTier"`
+	AllowedTiers            []Tier           `json:"allowedTiers"`
+	CloudAICompanionProject string           `json:"cloudaicompanionProject"`
+	GCPManaged              bool             `json:"gcpManaged"`
+	IneligibleTiers         []IneligibleTier `json:"ineligibleTiers,omitempty"`
+}
+
+// IneligibleTier 表示账户不能使用的套餐及原因，如 RESTRICTED_AGE 的年龄验证
+type IneligibleTier struct {
+	ReasonCode    string `json:"reasonCode"`
+	ReasonMessage string `json:"reasonMessage"`
+	TierID        string `json:"tierId,omitempty"`
+	ValidationURL string `json:"validationUrl,omitempty"`
 }
 
 // Userinfo 表示 Google 账户资料
@@ -330,7 +381,7 @@ type Initialization struct {
 	Quota    QuotaSummary
 }
 
-// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 结束 42–48 ms 后 fetchUserInfo、listExperiments、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，listExperiments 结束 122–195 ms 后发 fetchConfig，listExperiments 失败时不发；其余四个请求全部结束后发 cascadeNuxes；只有 loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
+// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 结束 42–51 ms 后 fetchUserInfo、listExperiments、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，listExperiments 结束 113–175 ms 后发 fetchConfig，再过 3–15 ms 记录实验对照，listExperiments 失败时都不发；其余四个请求全部结束后发 cascadeNuxes，目录之后在后台按 listRemotes 读取远程项目与会话列表；只有 loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
 func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 	var result Initialization
 	user := optional(func() (err error) {
@@ -350,6 +401,7 @@ func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 	catalog := func() (err error) {
 		if result.Catalog, err = c.FetchAvailableModels(ctx); err == nil {
 			c.recordCatalog(result.Catalog)
+			c.listRemotes(context.WithoutCancel(ctx), loginLists)
 		}
 		return err
 	}
@@ -358,8 +410,11 @@ func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 		return err
 	})
 	experiments := func() error {
-		if c.listExperiments(ctx) == nil && pause(ctx, 122, 195) == nil {
+		if c.listExperiments(ctx) == nil && pause(ctx, 113, 175) == nil {
 			c.fetchConfig(ctx)
+			if pause(ctx, 3, 15) == nil {
+				c.report()
+			}
 		}
 		return nil
 	}
@@ -374,7 +429,7 @@ func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 		return Initialization{}, err
 	}
 	err := parallel(user, sequence(assist, func() error {
-		if err := pause(ctx, 42, 48); err != nil {
+		if err := pause(ctx, 42, 51); err != nil {
 			return err
 		}
 		return parallel(experiments, sequence(func() error { return parallel(settings, quota, catalog, controls) }, nux))

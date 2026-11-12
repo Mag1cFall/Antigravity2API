@@ -1,5 +1,4 @@
 import { Badge, type BadgeTone } from '@/components/ui/badge'
-import { requestMessages } from '@/features/requests/messages'
 import type { RequestState } from '@/features/requests/types'
 import { useMessages } from '@/lib/i18n'
 
@@ -16,6 +15,6 @@ const requestTone: Record<RequestState, BadgeTone> = {
 
 // RequestStateBadge 显示请求结果
 export function RequestStateBadge({ state }: { state: RequestState }) {
-  const m = useMessages(requestMessages)
+  const m = useMessages('requests')
   return <Badge tone={requestTone[state]}>{m[state]}</Badge>
 }

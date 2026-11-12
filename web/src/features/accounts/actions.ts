@@ -7,7 +7,6 @@ import {
 import { useCallback, useState, useSyncExternalStore } from 'react'
 
 import { toast } from '@/components/ui/toast'
-import { accountMessages } from '@/features/accounts/messages'
 import { accountsKey } from '@/features/accounts/queries'
 import { errorReason } from '@/features/accounts/status'
 import type { Account, SwitchResult } from '@/features/accounts/types'
@@ -56,7 +55,7 @@ export function useRefreshingAccounts() {
 
 // useToggleAccount 启用或停用账户，先更新列表，失败时回滚
 export function useToggleAccount() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, enabled }: { account: Account; enabled: boolean }) =>
@@ -79,7 +78,7 @@ export function useToggleAccount() {
 
 // useSetPriority 设置账户的调度优先级
 export function useSetPriority() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, priority }: { account: Account; priority: number }) =>
@@ -102,7 +101,7 @@ export function useSetPriority() {
 
 // useSetLabel 设置账户的备注名，空串时清除
 export function useSetLabel() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, label }: { account: Account; label: string }) =>
@@ -122,7 +121,7 @@ export function useSetLabel() {
 
 // useClearCooldown 清除账户在一个额度组或模型上的冷却
 export function useClearCooldown() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, scope }: { account: Account; scope: string }) =>
@@ -144,7 +143,7 @@ export function useClearCooldown() {
 
 // useSetCredits 开启或关闭账户的 AI 积分超额使用
 export function useSetCredits() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, enabled }: { account: Account; enabled: boolean }) =>
@@ -185,7 +184,7 @@ function batchRequest(kind: BatchKind, account: Account) {
 
 // useBatchAccounts 对多个账户逐个调用单账户接口，每个账户完成后更新列表，结束后汇总结果
 export function useBatchAccounts() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   const actionName: Record<BatchKind, string> = {
     enable: m.batchEnable,
@@ -222,7 +221,7 @@ export function useBatchAccounts() {
 
 // useVerifyAccount 重新初始化需要验证或异常的账户
 export function useVerifyAccount() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationKey: verifyKey,
@@ -321,7 +320,7 @@ export function quotaFailure(refresh: QuotaRefresh, account: Account) {
 
 // useRefreshQuota 实时读取一个账户的额度
 export function useRefreshQuota() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationKey: quotaKey,
@@ -343,7 +342,7 @@ export function useRefreshQuota() {
 
 // useImportAccounts 导入本机官方客户端的账户
 export function useImportAccounts() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
     mutationFn: () => api<{ accounts: string[] }>('/api/accounts/import', { method: 'POST' }),
@@ -365,7 +364,7 @@ export function useImportAccounts() {
 
 // useRefreshAll 逐个刷新账户，同时最多 refreshWorkers 个：异常账户先重新初始化，再读取额度；每个账户完成后立即更新该行，结束后提示失败的账户，提示标题列出失败的账户，原因放在说明中
 export function useRefreshAll() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const { locale } = useI18n()
   const client = useQueryClient()
   return useCallback(
@@ -444,7 +443,7 @@ export function keepAccounts(ids: readonly string[]) {
 
 // useAccountRemoval 删除账户：立即隐藏并显示 5 秒撤销，期间撤销、重新导入或登录同一账户则不发送删除，删除完成且列表刷新后不再隐藏；多个账户共用一条撤销提示
 export function useAccountRemoval() {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const client = useQueryClient()
   const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set())
   const remove = useCallback(

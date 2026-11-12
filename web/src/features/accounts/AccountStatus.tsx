@@ -1,17 +1,16 @@
 import { ExternalLink } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
-import { accountMessages } from '@/features/accounts/messages'
+import { Tooltip } from '@/components/ui/tooltip'
 import { earliestCooldown, errorReason, statusOf, statusTone } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
-import { quotaMessages } from '@/features/quota/messages'
 import { nameOf } from '@/features/quota/quota'
 import { formatRelative } from '@/lib/format'
-import { fill, fillNodes, useI18n, useMessages } from '@/lib/i18n'
+import { fill, fillNodes, serverText, useI18n, useMessages } from '@/lib/i18n'
 
 // AccountStatusBadge 是账户状态的文字标签
 export function AccountStatusBadge({ account }: { account: Account }) {
-  const m = useMessages(accountMessages)
+  const m = useMessages('accounts')
   const status = statusOf(account)
   return <Badge tone={statusTone[status]}>{m[status]}</Badge>
 }
@@ -26,34 +25,37 @@ export function AccountReason({
   now: Date
   full?: boolean
 }) {
-  const m = useMessages(accountMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
   const { locale } = useI18n()
   const status = statusOf(account)
   if (status === 'verify') {
     return (
-      <a
-        href={account.verify_url}
-        target="_blank"
-        rel="noopener noreferrer"
-        title={m.verifyReason}
-        className="rounded-sm text-xs text-primary hover:underline"
-      >
-        {m.verifyShort}
-        <span className="whitespace-nowrap">
-          {'\u2060'}
-          <ExternalLink size={12} aria-hidden className="ml-1 inline align-[-1px]" />
-        </span>
-      </a>
+      <Tooltip label={m.verifyReason}>
+        <a
+          href={account.verify_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-sm text-xs text-primary hover:underline"
+        >
+          {m.verifyShort}
+          <span className="whitespace-nowrap">
+            {'\u2060'}
+            <ExternalLink size={12} aria-hidden className="ml-1 inline align-[-1px]" />
+          </span>
+        </a>
+      </Tooltip>
     )
   }
   if (status === 'error') {
     const reason = errorReason(account.error ?? '')
     if (!full)
-      return <span className="text-xs wrap-anywhere text-error-text">{reason.message}</span>
+      return (
+        <span className="text-xs wrap-anywhere text-error-text">{serverText(reason.message)}</span>
+      )
     return (
       <span className="flex flex-col gap-1 text-xs wrap-anywhere">
-        <span className="text-error-text">{reason.message}</span>
+        <span className="text-error-text">{serverText(reason.message)}</span>
         {reason.code && <span className="font-mono text-foreground-muted">{reason.code}</span>}
       </span>
     )

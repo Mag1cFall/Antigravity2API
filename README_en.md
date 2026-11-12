@@ -30,7 +30,7 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 - **System prompt tiers**: full, medium, aggressive and custom tiers control how much of the official system prompt and user message wrapping is kept
 - **Multi-account scheduling**: accounts are picked by account priority and the Gemini and third-party quota groups, requests rotate across accounts of the same priority, and a conversation stays on one account; selected models can prefer lower-plan accounts; exhausted quota cools down until reset, rate limits, capacity errors and server errors cool down or switch accounts by reason; account quota refreshes on a schedule, and the Accounts page can refresh all accounts or one at any time
 - **Token counting**: input tokens are counted locally per model family; GPT-OSS prompts are rendered with the official chat template before counting, and Gemini and Claude counts are calibrated with the upstream usage of the same conversation
-- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings, in Simplified Chinese, Traditional Chinese (Taiwan) and English; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
+- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings, in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German, with service logs and error messages shown in the interface language; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
 - **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores the account, model, tokens, cache hits and timing of every request and estimates cost with official API prices
 - **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing, account JSON export and import (accepts the account files of Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
 - **Proxy**: global and per-account HTTP, HTTPS and SOCKS5 proxies; the system proxy is used when none is set
@@ -56,7 +56,7 @@ The service reads the Antigravity model catalog of every account at startup and 
 The thinking level is decided in this order:
 
 1. A level named in the model name: a catalog ID with a level such as `claude-opus-5-5-high`, a parenthesized suffix such as `claude-opus-5-5(low)` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, a thinking budget in tokens, or `auto` for no level), or the `-thinking` suffix (High)
-2. The thinking parameters of the request: OpenAI `reasoning_effort` `none`, `minimal` and `low` map to Low, `medium` to Medium, `high`, `xhigh` and `max` to High; Anthropic `thinking.budget_tokens` and Gemini `thinkingConfig.thinkingBudget` up to 1024 map to Low, up to 8192 to Medium, larger to High, and `-1` or any negative value sets no level
+2. The thinking parameters of the request: OpenAI `reasoning_effort` `none`, `minimal` and `low` map to Low, `medium` to Medium, `high` to High, `xhigh` and `max` to XHigh (High when the model has no XHigh level); Anthropic `thinking.budget_tokens` and Gemini `thinkingConfig.thinkingBudget` up to 1024 map to Low, up to 8192 to Medium, larger to High, and `-1` or any negative value sets no level
 3. Medium, or the only level of the model
 
 Model names also match the catalog as follows:
@@ -77,9 +77,9 @@ Download the desktop app for your system from [Releases](https://github.com/Mag1
 | --- | --- | --- | --- |
 | Windows | `windows-amd64.zip` | Double-click `antigravity2api.exe` | The folder of `antigravity2api.exe`; the whole folder can be copied or moved as is |
 | macOS | `desktop-<version>-darwin-universal.tar.gz` | Open `Antigravity2API.app` | `~/Library/Application Support/Antigravity2API` |
-| Linux | `desktop-<version>-linux-amd64.tar.gz` or `linux-arm64.tar.gz` | Run `antigravity2api`; requires the system GTK 3 and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0` on Ubuntu 22.04 and later) | `~/.config/Antigravity2API` |
+| Linux | `desktop-<version>-linux-amd64.tar.gz` or `linux-arm64.tar.gz` | Run `antigravity2api`; requires the system GTK 3 and WebKitGTK 4.1; on Ubuntu 22.04 run `sudo apt install libwebkit2gtk-4.1-0` first | `~/.config/Antigravity2API` |
 
-The app opens the admin UI in a window; sign in with a Google account or import the account of the local official client on the Accounts page. On Windows without the WebView2 runtime the admin UI opens in the default browser. On Windows and macOS closing the window keeps the app in the tray; on Linux closing the window quits.
+The app opens the admin UI in a window; sign in with a Google account or import the account of the local official client on the Accounts page. On Windows without the WebView2 runtime the admin UI opens in the default browser. On Windows and macOS closing the window keeps the app in the tray: double-clicking the tray icon on Windows or clicking the menu bar icon on macOS shows the window, and right-clicking opens the tray menu with a quota summary, Refresh Quota, Open in Browser, Copy API Address, Start at Login and Quit, whose text follows the interface language and, on Windows, whose colors follow the interface theme; on Linux closing the window quits, and on desktops without a system tray (such as GNOME without the AppIndicator extension) the tray icon does not appear and `--hidden` still opens the window.
 
 ### Command Line
 
@@ -214,7 +214,7 @@ POST   /v1beta/interactions/{id}/cancel
 
 ### Authentication
 
-`API_KEYS` sets one or more public API keys. Requests carry a key with `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key` or `?key=`; when `API_KEYS` is empty no key is checked, but browser requests with an `Origin` header are accepted only from pages on localhost or a loopback address; other web origins and `Origin: null` get 401 `Invalid API Key`, so set `API_KEYS` before connecting a web client. Request records and usage are grouped by key.
+`API_KEYS` sets one or more public API keys. Requests carry a key with `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key` or `?key=`; when `API_KEYS` is empty no key is checked, but browser requests with an `Origin` header are accepted only from pages on localhost or a loopback address; other web origins and `Origin: null` get 401 `Invalid API Key`, so set `API_KEYS` before connecting a web client. Request records and usage are grouped by key. A request with the `X-Antigravity-Account-Id: <account>` header is handled only by that account, written as the email shown on the Accounts page; when the account does not exist, is not bound to the key, or is unavailable, the request returns an error stating the reason and does not move to another account.
 
 ### Admin UI and Service Status
 
@@ -222,7 +222,7 @@ Open `http://127.0.0.1:8017/` in a browser for the admin UI, which uses the `/ap
 
 ## Client Setup
 
-OpenAI SDKs use the base URL `http://127.0.0.1:8017/v1`; Anthropic and Google GenAI SDKs use `http://127.0.0.1:8017`. The Connect page of the admin UI generates ready-to-copy configs for Claude Code, Codex, OpenCode, Cherry Studio and curl from the current address, API key and live model catalog.
+OpenAI SDKs use the base URL `http://127.0.0.1:8017/v1`; Anthropic and Google GenAI SDKs use `http://127.0.0.1:8017`. The Connect page of the admin UI generates ready-to-copy configs for Claude Code, Codex, OpenCode, OpenClaw, Magpie, pi, omp, dsh, Cherry Studio and curl from the current address, API key and live model catalog; OpenCode, OpenClaw, pi, omp, dsh and Cherry Studio let you pick the protocol, and Claude Code, Codex, OpenCode, OpenClaw, pi, Cherry Studio and Magpie also offer one-click import links.
 
 ```bash
 curl http://127.0.0.1:8017/v1/chat/completions \
@@ -317,6 +317,8 @@ docs/                 # protocol, development and logging docs
 | `ROUTING_STRATEGY` | Routing strategy: `round-robin` or `fill-first` | `round-robin` |
 | `PREFER_LOWER_TIER_MODELS` | Model IDs that prefer lower-plan accounts, comma-separated; within the same priority, Free, then Pro, then Ultra accounts are used | empty |
 | `REQUEST_TIMEOUT` | Maximum wait for the first upstream event and between two upstream events | `5m` |
+| `FIRST_EVENT_HEDGE` | When a request has no first token for a while, send a backup request on an idle account (another account first, otherwise a free slot on the same account); the first to answer continues and the other is cancelled; background Responses requests get none. `auto` waits for the first-token p95 of each model over the last 24 hours and skips models with fewer than 20 requests; a positive integer is the wait in seconds; `off` sends no backup requests | `auto` |
+| `FIRST_EVENT_HEDGE_MODELS` | Comma-separated model IDs that get backup requests; backup requests also count against account quota | `gemini-4-argon` |
 | `NONSTREAM_KEEPALIVE` | When a non-streaming request waits more than 10 seconds, return 200 first and then write a newline every 10 seconds, so reverse proxies keep the connection open | `true` |
 | `FAKE_STREAM` | Streaming requests get the complete result first and then output it in streaming format; failures midway are regenerated on another account | `false` |
 | `QUOTA_REFRESH_INTERVAL` | Interval for reading the quota of every account, disabled ones included, in the background; minimum `1m`, `0` turns it off | `15m` |

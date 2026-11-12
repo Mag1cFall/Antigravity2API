@@ -30,7 +30,7 @@
 - **系统提示档位**：全保留、中等、激进与自定义四档，控制官方系统提示与用户消息包装的保留程度
 - **多账户调度**：按账户优先级与 Gemini、第三方模型两组额度选择账户，请求在同级账户间轮换，同一会话固定在同一账户；指定的模型可优先使用低套餐账户；额度耗尽冷却到重置时间，限速、容量不足与服务端错误按原因冷却或换号；各账户额度定时刷新，账户页可随时刷新全部或单个账户
 - **token 计数**：按模型族本地计算输入 token，GPT-OSS 按官方聊天模板渲染后计数，Gemini 与 Claude 族同一会话以上游实际用量校准
-- **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置，界面支持简体中文、繁体中文（台湾）与英文；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
+- **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置，界面支持简体中文、繁体中文（台湾）、英文、日文、韩文、法文与德文，服务日志与错误说明随界面语言显示；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志与请求账本**：结构化日志按请求记录选号、换号、冷却与上游尝试；SQLite 账本保存每个请求的账户、模型、token、缓存命中与分段耗时，并按官方 API 单价估算费用
 - **登录方式**：浏览器登录、粘贴授权码登录、导入本机官方客户端的账户、从另一台电脑配对上传，账户 JSON 导出与导入（兼容 Antigravity Manager、CLIProxyAPI、sub2api、gcli2api、opencode-antigravity-auth 与 antigravity-claude-proxy 的账户文件）
 - **代理**：HTTP、HTTPS、SOCKS5 全局代理与每账户代理，未设置时跟随系统代理
@@ -56,7 +56,7 @@
 思考档位按以下顺序确定：
 
 1. 模型名中指定的档位：`claude-opus-5-5-high` 这类带档位的目录 ID、括号后缀 `claude-opus-5-5(low)`（括号内可写 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、思考预算 token 数，或不指定档位的 `auto`）、`-thinking` 后缀（High）
-2. 请求的思考参数：OpenAI `reasoning_effort` 的 `none`、`minimal`、`low` 为 Low，`medium` 为 Medium，`high`、`xhigh`、`max` 为 High；Anthropic `thinking.budget_tokens` 与 Gemini `thinkingConfig.thinkingBudget` 不超过 1024 为 Low，不超过 8192 为 Medium，更大为 High，`-1` 等负数不指定档位
+2. 请求的思考参数：OpenAI `reasoning_effort` 的 `none`、`minimal`、`low` 为 Low，`medium` 为 Medium，`high` 为 High，`xhigh`、`max` 为 XHigh（模型没有 XHigh 档时为 High）；Anthropic `thinking.budget_tokens` 与 Gemini `thinkingConfig.thinkingBudget` 不超过 1024 为 Low，不超过 8192 为 Medium，更大为 High，`-1` 等负数不指定档位
 3. Medium；模型只有一档时取该档
 
 模型名另按以下规则匹配目录：
@@ -77,9 +77,9 @@
 | --- | --- | --- | --- |
 | Windows | `windows-amd64.zip` | 双击 `antigravity2api.exe` | `antigravity2api.exe` 所在目录，整个目录可以直接复制或移动 |
 | macOS | `desktop-<版本>-darwin-universal.tar.gz` | 打开 `Antigravity2API.app` | `~/Library/Application Support/Antigravity2API` |
-| Linux | `desktop-<版本>-linux-amd64.tar.gz` 或 `linux-arm64.tar.gz` | 运行 `antigravity2api`，需要系统的 GTK 3 与 WebKitGTK 4.1（Ubuntu 22.04 起的 `libwebkit2gtk-4.1-0`） | `~/.config/Antigravity2API` |
+| Linux | `desktop-<版本>-linux-amd64.tar.gz` 或 `linux-arm64.tar.gz` | 运行 `antigravity2api`，需要系统的 GTK 3 与 WebKitGTK 4.1，Ubuntu 22.04 先执行 `sudo apt install libwebkit2gtk-4.1-0` | `~/.config/Antigravity2API` |
 
-桌面版在窗口中打开管理端，在管理端的账户页登录 Google 账户或导入本机官方客户端的账户。Windows 系统没有 WebView2 运行时时管理端在默认浏览器中打开。Windows 与 macOS 关闭窗口后留在托盘，Linux 关闭窗口即退出。
+桌面版在窗口中打开管理端，在管理端的账户页登录 Google 账户或导入本机官方客户端的账户。Windows 系统没有 WebView2 运行时时管理端在默认浏览器中打开。Windows 与 macOS 关闭窗口后留在托盘：Windows 上双击托盘图标显示窗口，macOS 上单击菜单栏图标显示窗口，右键打开托盘菜单，菜单含额度摘要、刷新额度、在浏览器中打开、复制 API 地址、开机启动与退出，文字随界面语言变化，Windows 上菜单配色随界面配色变化；Linux 关闭窗口即退出；桌面环境没有系统托盘（如未装 AppIndicator 扩展的 GNOME）时不显示托盘图标，`--hidden` 启动也打开窗口。
 
 ### 命令行版
 
@@ -214,7 +214,7 @@ POST   /v1beta/interactions/{id}/cancel
 
 ### 认证
 
-`API_KEYS` 设置一个或多个公开 API key，请求以 `Authorization: Bearer <key>`、`x-api-key`、`x-goog-api-key` 或 `?key=` 携带；`API_KEYS` 为空时不校验 key，但带 `Origin` 头的浏览器请求只接受来自 localhost 与回环地址的网页，其他网页来源与 `Origin: null` 返回 401 `Invalid API Key`；从网页客户端接入时设置 `API_KEYS`。请求记录与用量按 key 统计。
+`API_KEYS` 设置一个或多个公开 API key，请求以 `Authorization: Bearer <key>`、`x-api-key`、`x-goog-api-key` 或 `?key=` 携带；`API_KEYS` 为空时不校验 key，但带 `Origin` 头的浏览器请求只接受来自 localhost 与回环地址的网页，其他网页来源与 `Origin: null` 返回 401 `Invalid API Key`；从网页客户端接入时设置 `API_KEYS`。请求记录与用量按 key 统计。请求带 `X-Antigravity-Account-Id: <账户>` 请求头时只由该账户处理，账户填账户页显示的邮箱；该账户不存在、不在该 key 绑定的账户中或不可用时直接返回写明原因的错误，不换到其他账户。
 
 ### 管理端与服务状态
 
@@ -222,7 +222,7 @@ POST   /v1beta/interactions/{id}/cancel
 
 ## 客户端接入
 
-OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8017/v1`，Anthropic 与 Google GenAI SDK 使用 `http://127.0.0.1:8017`。管理端的接入页按当前地址、API key 与实时模型目录生成 Claude Code、Codex、OpenCode、Cherry Studio 与 curl 的配置，可直接复制。
+OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8017/v1`，Anthropic 与 Google GenAI SDK 使用 `http://127.0.0.1:8017`。管理端的接入页按当前地址、API key 与实时模型目录生成 Claude Code、Codex、OpenCode、OpenClaw、Magpie、pi、omp、dsh、Cherry Studio 与 curl 的配置，可直接复制；OpenCode、OpenClaw、pi、omp、dsh 与 Cherry Studio 可选择接入协议，Claude Code、Codex、OpenCode、OpenClaw、pi、Cherry Studio 与 Magpie 另有一键导入链接。
 
 ```bash
 curl http://127.0.0.1:8017/v1/chat/completions \
@@ -317,6 +317,8 @@ docs/                 # 协议、开发与日志文档
 | `ROUTING_STRATEGY` | 调度策略：`round-robin` 或 `fill-first` | `round-robin` |
 | `PREFER_LOWER_TIER_MODELS` | 优先用低套餐账户的模型 ID，逗号分隔；同一优先级内依次先用 Free、Pro、Ultra 账户 | 空 |
 | `REQUEST_TIMEOUT` | 等待首个上游事件与相邻两个上游事件之间的最长时长 | `5m` |
+| `FIRST_EVENT_HEDGE` | 原请求迟迟没有首字时用空闲账户（其他账户优先，没有时用原账户的空闲槽位）发起一个备用请求，先出首字的一方继续、另一方取消，后台 Responses 不发起；`auto` 按各模型近 24 小时首字等待的 p95，请求少于 20 次的模型不发起；正整数为等待秒数；`off` 不发起 | `auto` |
+| `FIRST_EVENT_HEDGE_MODELS` | 发起备用请求的模型 ID，逗号分隔；备用请求同样计入账户额度 | `gemini-4-argon` |
 | `NONSTREAM_KEEPALIVE` | 非流式请求等待超过 10 秒时先返回 200，之后每 10 秒写出一个换行，经反向代理时连接不因长时间无数据断开 | `true` |
 | `FAKE_STREAM` | 流式请求先取得完整结果再按流式格式输出，中途失败时换账户重新生成 | `false` |
 | `QUOTA_REFRESH_INTERVAL` | 后台读取全部账户（含停用账户）额度的间隔，最短 `1m`，`0` 为不自动刷新 | `15m` |

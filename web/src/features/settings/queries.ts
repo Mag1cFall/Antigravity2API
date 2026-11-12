@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { invalidate, settingsDependents } from '@/app/sync'
-import type { Settings } from '@/features/settings/types'
+import type { FirstEventLatency, Settings } from '@/features/settings/types'
 import { api } from '@/lib/api'
 
 // settingsKey 是设置的查询键
@@ -10,6 +10,15 @@ const settingsKey = ['settings']
 // useSettings 读取 .env 中的设置
 export function useSettings() {
   return useQuery({ queryKey: settingsKey, queryFn: () => api<Settings>('/api/settings') })
+}
+
+// useFirstEventLatency 读取各模型近期原请求首字等待的 p95
+export function useFirstEventLatency() {
+  return useQuery({
+    queryKey: ['first-event-latency'],
+    queryFn: async () =>
+      (await api<{ latencies: FirstEventLatency[] }>('/api/first-event-latency')).latencies,
+  })
 }
 
 // useSaveSettings 合并保存部分配置项，成功后更新设置缓存

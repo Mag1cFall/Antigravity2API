@@ -47,6 +47,7 @@ JSON 格式每行一条事件：
 - 请求 ID 为 `req_` 加 Go `crypto/rand.Text()` 的 26 个字符转小写，字母表为 `a–z` 与 `2–7`；`request` 的字段见“请求账本”
 - 属性键为英文：全部事件带 `source`；请求与上游事件带 `event`；带请求 ID 的事件带 `request_id`；`request.started` 与 `request.finished` 带 `request`；`http.access` 另带 `status`、`latency_ms`、`client_ip`、`method`、`path`
 - `msg` 中的 `键=值` 只是消息文本，不另作属性
+- 各去向的 `msg` 都是简体中文原文；管理端“日志”页按界面语言显示译文，翻译表见开发文档的“语言、配色与快捷键”
 - `request_id` 由日志处理器从请求的 context 取出后加入；`上游尝试完成` 与 `上游尝试失败` 显式带 `request_id`
 - 不带 `source` 的事件只有 `没有找到 WebView2 运行时，管理端在默认浏览器中打开`，在管理事件流与 `logs` 表中来源记为 `service`
 
@@ -75,7 +76,7 @@ JSON 格式每行一条事件：
 INFO  service  服务就绪 | 地址=127.0.0.1:8017
 INFO  account@example.com  token 已刷新 | 到期=2026-10-15T10:08:15+08:00
 INFO  account@example.com  上游请求 | POST daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist | 状态=200 | 耗时=412ms
-INFO  service  官方客户端最新版本 | 版本=2.31.0 当前=2.30.0
+INFO  service  官方客户端最新版本 | 版本=2.32.0 当前=2.31.2
 INFO  service  账户池刷新完成 | 耗时=40.272s
 ```
 
@@ -178,6 +179,10 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 | `模型容量不足，换账户重试 \| 模型=...` | WARN | 容量不足 |
 | `上游拒绝请求内容，不冷却账户 \| 原因=... \| 系统提示档位=...` | WARN | 没有 ErrorInfo 与恢复时刻的 429 |
 | `上游流在客户端收到事件前中断，换账户重新生成` | WARN | 流中错误换账户，以新账户为来源 |
+| `备用请求发起 \| 原请求账户=... \| 原请求已等待=... \| 阈值=... \| 模型=...` | WARN | 原请求首字等待达到 `FIRST_EVENT_HEDGE` 阈值，以备用账户为来源 |
+| `备用请求胜出 \| 原请求已等待=... \| 模型=...` | INFO | 备用请求先返回首个上游事件，原请求取消，以备用账户为来源 |
+| `原请求胜出，取消备用请求 \| 备用账户=... \| 模型=...` | INFO | 原请求先返回首个上游事件 |
+| `上游在函数调用之后以内容策略结束，按 STOP 结束 \| 错误=...` | WARN | 已发出函数调用后上游给出过滤提示或内容策略类结束原因，这一轮按函数调用正常结束 |
 
 账户运行中的其他事件：
 

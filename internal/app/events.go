@@ -42,6 +42,8 @@ type activeRequest struct {
 	relays sync.WaitGroup
 	// accounts 是请求 API key 绑定的账户，为空时可用全部账户
 	accounts []string
+	// account 是 accountHeader 请求头指定的账户，为空时不指定
+	account string
 }
 
 // hub 保存最新账户列表、最近日志与进行中的请求，并向事件流连接分发事件

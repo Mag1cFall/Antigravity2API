@@ -2,7 +2,6 @@ import { BarChart3, ChevronDown, Download, X } from 'lucide-react'
 import { type RefObject, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 
-import { appMessages } from '@/app/messages'
 import { Button } from '@/components/ui/button'
 import { Card, CardBody, CardHeader, CardToolbar } from '@/components/ui/card'
 import {
@@ -27,169 +26,8 @@ import {
   formatNumber,
   formatPercent,
 } from '@/lib/format'
-import { defineMessages, fill, useI18n, useMessages } from '@/lib/i18n'
+import { fill, useI18n, useMessages } from '@/lib/i18n'
 import { changeParams } from '@/lib/params'
-
-// usageMessages 是用量页的文案
-const usageMessages = defineMessages(
-  {
-    title: '用量',
-    range: '时间范围',
-    filters: '筛选',
-    filterCount: '{dimension} {count}',
-    filterClear: '清除筛选',
-    filterNone: '这段时间没有可选项',
-    emptyFiltered: '没有符合筛选的请求',
-    range24h: '24 小时',
-    range7d: '7 天',
-    range30d: '30 天',
-    range90d: '90 天',
-    groupBy: '分组',
-    breakdown: '分项',
-    model: '模型',
-    api_key: 'API key',
-    account: '账户',
-    day: '日期',
-    export: '导出 CSV',
-    exportEmpty: '这段时间没有可导出的请求',
-    exportFailed: '用量读取失败，无法导出',
-    requests: '请求',
-    requestsDetail: '成功 {succeeded} · 失败 {failed} · 限流 {limited}',
-    change: '较上一周期 {change}',
-    cacheRate: '缓存命中率',
-    cacheDetail: '{cached} / {input} 输入 token',
-    tokens: 'Token',
-    tokensDetail: '思考 {reasoning} · 回复 {reply}',
-    latency: '耗时 P50',
-    latencyDetail: 'P95 {p95} · 首个事件 P50 {first}',
-    cost: '估算费用',
-    costDetail: '按各模型官方 API 单价估算',
-    unpriced: '另有 {count} 个请求的模型没有单价',
-    unpricedShort: '未定价 {count}',
-    trend: '请求趋势',
-    trendBar: '{time} 起 {bucket}：{requests} 个请求',
-    trendNow: '现在',
-    trendLabel: '请求趋势，峰值 {peak} 个请求',
-    recent: '近 {minutes} 分钟 {requests} 个请求、{tokens} token',
-    share: '请求占比',
-    failed: '失败',
-    limited: '限流',
-    cached: '缓存命中',
-    reasoning: '思考 token',
-    reply: '回复 token',
-    p50: 'P50',
-    p95: 'P95',
-    none: '（无）',
-    loadFailed: '无法读取用量',
-    emptyTitle: '这段时间没有请求',
-    emptyDescription: '客户端发出请求后，这里按所选维度汇总。',
-  },
-  {
-    title: 'Usage',
-    range: 'Time range',
-    filters: 'Filters',
-    filterCount: '{dimension} {count}',
-    filterClear: 'Clear filters',
-    filterNone: 'Nothing to choose in this period',
-    emptyFiltered: 'No requests match the filters',
-    range24h: '24 hours',
-    range7d: '7 days',
-    range30d: '30 days',
-    range90d: '90 days',
-    groupBy: 'Group by',
-    breakdown: 'Breakdown',
-    model: 'Model',
-    api_key: 'API key',
-    account: 'Account',
-    day: 'Day',
-    export: 'Export CSV',
-    exportEmpty: 'There are no requests to export in this period',
-    exportFailed: 'Usage could not be loaded, so there is nothing to export',
-    requests: 'Requests',
-    requestsDetail: '{succeeded} succeeded · {failed} failed · {limited} rate limited',
-    change: '{change} vs previous period',
-    cacheRate: 'Cache hit rate',
-    cacheDetail: '{cached} of {input} input tokens',
-    tokens: 'Tokens',
-    tokensDetail: 'thinking {reasoning} · reply {reply}',
-    latency: 'Latency P50',
-    latencyDetail: 'P95 {p95} · first event P50 {first}',
-    cost: 'Estimated cost',
-    costDetail: 'Estimated from official API prices per model',
-    unpriced: 'Unpriced requests: {count}',
-    unpricedShort: '{count} unpriced',
-    trend: 'Request trend',
-    trendBar: '{bucket} from {time}: {requests} requests',
-    trendNow: 'Now',
-    trendLabel: 'Request trend, peak {peak} requests',
-    recent: '{requests} requests and {tokens} tokens in the last {minutes} minutes',
-    share: 'Share of requests',
-    failed: 'Failed',
-    limited: 'Rate limited',
-    cached: 'Cache hits',
-    reasoning: 'Thinking tokens',
-    reply: 'Reply tokens',
-    p50: 'P50',
-    p95: 'P95',
-    none: '(none)',
-    loadFailed: 'Could not load usage',
-    emptyTitle: 'No requests in this period',
-    emptyDescription:
-      'Once clients send requests, they are summarized here by the selected dimension.',
-  },
-  {
-    title: '用量',
-    range: '時間範圍',
-    filters: '篩選',
-    filterCount: '{dimension} {count}',
-    filterClear: '清除篩選',
-    filterNone: '這段期間沒有可選項目',
-    emptyFiltered: '沒有符合篩選的請求',
-    range24h: '24 小時',
-    range7d: '7 天',
-    range30d: '30 天',
-    range90d: '90 天',
-    groupBy: '分組',
-    breakdown: '明細',
-    model: '模型',
-    api_key: 'API key',
-    account: '帳號',
-    day: '日期',
-    export: '匯出 CSV',
-    exportEmpty: '這段期間沒有可匯出的請求',
-    exportFailed: '用量讀取失敗，無法匯出',
-    requests: '請求',
-    requestsDetail: '成功 {succeeded} · 失敗 {failed} · 速率限制 {limited}',
-    change: '較上一期 {change}',
-    cacheRate: '快取命中率',
-    cacheDetail: '{cached} / {input} 輸入 token',
-    tokens: 'Token',
-    tokensDetail: '思考 {reasoning} · 回覆 {reply}',
-    latency: '耗時 P50',
-    latencyDetail: 'P95 {p95} · 首個事件 P50 {first}',
-    cost: '估算費用',
-    costDetail: '依各模型官方 API 單價估算',
-    unpriced: '另有 {count} 個請求的模型沒有單價',
-    unpricedShort: '未定價 {count}',
-    trend: '請求趨勢',
-    trendBar: '{time} 起 {bucket}：{requests} 個請求',
-    trendNow: '現在',
-    trendLabel: '請求趨勢，峰值 {peak} 個請求',
-    recent: '近 {minutes} 分鐘 {requests} 個請求、{tokens} token',
-    share: '請求佔比',
-    failed: '失敗',
-    limited: '速率限制',
-    cached: '快取命中',
-    reasoning: '思考 token',
-    reply: '回覆 token',
-    p50: 'P50',
-    p95: 'P95',
-    none: '（無）',
-    loadFailed: '無法讀取用量',
-    emptyTitle: '這段期間沒有請求',
-    emptyDescription: '用戶端送出請求後，會在這裡依所選維度彙整。',
-  },
-)
 
 // ranges 是用量页的时间范围
 const ranges = { '24h': 86_400_000, '7d': 604_800_000, '30d': 2_592_000_000, '90d': 7_776_000_000 }
@@ -226,7 +64,7 @@ function useWidth(ref: RefObject<HTMLElement | null>) {
 
 // TrendCard 是逐桶请求数的柱状图，下方标出起止时间，悬停柱子显示该段的起始时间、时长与请求数，宽度放不下每桶一根柱子时把相邻的桶合并
 function TrendCard({ data }: { data: UsageReport }) {
-  const m = useMessages(usageMessages)
+  const m = useMessages('usage')
   const { locale } = useI18n()
   const chart = useRef<HTMLDivElement>(null)
   const width = useWidth(chart)
@@ -270,18 +108,21 @@ function TrendCard({ data }: { data: UsageReport }) {
           className="flex h-chart items-end gap-px"
         >
           {bars.map((bar) => (
-            <div
+            <Tooltip
               key={bar.at}
-              title={fill(m.trendBar, {
+              label={fill(m.trendBar, {
                 time: axisFormat.format(new Date(bar.at)),
                 bucket: interval,
                 requests: formatNumber(bar.requests, locale),
               })}
-              className="min-w-px flex-1 rounded-t-sm bg-primary"
-              style={{
-                height: `${String(Math.max(bar.requests ? 2 : 0, (bar.requests / peak) * 100))}%`,
-              }}
-            />
+            >
+              <div
+                className="min-w-px flex-1 rounded-t-sm bg-primary"
+                style={{
+                  height: `${String(Math.max(bar.requests ? 2 : 0, (bar.requests / peak) * 100))}%`,
+                }}
+              />
+            </Tooltip>
           ))}
         </div>
         <div className="mt-2 flex justify-between text-xs text-foreground-muted">
@@ -309,7 +150,7 @@ function FilterMenu({
   selected: string[]
   onChange: (values: string[]) => void
 }) {
-  const m = useMessages(usageMessages)
+  const m = useMessages('usage')
   const values = [...new Set([...selected, ...options.filter(Boolean)])]
   return (
     <DropdownMenu>
@@ -350,8 +191,8 @@ function FilterMenu({
 
 // UsagePage 是用量统计，范围、分组与筛选保存在 URL
 export function UsagePage() {
-  const m = useMessages(usageMessages)
-  const app = useMessages(appMessages)
+  const m = useMessages('usage')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const [params, setParams] = useSearchParams()
   const range =
@@ -601,9 +442,11 @@ export function UsagePage() {
           <tbody>
             {rows.map((row) => (
               <tr key={row.key}>
-                <Td className="truncate font-mono text-xs max-sm:basis-full" title={row.key}>
-                  {row.key || m.none}
-                </Td>
+                <Tooltip label={row.key}>
+                  <Td className="truncate font-mono text-xs max-sm:basis-full">
+                    {row.key || m.none}
+                  </Td>
+                </Tooltip>
                 <Td label={m.requests} className={'text-right max-sm:text-left ' + stackThird}>
                   {formatNumber(row.requests, locale)}
                 </Td>

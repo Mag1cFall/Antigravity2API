@@ -4,11 +4,8 @@ import { Link } from 'react-router'
 import { Meter } from '@/components/ui/meter'
 import { DotList } from '@/components/ui/stats'
 import { Tooltip } from '@/components/ui/tooltip'
-import { accountMessages } from '@/features/accounts/messages'
 import { type Status, statusOf } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
-import { dashboardMessages } from '@/features/dashboard/messages'
-import { quotaMessages } from '@/features/quota/messages'
 import {
   available,
   groupBuckets,
@@ -63,8 +60,8 @@ function windowAverage(accounts: Account[], group: string, window: string) {
 
 // AccountsCell 是就绪账户数与按状态着色的账户分布条
 function AccountsCell({ accounts }: { accounts: Account[] }) {
-  const m = useMessages(dashboardMessages)
-  const a = useMessages(accountMessages)
+  const m = useMessages('dashboard')
+  const a = useMessages('accounts')
   const { locale } = useI18n()
   const counts = statusOrder
     .map((item) => ({
@@ -116,8 +113,8 @@ function AccountsCell({ accounts }: { accounts: Account[] }) {
 
 // QuotaRow 是一个额度组的平均剩余比例与 5 小时、每周两条比例条
 function QuotaRow({ accounts, group }: { accounts: Account[]; group: QuotaGroup }) {
-  const m = useMessages(dashboardMessages)
-  const q = useMessages(quotaMessages)
+  const m = useMessages('dashboard')
+  const q = useMessages('quota')
   const { locale } = useI18n()
   const pools = pooled(accounts, group)
   const value = average(pools.map((account) => available(account.quota, group)))
@@ -160,7 +157,7 @@ function QuotaRow({ accounts, group }: { accounts: Account[]; group: QuotaGroup 
 
 // QuotaCellGroup 是两组额度的平均剩余比例与低额度账户数
 function QuotaCellGroup({ accounts }: { accounts: Account[] }) {
-  const m = useMessages(dashboardMessages)
+  const m = useMessages('dashboard')
   const { locale } = useI18n()
   const low = accounts.filter((account) =>
     account.quota.some((bucket) => bucket.remaining_fraction < lowQuota),
@@ -199,7 +196,7 @@ function QuotaCellGroup({ accounts }: { accounts: Account[] }) {
 
 // RequestsCell 是 24 小时请求数、失败数与估算费用，下方逐小时请求的柱状图填满剩余高度
 function RequestsCell({ usage }: { usage: UsageReport | undefined }) {
-  const m = useMessages(dashboardMessages)
+  const m = useMessages('dashboard')
   const { locale } = useI18n()
   const totals = usage?.totals
   const buckets = usage?.buckets ?? []

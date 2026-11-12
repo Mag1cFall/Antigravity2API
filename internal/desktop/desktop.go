@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Mag1cFall/Antigravity2API/internal/i18n"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -85,7 +86,7 @@ var loadedEvents = []events.WindowEventType{
 	events.Linux.WindowLoadFinished,
 }
 
-// Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘（隐藏启动只创建托盘，显示时创建窗口），阻塞到退出；已有实例时唤起它的窗口并退出本进程；Windows 缺少 WebView2 运行时时只创建托盘，管理端在默认浏览器中打开
+// Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘（隐藏启动只创建托盘，显示时创建窗口；Linux 桌面环境没有系统托盘时隐藏启动也打开窗口），阻塞到退出；已有实例时唤起它的窗口并退出本进程；Windows 缺少 WebView2 运行时时只创建托盘，管理端在默认浏览器中打开
 func Run(options Options) error {
 	// page 是带桌面宿主参数的管理端地址，服务开始监听时写入
 	page := &url.URL{Scheme: "http", RawQuery: url.Values{shellQuery: {"desktop"}}.Encode()}
@@ -107,6 +108,8 @@ func Run(options Options) error {
 		route  string
 	}
 	webview := true
+	// menu 是托盘，页面报告的界面语言与配色转交给它
+	var menu *tray
 	var open func() *application.WebviewWindow
 	show := func() {
 		if !webview {
@@ -130,8 +133,13 @@ func Run(options Options) error {
 			UniqueID:               uniqueID,
 			OnSecondInstanceLaunch: func(application.SecondInstanceData) { show() },
 		},
-		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir, AdditionalBrowserArgs: []string{"--disable-lcd-text"}, DisableQuitOnLastWindowClosed: closeToTray},
+		Windows: application.WindowsOptions{WebviewUserDataPath: dataDir, AdditionalBrowserArgs: []string{"--disable-lcd-text"}, DisableQuitOnLastWindowClosed: closeToTray, WndProcInterceptor: func(hwnd uintptr, msg uint32, wParam, lParam uintptr) (uintptr, bool) {
+			return menu.message(hwnd, msg, wParam, lParam)
+		}},
 		RawMessageHandler: func(_ application.Window, message string, _ *application.OriginInfo) {
+			if menu.handle(message) {
+				return
+			}
 			if target, ok := strings.CutPrefix(message, openPrefix); ok {
 				openBrowser(app, target)
 			} else if route, ok := strings.CutPrefix(message, routePrefix); ok && strings.HasPrefix(route, "/") {
@@ -148,7 +156,7 @@ func Run(options Options) error {
 
 	if runtime.GOOS == "windows" && app.Env.Info().PlatformInfo["WebView2"] == "" {
 		webview = false
-		addTray(app, options, page, false, show)
+		menu = addTray(app, options, page, false, show)
 		slog.Warn("没有找到 WebView2 运行时，管理端在默认浏览器中打开")
 		return serve(app, options, func(address string) {
 			page.Host = address
@@ -206,10 +214,14 @@ func Run(options Options) error {
 	}
 	app.Event.OnApplicationEvent(events.Mac.ApplicationShouldHandleReopen, func(*application.ApplicationEvent) { show() })
 
-	addTray(app, options, page, true, show)
+	hosted := trayHosted()
+	menu = addTray(app, options, page, true, show)
 	return serve(app, options, func(address string) {
 		page.Host = address
-		if !options.Hidden {
+		if !hosted {
+			slog.Info("桌面环境没有系统托盘，托盘图标在系统托盘可用后出现")
+		}
+		if !options.Hidden || !hosted {
 			open()
 		}
 	})
@@ -292,7 +304,7 @@ func openBrowser(app *application.App, target string) {
 	}
 }
 
-// showError 用原生对话框显示错误，关闭对话框后返回
+// showError 用原生对话框按界面语言显示错误，关闭对话框后返回
 func showError(app *application.App, err error) {
-	app.Dialog.Error().SetTitle(app.Config().Name).SetMessage(err.Error()).Show()
+	app.Dialog.Error().SetTitle(app.Config().Name).SetMessage(i18n.Translate(locale(), err.Error())).Show()
 }

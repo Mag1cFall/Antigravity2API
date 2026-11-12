@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -65,6 +66,7 @@ type chatMessage struct {
 	Role             string           `json:"role"`
 	Content          json.RawMessage  `json:"content"`
 	ReasoningContent string           `json:"reasoning_content"`
+	Refusal          string           `json:"refusal"`
 	Name             string           `json:"name"`
 	ToolCallID       string           `json:"tool_call_id"`
 	ToolCalls        []openAIToolCall `json:"tool_calls"`
@@ -168,7 +170,7 @@ func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	for _, model := range models {
 		data = append(data, openAIModelObject(model))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+	writeJSON(w, http.StatusOK, officialOrder("openai", map[string]any{"object": "list", "data": data}))
 }
 
 // handleOpenAIModel 返回实时目录中的单模型或协议化错误
@@ -195,9 +197,9 @@ func (s *server) handleOpenAIModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Header.Get("Anthropic-Version") != "" {
-		writeJSON(w, http.StatusOK, anthropicModelObject(model))
+		writeJSON(w, http.StatusOK, officialOrder("anthropic", anthropicModelObject(model)))
 	} else {
-		writeJSON(w, http.StatusOK, openAIModelObject(model))
+		writeJSON(w, http.StatusOK, officialOrder("openai", openAIModelObject(model)))
 	}
 }
 
@@ -218,6 +220,9 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID := newID("chatcmpl")
 	generateRequest, err := request.toGenerateRequest(requestID)
+	if err == nil {
+		err = s.restoreMediaLinks(generateRequest.Contents)
+	}
 	if err == nil {
 		err = inlineRemoteMedia(r.Context(), generateRequest.Contents)
 	}
@@ -262,7 +267,7 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIRequestError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, buildChatCompletion(requestID, created, request.Model, results, request.Tools, media))
+	writeJSON(w, http.StatusOK, officialOrder("chat", buildChatCompletion(requestID, created, request.Model, results, request.Tools, media)))
 }
 
 // mergeLegacyFunctions 把旧式 functions 与 function_call 并入 tools 与 tool_choice，旧式函数每轮最多一个调用
@@ -333,9 +338,7 @@ func (request chatRequest) toGenerateRequest(id string) (antigravity.GenerateReq
 		}
 		contents, reminders = appendWithReminders(contents, content, reminders)
 	}
-	if len(reminders) > 0 {
-		contents = append(contents, antigravity.Content{Role: antigravity.RoleUser, Parts: reminders})
-	}
+	contents = appendTrailingReminders(contents, reminders)
 	contents = prependSystemMedia(contents, systemMedia)
 	tools, err := mapOpenAITools(request.Tools, request.ToolChoice)
 	if err != nil {
@@ -395,6 +398,9 @@ func chatMessageContent(message chatMessage) (antigravity.Content, error) {
 		if index := slices.IndexFunc(parts, func(part antigravity.Part) bool { return part.Text != "" }); index >= 0 {
 			parts[index].Text = message.Name + ": " + parts[index].Text
 		}
+	}
+	if role == antigravity.RoleAssistant && message.Refusal != "" {
+		parts = append(parts, antigravity.Part{Text: message.Refusal})
 	}
 	if role == antigravity.RoleAssistant && message.ReasoningContent != "" {
 		parts = append([]antigravity.Part{{Text: message.ReasoningContent, Thought: true}}, parts...)
@@ -483,8 +489,32 @@ func openAIContentParts(raw json.RawMessage) ([]antigravity.Part, error) {
 	return parts, nil
 }
 
-// openAIContentPart 转换一个文本、图片、文件、音频或视频内容块
+// openAIDetailResolutions 为图片与文件 detail 对应的 Gemini 媒体分辨率，auto 由上游决定
+var openAIDetailResolutions = map[string]json.RawMessage{
+	"low":      json.RawMessage(`{"level":"MEDIA_RESOLUTION_LOW"}`),
+	"high":     json.RawMessage(`{"level":"MEDIA_RESOLUTION_HIGH"}`),
+	"original": json.RawMessage(`{"level":"MEDIA_RESOLUTION_ULTRA_HIGH"}`),
+}
+
+// openAIContentPart 转换一个内容块，并把块或 image_url 对象中的 detail 写为媒体分辨率
 func openAIContentPart(raw json.RawMessage) (antigravity.Part, error) {
+	part, err := openAIContentBlock(raw)
+	if err != nil {
+		return part, err
+	}
+	var detail struct {
+		Detail   string `json:"detail"`
+		ImageURL struct {
+			Detail string `json:"detail"`
+		} `json:"image_url"`
+	}
+	_ = json.Unmarshal(raw, &detail)
+	part.MediaResolution = openAIDetailResolutions[cmp.Or(detail.Detail, detail.ImageURL.Detail)]
+	return part, nil
+}
+
+// openAIContentBlock 转换一个文本、图片、文件、音频或视频内容块
+func openAIContentBlock(raw json.RawMessage) (antigravity.Part, error) {
 	var block struct {
 		Type     string          `json:"type"`
 		Text     string          `json:"text"`
@@ -655,8 +685,7 @@ func openAIToolChoice(raw json.RawMessage) (antigravity.ToolConfig, []toolRefere
 			}
 		}
 		return config, append([]toolReference{}, object.Tools...), nil
-	case "web_search_preview", "web_search_preview_2025_03_11", "code_interpreter", "file_search", "computer", "computer_use",
-		"computer_use_preview", "mcp", "programmatic_tool_calling", "tool_search":
+	case "web_search_preview", "web_search_preview_2025_03_11", "code_interpreter", "file_search", "mcp", "programmatic_tool_calling", "tool_search":
 		return antigravity.ToolConfig{Mode: "auto"}, nil, nil
 	case "image_generation":
 		return antigravity.ToolConfig{Mode: "required", AllowedFunctionNames: []string{imageToolName}}, nil, nil
@@ -706,12 +735,14 @@ func (reference toolReference) functionName() string {
 		if reference.Custom != nil {
 			name = reference.Custom.Name
 		}
-		if reference.Namespace != "" && name != "" {
-			name = reference.Namespace + "." + name
+		if name != "" {
+			name = namespacedName(reference.Namespace, name)
 		}
 		return name
 	case "local_shell", "shell", "apply_patch":
 		return reference.Type
+	case "computer", "computer_use", "computer_use_preview":
+		return "computer"
 	}
 	return ""
 }
@@ -768,7 +799,8 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 		var format struct {
 			Type       string `json:"type"`
 			JSONSchema struct {
-				Schema json.RawMessage `json:"schema"`
+				Description string          `json:"description"`
+				Schema      json.RawMessage `json:"schema"`
 			} `json:"json_schema"`
 		}
 		if err := json.Unmarshal(request.ResponseFormat, &format); err != nil {
@@ -779,13 +811,34 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 			config.ResponseMIMEType = "application/json"
 		case "json_schema":
 			config.ResponseMIMEType = "application/json"
-			config.ResponseSchema = format.JSONSchema.Schema
+			if config.ResponseSchema, err = describedSchema(format.JSONSchema.Schema, format.JSONSchema.Description); err != nil {
+				return config, fmt.Errorf("response_format.json_schema.schema: %w", err)
+			}
 		case "", "text":
 		default:
 			return config, fmt.Errorf("unsupported response_format type %q", format.Type)
 		}
 	}
 	return config, nil
+}
+
+// describedSchema 把结构化输出格式的 description 写入 JSON Schema 顶层 description，Schema 自带的 description 接在其后，没有 Schema 时只含 description
+func describedSchema(schema json.RawMessage, description string) (json.RawMessage, error) {
+	if description == "" {
+		return schema, nil
+	}
+	object := map[string]json.RawMessage{}
+	if rawJSONConfigured(schema) {
+		if err := json.Unmarshal(schema, &object); err != nil {
+			return nil, err
+		}
+	}
+	var own string
+	if raw, ok := object["description"]; ok && json.Unmarshal(raw, &own) == nil && own != "" {
+		description += "\n\n" + own
+	}
+	object["description"], _ = json.Marshal(description)
+	return json.Marshal(object)
 }
 
 // decodeStopSequences 读取字符串或字符串数组形式的 stop
@@ -831,9 +884,10 @@ func buildChatCompletion(id string, created int64, model string, results []gener
 		}
 	}
 	response["choices"] = choices
-	if usage := sumUsage(results); usage != nil {
+	if usage := choicesUsage(results); usage != nil {
 		response["usage"] = openAIUsage(usage)
 	}
+	response["service_tier"] = "default"
 	return response
 }
 
@@ -899,7 +953,7 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 		writeOpenAIStreamError(w, r, err)
 		return
 	}
-	if usage := sumUsage(results); request.StreamOptions.IncludeUsage && usage != nil {
+	if usage := choicesUsage(results); request.StreamOptions.IncludeUsage && usage != nil {
 		chunk := map[string]any{
 			"id":      id,
 			"object":  "chat.completion.chunk",
@@ -908,7 +962,7 @@ func (s *server) streamChatCompletion(w http.ResponseWriter, r *http.Request, re
 			"choices": []any{},
 			"usage":   openAIUsage(usage),
 		}
-		if err := writeSSE(w, "", chunk); err != nil {
+		if err := writeSSE(w, "", officialOrder("chat", chunk)); err != nil {
 			return
 		}
 	}
@@ -978,7 +1032,7 @@ func writeChatChunk(w http.ResponseWriter, id string, created int64, model strin
 	if includeUsage {
 		chunk["usage"] = nil
 	}
-	return writeSSE(w, "", chunk)
+	return writeSSE(w, "", officialOrder("chat", chunk))
 }
 
 // openAIFinishReason 把上游结束原因映射为 OpenAI finish_reason
@@ -989,9 +1043,6 @@ func openAIFinishReason(reason string, hasTools bool) string {
 	case "stop_sequence":
 		return "stop"
 	default:
-		if contentFilterFinishReason(reason) {
-			return "content_filter"
-		}
 		if hasTools {
 			return "tool_calls"
 		}
@@ -1016,16 +1067,6 @@ func legacyFunctionTools(tools []openAITool) bool {
 // legacyFunctionCall 把函数调用投影为旧式 function_call
 func legacyFunctionCall(call antigravity.FunctionCall) map[string]any {
 	return map[string]any{"name": call.Name, "arguments": string(call.Arguments)}
-}
-
-// contentFilterFinishReason 判断上游结束原因是否表示内容策略拦截
-func contentFilterFinishReason(reason string) bool {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "safety", "content_filter", "blocked", "recitation", "blocklist", "prohibited_content", "spii",
-		"image_safety", "image_prohibited_content", "image_recitation":
-		return true
-	}
-	return false
 }
 
 // openAIToolCallOutput 把函数调用投影为 Chat tool_calls 列表
@@ -1064,10 +1105,11 @@ func openAIUsage(usage *antigravity.Usage) map[string]any {
 		"completion_tokens": outputTokens(usage),
 		"total_tokens":      usage.TotalTokens,
 		"prompt_tokens_details": map[string]any{
-			"cached_tokens": usage.CachedTokens,
+			"cached_tokens": usage.CachedTokens, "audio_tokens": 0,
 		},
 		"completion_tokens_details": map[string]any{
-			"reasoning_tokens": usage.ReasoningTokens,
+			"reasoning_tokens": usage.ReasoningTokens, "audio_tokens": 0,
+			"accepted_prediction_tokens": 0, "rejected_prediction_tokens": 0,
 		},
 	}
 }

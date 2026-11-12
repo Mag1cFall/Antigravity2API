@@ -22,9 +22,13 @@ export function useSession() {
 // updateKey 是在线更新状态的查询键
 const updateKey = ['update'] as const
 
-// useUpdateStatus 读取当前版本与 GitHub 最新发行版本
-export function useUpdateStatus() {
-  return useQuery({ queryKey: updateKey, queryFn: () => api<UpdateStatus>('/api/update') })
+// useUpdateStatus 读取当前版本与 GitHub 最新发行版本，polling 时每 250 ms 读取一次更新进度
+export function useUpdateStatus(polling = false) {
+  return useQuery({
+    queryKey: updateKey,
+    queryFn: () => api<UpdateStatus>('/api/update'),
+    refetchInterval: polling ? 250 : false,
+  })
 }
 
 // useCheckUpdate 重新读取 GitHub 最新发行版本

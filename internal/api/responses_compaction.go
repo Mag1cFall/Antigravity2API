@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -246,7 +247,7 @@ func compactionItemTokens(raw json.RawMessage) int {
 	return (len(encoded) + 3) / 4
 }
 
-// compactionItemSide 把条目分为 user 消息、工具输出、指令与模型侧条目
+// compactionItemSide 把条目分为 user 轮（user 消息与 agent_message）、工具输出、指令与模型侧条目
 func compactionItemSide(raw json.RawMessage) string {
 	var head struct {
 		Type string `json:"type"`
@@ -254,7 +255,7 @@ func compactionItemSide(raw json.RawMessage) string {
 	}
 	_ = json.Unmarshal(raw, &head)
 	switch {
-	case (head.Type == "" || head.Type == "message") && head.Role == "user":
+	case (head.Type == "" || head.Type == "message") && head.Role == "user", head.Type == "agent_message":
 		return "user"
 	case (head.Type == "" || head.Type == "message") && (head.Role == "system" || head.Role == "developer"):
 		return "instruction"
@@ -319,8 +320,8 @@ func truncateMiddle(text string, tokens int) string {
 	return strings.ToValidUTF8(text[:side], "") + marker + strings.ToValidUTF8(text[len(text)-side:], "")
 }
 
-// compactResponses 摘要原样保留部分之前的对话条目，返回 compaction 项、原样保留部分之前的 user 消息与摘要用量
-func (s *server) compactResponses(ctx context.Context, request responsesRequest, previous responseHistory, id string) (map[string]any, []json.RawMessage, *antigravity.Usage, error) {
+// compactResponses 摘要原样保留部分之前的对话条目，返回 compaction 项、原样保留部分之前的 user 消息、其中的 developer 与 system 消息和摘要用量
+func (s *server) compactResponses(ctx context.Context, request responsesRequest, previous responseHistory, id string) (map[string]any, []json.RawMessage, []json.RawMessage, *antigravity.Usage, error) {
 	var items []json.RawMessage
 	for _, item := range slices.Concat(previous.Items, responsesInputItems(request.Input, id)) {
 		items = append(items, item.Raw)
@@ -330,7 +331,7 @@ func (s *server) compactResponses(ctx context.Context, request responsesRequest,
 	}
 	window, err := splitCompaction(items)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	work := slices.Concat(window.recent, window.after)
 	cut := compactionCut(work)
@@ -338,24 +339,24 @@ func (s *server) compactResponses(ctx context.Context, request responsesRequest,
 	var usage *antigravity.Usage
 	if conversation := conversationItems(work[:cut]); len(conversation) > 0 {
 		if summary, usage, err = s.compactionSummary(ctx, request, conversation, window.summary, id); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 	payload, _ := json.Marshal(compactionPayload{Version: 1, Summary: summary, Items: work[cut:]})
 	item := map[string]any{"id": "cmp_" + id, "type": "compaction", "encrypted_content": string(payload)}
-	return item, retainedUserMessages(slices.Concat(window.before, work[:cut])), usage, nil
+	compacted := slices.Concat(window.before, work[:cut])
+	instructions := slices.DeleteFunc(slices.Clone(compacted), func(item json.RawMessage) bool { return !instructionItem(item) })
+	return item, retainedUserMessages(compacted), instructions, usage, nil
+}
+
+// instructionItem 判断条目是否为 developer 或 system 消息
+func instructionItem(item json.RawMessage) bool {
+	return compactionItemSide(item) == "instruction"
 }
 
 // conversationItems 返回去掉 developer 与 system 消息后的条目
 func conversationItems(items []json.RawMessage) []json.RawMessage {
-	return slices.DeleteFunc(slices.Clone(items), func(item json.RawMessage) bool {
-		var head struct {
-			Type string `json:"type"`
-			Role string `json:"role"`
-		}
-		_ = json.Unmarshal(item, &head)
-		return (head.Type == "message" || head.Type == "") && (head.Role == "developer" || head.Role == "system")
-	})
+	return slices.DeleteFunc(slices.Clone(items), instructionItem)
 }
 
 // compactionSummary 以请求的模型、指令与工具非流式生成摘要，工具调用关闭，旧摘要作为首个 user 轮，摘要提示词作为末尾 user 轮
@@ -407,7 +408,7 @@ func (s *server) handleResponsesCompact(w http.ResponseWriter, r *http.Request) 
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	item, retained, usage, err := s.compactResponses(r.Context(), request, prepared.previous, id)
+	item, retained, _, usage, err := s.compactResponses(r.Context(), request, prepared.previous, id)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeOpenAIRequestError(w, err)
@@ -419,10 +420,8 @@ func (s *server) handleResponsesCompact(w http.ResponseWriter, r *http.Request) 
 		output = append(output, message)
 	}
 	response := map[string]any{"id": id, "object": "response.compaction", "created_at": time.Now().Unix(), "output": append(output, item)}
-	if usage != nil {
-		response["usage"] = responsesUsage(usage)
-	}
-	writeJSON(w, http.StatusOK, response)
+	response["usage"] = responsesUsage(cmp.Or(usage, &antigravity.Usage{}))
+	writeJSON(w, http.StatusOK, officialOrder("responses", response))
 }
 
 // responsesCompactionTrigger 返回输入是否以 compaction_trigger 项结尾
@@ -441,18 +440,18 @@ func (s *server) handleCompactionTrigger(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			return
 		}
-		writer = &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: &responsesOutput{id: id, request: request}}
+		writer = &responsesStreamWriter{w: stream, id: id, created: created, request: request, output: newResponsesOutput(id, request)}
 		for _, eventType := range []string{"response.created", "response.in_progress"} {
 			if err := writer.emit(eventType, map[string]any{"response": responseShell(id, created, "in_progress", request)}); err != nil {
 				return
 			}
 		}
-		stream.setFrame(writer.progressFrame())
+		stream.setPulse(writer.progress)
 		if err := writer.emit("response.output_item.added", map[string]any{"output_index": 0, "item": map[string]any{"id": "cmp_" + id, "type": "compaction", "encrypted_content": ""}}); err != nil {
 			return
 		}
 	}
-	item, retained, usage, err := s.compactResponses(r.Context(), request, prepared.previous, id)
+	item, retained, _, usage, err := s.compactResponses(r.Context(), request, prepared.previous, id)
 	if err != nil {
 		if !shouldWriteRequestError(r, err) {
 			return
@@ -474,7 +473,7 @@ func (s *server) handleCompactionTrigger(w http.ResponseWriter, r *http.Request,
 		s.storeCompaction(r.Context(), id, request, prepared, item, retained, response)
 	}
 	if writer == nil {
-		writeJSON(w, http.StatusOK, response)
+		writeJSON(w, http.StatusOK, officialOrder("responses", response))
 		return
 	}
 	if err := writer.emit("response.output_item.done", map[string]any{"output_index": 0, "item": item}); err != nil {

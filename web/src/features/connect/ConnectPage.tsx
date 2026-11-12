@@ -5,12 +5,11 @@ import { PageHeader } from '@/components/ui/page'
 import { AddKeyButton, ApiKeyList, useApiKeys } from '@/features/connect/ApiKeys'
 import { ClientConfigs } from '@/features/connect/ClientConfigs'
 import { EndpointList } from '@/features/connect/EndpointList'
-import { connectMessages } from '@/features/connect/messages'
 import { codeText, useMessages } from '@/lib/i18n'
 
 // KeysCard 是 API key 的生成与管理，标题行的添加按钮在读到设置前已占位并禁用，没有 key 时改由列表中的按钮添加
 function KeysCard() {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   const { settings, keys } = useApiKeys()
   return (
     <Card>
@@ -29,7 +28,7 @@ function KeysCard() {
 
 // ConnectPage 是接入页：三种协议的接口地址、API key 管理与各客户端的现成配置
 export function ConnectPage() {
-  const m = useMessages(connectMessages)
+  const m = useMessages('connect')
   return (
     <>
       <PageHeader title={m.title} />

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"
@@ -70,10 +71,10 @@ const (
 )
 
 // postHooks 为每次模型调用之后依次执行的内置钩子
-var postHooks = []string{"message_continue_check", "terminal_step_check", "max_generator_invocations_check", "empty_output_continuation_check", "force_invocation", "no_tool_call_check"}
+var postHooks = []string{"chain_check", "message_continue_check", "terminal_step_check", "max_generator_invocations_check", "empty_output_continuation_check", "force_invocation", "no_tool_call_check"}
 
 // stopHooks 为执行结束前依次执行的内置钩子
-var stopHooks = []string{"goal_stop", "idle_subagent_guard"}
+var stopHooks = []string{"goal_stop", "idle_subagent_guard", "swarm_park_guard"}
 
 // SessionTurn 表示一次生成请求在官方会话中对应的一轮：Contents 为包装后的规范消息，Sections 为官方系统提示各段的 token 数，顺序同 SessionSections，Anchor 为本轮生成前读取了插件市场目录时界面事件对齐的时刻：新会话为标题请求写出的时刻，其余为目录读取的开始时刻，没有读取时为零值
 type SessionTurn struct {
@@ -347,8 +348,8 @@ func sessionOverride(model CatalogModel) []byte {
 }
 
 // structuredEvent 编码带结构化载荷的会话 clearcut 事件：公共字段与名称事件相同并附实验开关，载荷写入扩展的 field，事件码为 kind
-func (s companionState) structuredEvent(at time.Time, device Device, kind, field int, payload []byte) []byte {
-	ext := appendBytes(s.extension(device, eventShape{flags: true}), field, payload)
+func (s companionState) structuredEvent(at time.Time, device Device, shape eventShape, kind, field int, payload []byte) []byte {
+	ext := appendBytes(s.extension(device, shape), field, payload)
 	event := appendVarint(nil, 1, uint64(at.UnixMilli()))
 	event = appendBytes(event, 6, ext)
 	return appendVarint(event, 11, uint64(kind))
@@ -359,7 +360,7 @@ func (c *Client) sessionEvent(at time.Time, kind, field int, payload []byte) {
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
-	c.log(state.structuredEvent(at, c.device, kind, field, payload))
+	c.log(state.structuredEvent(at, c.device, eventShape{flags: true}, kind, field, payload))
 }
 
 // track 返回 trajectory 的会话进度，没有时新建，同时清理超过保留时长未使用的进度
@@ -381,6 +382,22 @@ func (c *Client) track(trajectory string, now time.Time) *sessionTrack {
 	}
 	track.used = now
 	return track
+}
+
+// scopedAccess 记录 sidecar 以受限权限调用 language_server 方法 procedure 的事件
+func (c *Client) scopedAccess(at time.Time, procedure string) {
+	c.hubEventAt(at, "ls_scoped_rpc_access", eventShape{flags: true, blank: true}, map[string]any{
+		"decision": "allowed", "enforcement_enabled": "true", "principal": "sidecar", "procedure": "/exa.language_server_pb.LanguageServerService/" + procedure,
+	})
+}
+
+// sidecarPayload 编码事件码 25 的 sidecar 事件载荷：事件名与随机顺序的字段名
+func sidecarPayload(name string, keys ...string) []byte {
+	payload := appendString(nil, 1, name)
+	for _, index := range rand.Perm(len(keys)) {
+		payload = appendBytes(payload, 4, appendString(nil, 1, keys[index]))
+	}
+	return payload
 }
 
 // sessionUI 记录带界面会话与客户端环境的会话界面事件
@@ -478,16 +495,22 @@ func (c *Client) preInvocation(at time.Time, turn SessionTurn, track *sessionTra
 	})
 }
 
-// postInvocation 记录模型调用后的钩子，final 为真时回复不含工具调用，另记执行结束前的钩子
+// postInvocation 记录模型调用后的钩子，final 为真时回复不含工具调用，另记执行结束前的钩子；chain_check 与 swarm_park_guard 不带结果
 func (c *Client) postInvocation(at time.Time, turn SessionTurn, track *sessionTrack, metadata int, final bool) {
 	c.hooks(at, turn, track, "post_invocation", postHooks, metadata, -1, func(name string) []byte {
-		if final && name == "no_tool_call_check" {
+		switch {
+		case name == "chain_check":
+			return nil
+		case final && name == "no_tool_call_check":
 			return invocationResult(noToolCall)
 		}
 		return invocationResult("")
 	})
 	if final {
-		c.hooks(at, turn, track, "stop", stopHooks, metadata, -1, func(string) []byte {
+		c.hooks(at, turn, track, "stop", stopHooks, metadata, -1, func(name string) []byte {
+			if name == "swarm_park_guard" {
+				return nil
+			}
 			return appendBytes(nil, 2, appendVarint(nil, 1, 0))
 		})
 	}
@@ -804,7 +827,7 @@ func completed(steps []sessionStep) int {
 	return count
 }
 
-// SessionSend 在生成请求发出前按官方会话的先后记录 clearcut 事件：用户请求记录发送事件、用户输入步骤与调用前钩子，新会话另记新建会话、项目、trajectory、首次加载与标题事件，模型与上次不同时记录切换模型；带回工具结果的请求按工具依次记录工具前钩子（第一个工具除外）、工具后钩子与工具步骤，再记调用后钩子与调用前钩子；本轮读取过插件市场目录时，读取事件记在用户输入步骤或工具步骤之前，发送事件及更早的事件改以读取开始时刻为基准
+// SessionSend 在生成请求发出前按官方会话的先后记录 clearcut 事件：用户请求记录发送事件、用户输入步骤与调用前钩子，新会话另记新建会话、项目、trajectory、首次加载与标题事件，发送事件前后按 sendErrors 记录解析会话配置时被抽中的查询失败（新会话的界面解析在发送前 381–841 ms），发送事件之后记 sidecar 的两次受限调用与 sidecar 事件，模型与上次不同时记录切换模型；带回工具结果的请求按工具依次记录工具前钩子（第一个工具除外）、工具后钩子与工具步骤，再记调用后钩子与调用前钩子；本轮读取过插件市场目录时，读取事件记在用户输入步骤或工具步骤之前，发送事件及更早的事件改以读取开始时刻为基准
 func (c *Client) SessionSend(turn SessionTurn) {
 	now := time.Now()
 	conversation, model := turn.Conversation, turn.Model
@@ -875,9 +898,11 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		c.sessionUI(early(1400, 1900), "model_changed", map[string]any{"ui_location": "model_selector_button", "trigger_type": "click", "name": model.DisplayName})
 	}
 	created, sent := early(32, 36), early(28, 31)
+	var started time.Time
 	if turn.New {
 		c.sessionUI(early(650, 720), "PROJECT_RESOURCES_FINALIZED", map[string]any{"projectId": outsideProject, "workspace_type": "local", "environmentType2": "sot"})
-		c.sessionUI(early(530, 600), "CASCADE_CONVERSATION_STARTED", map[string]any{"cascadeId": conversation.CascadeID, "projectId": outsideProject})
+		started = early(530, 600)
+		c.sessionUI(started, "CASCADE_CONVERSATION_STARTED", map[string]any{"cascadeId": conversation.CascadeID, "projectId": outsideProject})
 		c.mu.Lock()
 		state := c.state
 		c.mu.Unlock()
@@ -899,6 +924,11 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		"total_latency_ms": latency, "cascade_send_latency_ms": latency, "hydrate_slash_commands_latency_ms": 0, "active_user_state_latency_ms": 0, "load_trajectory_latency_ms": 0,
 		"resolve_agent_config_latency_ms": 0, "save_media_latency_ms": 0, "media_summaries_latency_ms": 0, "media_count": media, "saved_media_count": media,
 	})
+	opened := time.Time{}
+	if turn.New {
+		opened = early(381, 841)
+	}
+	c.sendErrors(sent, opened)
 	delay := between(8, 11)
 	if turn.New {
 		delay = between(10, 47)
@@ -906,6 +936,13 @@ func (c *Client) SessionSend(turn SessionTurn) {
 	c.sessionUI(sent.Add(time.Duration(delay)*time.Millisecond), "CASCADE_MESSAGE_SENT", map[string]any{
 		"is_new_conversation": strconv.FormatBool(turn.New), "model": model.DisplayName, "num_images": images, "num_audio": audio, "num_videos": video, "project_type": "normal",
 	})
+	if turn.New {
+		accessed := started.Add(time.Duration(between(440, 700)) * time.Millisecond)
+		c.scopedAccess(accessed, "GetConversationMetadata")
+		recorded := accessed.Add(time.Duration(between(0, 100)) * time.Millisecond)
+		c.scopedAccess(recorded, "RecordSidecarEvent")
+		c.sessionEvent(recorded.Add(time.Duration(between(0, 15))*time.Millisecond), 25, 26, sidecarPayload("sidecar_event", "sidecar_id", "sidecar_path", "sidecar_file_path"))
+	}
 	index := len(steps) - 1
 	previous := ""
 	if index > 0 {

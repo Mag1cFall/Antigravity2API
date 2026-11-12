@@ -40,6 +40,8 @@ var Keys = []string{
 	"ROUTING_STRATEGY",
 	"PREFER_LOWER_TIER_MODELS",
 	"REQUEST_TIMEOUT",
+	"FIRST_EVENT_HEDGE",
+	"FIRST_EVENT_HEDGE_MODELS",
 	"NONSTREAM_KEEPALIVE",
 	"FAKE_STREAM",
 	"QUOTA_REFRESH_INTERVAL",
@@ -73,6 +75,12 @@ var LogLevels = []string{"debug", "info", "warn", "error"}
 // LogFormats 是服务日志格式
 var LogFormats = []string{"json", "text"}
 
+// FirstEventHedgeOff 表示首字超时不发起备用请求
+const FirstEventHedgeOff = "off"
+
+// FirstEventHedgeAuto 表示按模型近期原请求首字等待的 p95 发起备用请求
+const FirstEventHedgeAuto = "auto"
+
 // LogFileMB 是单个日志文件的轮转大小
 const LogFileMB = 10
 
@@ -101,6 +109,10 @@ type Config struct {
 	// PreferLowerTierModels 是同优先级内先用套餐低的账户的模型 ID
 	PreferLowerTierModels []string
 	RequestTimeout        time.Duration
+	// FirstEventHedge 是首字超时备用请求的等待：off、auto 或正整数秒
+	FirstEventHedge string
+	// FirstEventHedgeModels 是发起备用请求的模型 ID
+	FirstEventHedgeModels []string
 	// NonstreamKeepalive 为真时非流式请求等待结果期间每 10 秒写出一个换行
 	NonstreamKeepalive bool
 	// FakeStream 为真时流式请求先按非流式取得完整结果再以流式输出
@@ -148,6 +160,8 @@ func Default() Config {
 		AccountConcurrency:       2,
 		RoutingStrategy:          "round-robin",
 		RequestTimeout:           5 * time.Minute,
+		FirstEventHedge:          FirstEventHedgeAuto,
+		FirstEventHedgeModels:    []string{"gemini-4-argon"},
 		NonstreamKeepalive:       true,
 		QuotaRefreshInterval:     15 * time.Minute,
 		LogLevel:                 "info",
@@ -258,6 +272,11 @@ func (c *Config) Set(values map[string]string) error {
 		c.PreferLowerTierModels = SplitList(value)
 	}
 	duration("REQUEST_TIMEOUT", &c.RequestTimeout)
+	text("FIRST_EVENT_HEDGE", &c.FirstEventHedge)
+	c.FirstEventHedge = strings.ToLower(c.FirstEventHedge)
+	if value, ok := values["FIRST_EVENT_HEDGE_MODELS"]; ok {
+		c.FirstEventHedgeModels = SplitList(value)
+	}
 	boolean("NONSTREAM_KEEPALIVE", &c.NonstreamKeepalive)
 	boolean("FAKE_STREAM", &c.FakeStream)
 	duration("QUOTA_REFRESH_INTERVAL", &c.QuotaRefreshInterval)
@@ -297,6 +316,8 @@ func (c Config) Values() map[string]string {
 		"ROUTING_STRATEGY":            c.RoutingStrategy,
 		"PREFER_LOWER_TIER_MODELS":    strings.Join(c.PreferLowerTierModels, ","),
 		"REQUEST_TIMEOUT":             formatDuration(c.RequestTimeout),
+		"FIRST_EVENT_HEDGE":           c.FirstEventHedge,
+		"FIRST_EVENT_HEDGE_MODELS":    strings.Join(c.FirstEventHedgeModels, ","),
 		"NONSTREAM_KEEPALIVE":         strconv.FormatBool(c.NonstreamKeepalive),
 		"FAKE_STREAM":                 strconv.FormatBool(c.FakeStream),
 		"QUOTA_REFRESH_INTERVAL":      formatDuration(c.QuotaRefreshInterval),
@@ -411,6 +432,10 @@ var checks = []struct {
 		}
 		return nil
 	}},
+	{[]string{"FIRST_EVENT_HEDGE"}, func(c Config) error {
+		_, _, err := ParseFirstEventHedge(c.FirstEventHedge)
+		return err
+	}},
 	{[]string{"QUOTA_REFRESH_INTERVAL"}, func(c Config) error {
 		if c.QuotaRefreshInterval != 0 && c.QuotaRefreshInterval < time.Minute {
 			return fmt.Errorf("QUOTA_REFRESH_INTERVAL 必须是 0 或不小于 1m 的时长")
@@ -465,6 +490,20 @@ func (c *Config) ProxyURL(r *http.Request) (*url.URL, error) {
 		return url.Parse(proxies[0])
 	}
 	return systemProxy(r)
+}
+
+// ParseFirstEventHedge 解析 FIRST_EVENT_HEDGE，返回是否按近期 p95 自适应与自定义的等待时长，off 时都为零值
+func ParseFirstEventHedge(value string) (bool, time.Duration, error) {
+	switch value {
+	case FirstEventHedgeOff:
+		return false, 0, nil
+	case FirstEventHedgeAuto:
+		return true, 0, nil
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return false, time.Duration(seconds) * time.Second, nil
+	}
+	return false, 0, fmt.Errorf("FIRST_EVENT_HEDGE 必须是 off、auto 或正整数秒")
 }
 
 // Proxies 返回 PROXY 中逗号分隔的代理

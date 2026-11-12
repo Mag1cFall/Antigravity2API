@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -39,6 +40,8 @@ type anthropicRequest struct {
 	Metadata     *struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
+	// ContextManagement 为本服务在本地执行的上下文编辑策略
+	ContextManagement *anthropicContextManagement `json:"context_management"`
 }
 
 // anthropicFormat 为结构化输出的格式
@@ -114,8 +117,9 @@ type anthropicContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
-	Citations []any           `json:"citations,omitempty"`
-	Data      string          `json:"data,omitempty"`
+	// Citations 在 text 块上为引用列表，没有引用时为 JSON null
+	Citations any    `json:"citations,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 // handleAnthropicMessages 处理 Messages 请求，按 stream 返回 Message 或事件流
@@ -130,6 +134,12 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	messageID := newID("msg")
+	request.Messages = anthropicCompactedMessages(request.Messages)
+	contextResult, err := s.applyAnthropicContextEdits(r.Context(), &request)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	generateRequest, err := s.anthropicGenerateRequest(r, request, messageID)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -140,6 +150,18 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		var stopKeepalive func()
 		w, stopKeepalive = s.nonstreamKeepalive(w)
 		defer stopKeepalive()
+	}
+	if contextResult.compacting {
+		if contextResult.compaction, err = s.compactAnthropic(r.Context(), request, &generateRequest); err != nil {
+			if shouldWriteRequestError(r, err) {
+				writeAnthropicRequestError(w, err)
+			}
+			return
+		}
+	}
+	if contextResult.compaction != nil && contextResult.compaction.pause {
+		writeAnthropicCompactionPause(w, request, messageID, contextResult)
+		return
 	}
 	events, err := s.service.Generate(r.Context(), generateRequest)
 	var first antigravity.Event
@@ -167,7 +189,7 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writer := &anthropicStreamWriter{
 			w: stream, id: messageID, model: request.Model, usage: usage,
 			thinking: thinking, omitted: omitted,
-			search: searchOnly(generateRequest.Tools), media: s.mediaOutputFor(r),
+			search: searchOnly(generateRequest.Tools), media: s.mediaOutputFor(r), context: contextResult,
 		}
 		if err := writer.start(); err != nil {
 			return
@@ -188,7 +210,28 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicRequestError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, buildAnthropicResponse(messageID, request.Model, result, thinking, omitted, media))
+	response := buildAnthropicResponse(messageID, request.Model, result, thinking, omitted, media)
+	contextResult.response(response, result.usage)
+	writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
+}
+
+// writeAnthropicCompactionPause 在 pause_after_compaction 时只返回 compaction 块，停止原因为 compaction
+func writeAnthropicCompactionPause(w http.ResponseWriter, request anthropicRequest, id string, contextResult anthropicContextResult) {
+	result := generationResult{finishReason: "compaction", usage: &antigravity.Usage{}}
+	if !request.Stream {
+		response := buildAnthropicResponse(id, request.Model, result, false, false, mediaOutput{})
+		contextResult.response(response, result.usage)
+		writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
+		return
+	}
+	if err := streamHeaders(w); err != nil {
+		return
+	}
+	writer := &anthropicStreamWriter{w: w, id: id, model: request.Model, usage: result.usage, context: contextResult}
+	if err := writer.start(); err != nil {
+		return
+	}
+	_ = writer.finish(result)
 }
 
 // thinkingBlocks 返回请求是否要求思考类块，以及思考块是否省略思考正文
@@ -210,17 +253,40 @@ func (s *server) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Reque
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
-	generateRequest, err := s.anthropicGenerateRequest(r, request, newID("count"))
+	request.Messages = anthropicCompactedMessages(request.Messages)
+	original := request
+	contextResult, err := s.applyAnthropicContextEdits(r.Context(), &request)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	tokens, err := s.countAnthropicTokens(w, r, request)
+	if err != nil {
+		return
+	}
+	response := map[string]any{"input_tokens": tokens}
+	if contextResult.requested {
+		originalTokens, err := s.countAnthropicTokens(w, r, original)
+		if err != nil {
+			return
+		}
+		response["context_management"] = map[string]int64{"original_input_tokens": originalTokens}
+	}
+	writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
+}
+
+// countAnthropicTokens 返回请求的输入 token 数，失败时写出错误响应
+func (s *server) countAnthropicTokens(w http.ResponseWriter, r *http.Request, request anthropicRequest) (int64, error) {
+	generateRequest, err := s.anthropicGenerateRequest(r, request, newID("count"))
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return 0, err
+	}
 	tokens, err := s.service.CountTokens(r.Context(), generateRequest)
 	if err != nil {
 		writeAnthropicRequestError(w, err)
-		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int64{"input_tokens": tokens})
+	return tokens, err
 }
 
 // anthropicGenerateRequest 转换请求，带上会话标识并下载远程媒体
@@ -230,6 +296,9 @@ func (s *server) anthropicGenerateRequest(r *http.Request, request anthropicRequ
 		return antigravity.GenerateRequest{}, err
 	}
 	generateRequest.Session = clientSession(r, request.session())
+	if err := s.restoreMediaLinks(generateRequest.Contents); err != nil {
+		return antigravity.GenerateRequest{}, err
+	}
 	return generateRequest, inlineRemoteMedia(r.Context(), generateRequest.Contents)
 }
 
@@ -283,9 +352,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 		}
 		contents, reminders = appendWithReminders(contents, antigravity.Content{Role: role, Parts: parts}, reminders)
 	}
-	if len(reminders) > 0 {
-		contents = append(contents, antigravity.Content{Role: antigravity.RoleUser, Parts: reminders})
-	}
+	contents = appendTrailingReminders(contents, reminders)
 	tools, err := mapAnthropicTools(declared, request.ToolChoice)
 	if err != nil {
 		return antigravity.GenerateRequest{}, err
@@ -450,6 +517,7 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 			Thinking  string          `json:"thinking"`
 			Source    json.RawMessage `json:"source"`
 			Title     string          `json:"title"`
+			Context   string          `json:"context"`
 			ToolName  string          `json:"tool_name"`
 			FileID    string          `json:"file_id"`
 		}
@@ -490,6 +558,9 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 			}
 			if err := json.Unmarshal(block.Source, &source); err != nil {
 				return nil, fmt.Errorf("%s source: %w", block.Type, err)
+			}
+			if block.Context != "" {
+				parts = append(parts, antigravity.Part{Text: block.Context})
 			}
 			switch source.Type {
 			case "base64":
@@ -586,13 +657,6 @@ func anthropicParts(raw json.RawMessage) ([]antigravity.Part, error) {
 		case "web_search_tool_result", "code_execution_tool_result", "bash_code_execution_tool_result", "text_editor_code_execution_tool_result", "tool_search_tool_result", "advisor_tool_result", "mcp_tool_result":
 			flushPendingSignature()
 			parts = append(parts, antigravity.Part{Text: "Server tool result " + block.Type + ": " + string(block.Content)})
-		case "compaction":
-			flushPendingSignature()
-			var summary string
-			_ = json.Unmarshal(block.Content, &summary)
-			if summary != "" {
-				parts = append(parts, antigravity.Part{Text: summary})
-			}
 		default:
 			return nil, fmt.Errorf("unsupported content block type %q", block.Type)
 		}
@@ -769,21 +833,21 @@ func buildAnthropicResponse(id string, model string, result generationResult, th
 		"content":       anthropicBlocks(id, result, thinking, omitted, media),
 		"stop_reason":   anthropicStop(result.finishReason, len(result.toolCalls) > 0),
 		"stop_sequence": stopSequence,
+		"stop_details":  nil,
+		"container":     nil,
 	}
 	if result.providerModel != "" {
 		response["provider_model"] = result.providerModel
 	}
-	if result.usage != nil {
-		usage := anthropicUsage(result.usage)
-		if result.grounding != nil {
-			usage["server_tool_use"] = anthropicSearchUsage(result.grounding)
-		}
-		response["usage"] = usage
+	usage := anthropicUsage(cmp.Or(result.usage, &antigravity.Usage{}))
+	if result.grounding != nil {
+		usage["server_tool_use"] = anthropicSearchUsage(result.grounding)
 	}
+	response["usage"] = usage
 	return response
 }
 
-// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，没有时在请求要求思考类块时为 redacted_thinking 块，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
+// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，没有时在请求要求思考类块时为 redacted_thinking 块，紧跟 text 块的独立签名不输出，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
 func anthropicBlocks(id string, result generationResult, thinking, omitted bool, media mediaOutput) []anthropicContentBlock {
 	blocks := make([]anthropicContentBlock, 0)
 	open := func() *anthropicContentBlock {
@@ -821,7 +885,9 @@ func anthropicBlocks(id string, result generationResult, thinking, omitted bool,
 			}
 			sign(event.ThoughtSignature)
 		case antigravity.EventThoughtSignature:
-			sign(event.ThoughtSignature)
+			if last := len(blocks) - 1; last < 0 || blocks[last].Type != "text" {
+				sign(event.ThoughtSignature)
+			}
 		case antigravity.EventMedia:
 			mediaBlock = len(blocks)
 			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: media.markdown(*event.Media)})
@@ -838,13 +904,39 @@ func anthropicBlocks(id string, result generationResult, thinking, omitted bool,
 			blocks = slices.Insert(blocks, position, anthropicSearchBlocks(serverToolID(id), event.Grounding)...)
 		}
 	}
-	if result.grounding != nil {
-		for index := range blocks {
-			if blocks[index].Type == "text" {
-				blocks[index].Citations = anthropicCitations(blocks[index].Text, result.grounding)
-			}
+	cited := make([]anthropicContentBlock, 0, len(blocks))
+	for index, block := range blocks {
+		switch {
+		case block.Type != "text":
+			cited = append(cited, block)
+		case result.grounding != nil && index != mediaBlock:
+			cited = append(cited, anthropicCitedBlocks(block.Text, result.grounding)...)
+		default:
+			block.Citations = json.RawMessage("null")
+			cited = append(cited, block)
 		}
 	}
+	return cited
+}
+
+// anthropicCitedBlocks 把搜索回答正文拆成 text 块：被来源支撑的区间单独成块并带 citations，其余正文的 citations 为 null
+func anthropicCitedBlocks(text string, grounding *antigravity.Grounding) []anthropicContentBlock {
+	var blocks []anthropicContentBlock
+	plain := func(segment string) {
+		if segment != "" {
+			blocks = append(blocks, anthropicContentBlock{Type: "text", Text: segment, Citations: json.RawMessage("null")})
+		}
+	}
+	position := 0
+	for _, group := range anthropicCitationGroups(text, grounding) {
+		if group.start < position {
+			continue
+		}
+		plain(text[position:group.start])
+		blocks = append(blocks, anthropicContentBlock{Type: "text", Text: text[group.start:group.end], Citations: group.citations})
+		position = group.end
+	}
+	plain(text[position:])
 	return blocks
 }
 
@@ -853,7 +945,7 @@ func serverToolID(messageID string) string {
 	return "srvtoolu_" + strings.TrimPrefix(messageID, "msg_")
 }
 
-// anthropicStop 把结束原因换成 stop_reason：输出上限、停止序列与 pause_turn 原样对应，内容过滤为 refusal，其余在有函数调用时为 tool_use，否则为 end_turn
+// anthropicStop 把结束原因换成 stop_reason：输出上限、停止序列与 pause_turn 原样对应，其余在有函数调用时为 tool_use，否则为 end_turn
 func anthropicStop(reason string, hasTools bool) string {
 	normalized := strings.ToLower(strings.TrimSpace(reason))
 	switch normalized {
@@ -863,10 +955,9 @@ func anthropicStop(reason string, hasTools bool) string {
 		return "stop_sequence"
 	case "pause_turn":
 		return "pause_turn"
+	case "compaction":
+		return "compaction"
 	default:
-		if contentFilterFinishReason(normalized) {
-			return "refusal"
-		}
 		if hasTools {
 			return "tool_use"
 		}
@@ -874,23 +965,27 @@ func anthropicStop(reason string, hasTools bool) string {
 	}
 }
 
-// anthropicUsage 返回 usage，input_tokens 不含缓存命中的 token
+// anthropicUsage 返回 usage，input_tokens 不含缓存命中的 token，cache_creation、server_tool_use、service_tier 与 inference_geo 为官方必有成员
 func anthropicUsage(usage *antigravity.Usage) map[string]any {
 	return map[string]any{
 		"input_tokens":                usage.InputTokens - usage.CachedTokens,
 		"cache_creation_input_tokens": 0,
 		"cache_read_input_tokens":     usage.CachedTokens,
+		"cache_creation":              map[string]int{"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0},
 		"output_tokens":               outputTokens(usage),
+		"server_tool_use":             nil,
+		"service_tier":                "standard",
+		"inference_geo":               nil,
 	}
 }
 
-// writeAnthropicModels 按 Anthropic Models API 的生命周期、游标与条数参数返回一页模型，省略 limit 时返回全部
+// writeAnthropicModels 按 Anthropic Models API 的生命周期、游标与条数参数返回一页模型，省略 limit 时为 20 条
 func writeAnthropicModels(w http.ResponseWriter, r *http.Request, models []antigravity.Model) {
 	query := r.URL.Query()
 	if lifecycles := append(query["lifecycle"], query["lifecycle[]"]...); len(lifecycles) > 0 && !slices.Contains(strings.Split(strings.Join(lifecycles, ","), ","), "active") {
 		models = nil
 	}
-	page, hasMore, err := anthropicListPage(query, models, func(model antigravity.Model) string { return model.ID }, listLimits{fallback: len(models), min: 1, max: 1000})
+	page, hasMore, err := anthropicListPage(query, models, func(model antigravity.Model) string { return model.ID }, listLimits{fallback: 20, min: 1, max: 1000})
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -904,7 +999,7 @@ func writeAnthropicModels(w http.ResponseWriter, r *http.Request, models []antig
 		response["first_id"] = page[0].ID
 		response["last_id"] = page[len(page)-1].ID
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, officialOrder("anthropic", response))
 }
 
 // anthropicModelObject 投影列表与单模型共用的 Anthropic ModelInfo 字段，输入与输出上限取实时目录
@@ -912,12 +1007,44 @@ func anthropicModelObject(model antigravity.Model) map[string]any {
 	item := map[string]any{
 		"type": "model", "id": model.ID, "display_name": model.Name, "created_at": "1970-01-01T00:00:00Z",
 		"max_input_tokens": anthropicTokenLimit(model.InputTokenLimit), "max_tokens": anthropicTokenLimit(model.OutputTokenLimit),
-		"capabilities": nil, "lifecycle": "active", "line": nil, "deprecated_at": nil, "retires_at": nil,
+		"capabilities": anthropicCapabilities(model), "lifecycle": "active", "line": nil, "deprecated_at": nil, "retires_at": nil,
 	}
 	if len(model.ThinkingLevels) > 0 {
 		item["thinking_levels"], item["default_thinking_level"] = model.ThinkingLevels, model.DefaultThinkingLevel
 	}
 	return item
+}
+
+// anthropicCapabilities 按目录能力投影 ModelInfo 的 capabilities：思考与档位取目录，图片与 PDF 输入取图片能力，上下文编辑由本服务执行，网页搜索只在 Gemini 族生效
+func anthropicCapabilities(model antigravity.Model) map[string]any {
+	support := func(supported bool) map[string]bool { return map[string]bool{"supported": supported} }
+	thinking := model.Capabilities["thinking"]
+	images := model.Capabilities["images"]
+	search := model.Provider == antigravity.ProviderGoogle
+	return map[string]any{
+		"batch":          support(false),
+		"citations":      support(false),
+		"code_execution": support(false),
+		"context_management": map[string]any{
+			"supported": true, "clear_thinking_20251015": support(true), "clear_tool_uses_20250919": support(true), "compact_20260112": support(true),
+		},
+		"effort": map[string]any{
+			"supported": len(model.ThinkingLevels) > 0,
+			"low":       support(slices.Contains(model.ThinkingLevels, "low")),
+			"medium":    support(slices.Contains(model.ThinkingLevels, "medium")),
+			"high":      support(slices.Contains(model.ThinkingLevels, "high")),
+			"xhigh":     support(slices.Contains(model.ThinkingLevels, "xhigh")),
+			"max":       support(false),
+		},
+		"image_input":        support(images),
+		"pdf_input":          support(images),
+		"server_tools":       map[string]any{"supported": search, "code_execution": support(false), "web_search": support(search)},
+		"structured_outputs": support(true),
+		"thinking": map[string]any{
+			"supported": thinking,
+			"types":     map[string]any{"enabled": support(thinking), "adaptive": support(thinking), "disabled": support(true), "between_tools": support(false)},
+		},
+	}
 }
 
 // anthropicTokenLimit 将目录缺失的 token 上限投影为 null
@@ -939,18 +1066,25 @@ type anthropicStreamWriter struct {
 	blockIndex        int
 	currentBlock      string
 	thinkingSignature string
-	// search 为请求只声明了 Google 搜索，grounding 为已到达的搜索来源，text 为当前 text 块的正文
-	search    bool
-	grounding *antigravity.Grounding
-	text      strings.Builder
+	// search 为请求只声明了 Google 搜索
+	search bool
+	// citations 为暂存正文中尚未写出的引用区间，source 为已写出的暂存正文字节数，cited 为正在写出的引用区间
+	citations []anthropicCitationGroup
+	source    int
+	cited     *anthropicCitationGroup
 	media     mediaOutput
+	// context 为本次请求的上下文管理结果
+	context anthropicContextResult
 }
+
+// anthropicCitedBlock 是正在写出的带引用 text 块的块类型
+const anthropicCitedBlock = "cited_text"
 
 // streamAnthropic 把事件逐个写成 Messages 流，只声明搜索时先暂存正文直到搜索来源到达，中途失败时写出 error 事件
 func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter, events <-chan antigravity.Event) {
 	emit, release := writer.live, func() error { return nil }
 	if writer.search {
-		emit, release = holdUntilGrounding(writer.live)
+		emit, release = holdUntilGrounding(writer.live, writer.prepareCitations)
 	}
 	result, err := consumeEvents(r.Context(), events, emit)
 	if err != nil {
@@ -962,32 +1096,125 @@ func (s *server) streamAnthropic(r *http.Request, writer *anthropicStreamWriter,
 	_ = writer.finish(result)
 }
 
-// emit 写出一个具名 SSE 事件
-func (writer *anthropicStreamWriter) emit(eventType string, payload any) error {
-	return writeSSE(writer.w, eventType, payload)
+// prepareCitations 在写出搜索来源前按暂存的正文计算引用区间
+func (writer *anthropicStreamWriter) prepareCitations(held []antigravity.Event, grounding *antigravity.Grounding) {
+	var text strings.Builder
+	for _, event := range held {
+		if event.Kind == antigravity.EventText {
+			text.WriteString(event.Text)
+		}
+	}
+	writer.citations = anthropicCitationGroups(text.String(), grounding)
 }
 
-// start 写出 message_start，输入用量取首个上游事件的用量，没有时为本地计数
+// citedText 写出搜索回答的一段正文，被来源支撑的区间写成带 citations 的独立 text 块
+func (writer *anthropicStreamWriter) citedText(text string) error {
+	for text != "" {
+		if writer.cited == nil && len(writer.citations) > 0 && writer.citations[0].start <= writer.source {
+			writer.cited = &writer.citations[0]
+			writer.citations = writer.citations[1:]
+			if writer.cited.end <= writer.source {
+				writer.cited = nil
+				continue
+			}
+		}
+		length := len(text)
+		if writer.cited != nil {
+			length = min(length, writer.cited.end-writer.source)
+			if writer.currentBlock != anthropicCitedBlock {
+				if err := writer.startCited(writer.cited.citations); err != nil {
+					return err
+				}
+			}
+		} else {
+			if len(writer.citations) > 0 {
+				length = min(length, writer.citations[0].start-writer.source)
+			}
+			if err := writer.ensureBlock("text"); err != nil {
+				return err
+			}
+		}
+		if err := writer.emit("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": writer.blockIndex,
+			"delta": map[string]any{"type": "text_delta", "text": text[:length]},
+		}); err != nil {
+			return err
+		}
+		writer.source += length
+		text = text[length:]
+		if writer.cited != nil && writer.source >= writer.cited.end {
+			writer.cited = nil
+			if err := writer.closeBlock(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// startCited 打开带搜索引用的 text 块并逐条写出 citations_delta
+func (writer *anthropicStreamWriter) startCited(citations []any) error {
+	if err := writer.closeBlock(); err != nil {
+		return err
+	}
+	if err := writer.emit("content_block_start", map[string]any{
+		"type": "content_block_start", "index": writer.blockIndex,
+		"content_block": map[string]any{"type": "text", "text": "", "citations": nil},
+	}); err != nil {
+		return err
+	}
+	writer.currentBlock = anthropicCitedBlock
+	for _, citation := range citations {
+		if err := writer.emit("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": writer.blockIndex,
+			"delta": map[string]any{"type": "citations_delta", "citation": citation},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// emit 写出一个具名 SSE 事件
+func (writer *anthropicStreamWriter) emit(eventType string, payload any) error {
+	return writeSSE(writer.w, eventType, officialOrder("anthropic", payload))
+}
+
+// start 写出 message_start，输入用量取首个上游事件的用量，没有时为本地计数；本次请求压缩了上下文时接着写出 compaction 块
 func (writer *anthropicStreamWriter) start() error {
 	usage := anthropicUsage(writer.usage)
 	usage["output_tokens"] = 0
-	return writer.emit("message_start", map[string]any{
+	if err := writer.emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"id": writer.id, "type": "message", "role": "assistant", "model": writer.model,
-			"content": []any{}, "stop_reason": nil, "stop_sequence": nil, "usage": usage,
+			"content": []any{}, "stop_reason": nil, "stop_sequence": nil, "stop_details": nil, "usage": usage, "container": nil,
 		},
-	})
+	}); err != nil || writer.context.compaction == nil {
+		return err
+	}
+	block := writer.context.compaction.block()
+	block["content"] = nil
+	if err := writer.emit("content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": block}); err != nil {
+		return err
+	}
+	if err := writer.emit("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": 0,
+		"delta": map[string]any{"type": "compaction_delta", "content": writer.context.compaction.summary, "encrypted_content": nil},
+	}); err != nil {
+		return err
+	}
+	writer.blockIndex = 1
+	return writer.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 }
 
-// live 写出一个事件：思考为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，搜索来源为 server_tool_use 与 web_search_tool_result 块
+// live 写出一个事件：思考为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，紧跟 text 块的独立签名不输出，搜索来源为 server_tool_use 与 web_search_tool_result 块
 func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 	switch event.Kind {
 	case antigravity.EventGrounding:
 		if err := writer.closeBlock(); err != nil {
 			return err
 		}
-		writer.grounding = event.Grounding
 		for _, block := range anthropicSearchBlocks(serverToolID(writer.id), event.Grounding) {
 			start := block
 			if block.Type == "server_tool_use" {
@@ -1011,10 +1238,12 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 		}
 		return nil
 	case antigravity.EventText:
+		if len(writer.citations) > 0 || writer.cited != nil {
+			return writer.citedText(event.Text)
+		}
 		if err := writer.ensureBlock("text"); err != nil {
 			return err
 		}
-		writer.text.WriteString(event.Text)
 		return writer.emit("content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": writer.blockIndex,
 			"delta": map[string]any{"type": "text_delta", "text": event.Text},
@@ -1034,6 +1263,9 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 			"delta": map[string]any{"type": "thinking_delta", "thinking": event.Text},
 		})
 	case antigravity.EventThoughtSignature:
+		if writer.currentBlock == "text" || writer.currentBlock == anthropicCitedBlock {
+			return nil
+		}
 		return writer.sign(event.ThoughtSignature)
 	case antigravity.EventMedia:
 		if err := writer.media.save(*event.Media); err != nil {
@@ -1112,7 +1344,7 @@ func (writer *anthropicStreamWriter) ensureBlock(blockType string) error {
 	if blockType == "thinking" {
 		block["thinking"], block["signature"] = "", ""
 	} else {
-		block["text"] = ""
+		block["text"], block["citations"] = "", nil
 	}
 	if err := writer.emit("content_block_start", map[string]any{
 		"type": "content_block_start", "index": writer.blockIndex, "content_block": block,
@@ -1123,22 +1355,11 @@ func (writer *anthropicStreamWriter) ensureBlock(blockType string) error {
 	return nil
 }
 
-// closeBlock 结束当前块：text 块先写出引用，thinking 块先写出签名
+// closeBlock 结束当前块，thinking 块先写出签名
 func (writer *anthropicStreamWriter) closeBlock() error {
 	if writer.currentBlock == "" {
 		return nil
 	}
-	if writer.currentBlock == "text" && writer.grounding != nil {
-		for _, citation := range anthropicCitations(writer.text.String(), writer.grounding) {
-			if err := writer.emit("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": writer.blockIndex,
-				"delta": map[string]any{"type": "citations_delta", "citation": citation},
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	writer.text.Reset()
 	if writer.currentBlock == "thinking" && writer.thinkingSignature != "" {
 		if err := writer.emit("content_block_delta", map[string]any{
 			"type": "content_block_delta", "index": writer.blockIndex,
@@ -1177,11 +1398,15 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 	delta := map[string]any{
 		"stop_reason": anthropicStop(result.finishReason, len(result.toolCalls) > 0), "stop_sequence": stopSequence,
 	}
-	if err := writer.emit("message_delta", map[string]any{
+	event := map[string]any{
 		"type":  "message_delta",
 		"delta": delta,
-		"usage": usage,
-	}); err != nil {
+		"usage": writer.context.usage(usage, result.usage),
+	}
+	if writer.context.requested {
+		event["context_management"] = map[string]any{"applied_edits": writer.context.applied}
+	}
+	if err := writer.emit("message_delta", event); err != nil {
 		return err
 	}
 	return writer.emit("message_stop", map[string]string{"type": "message_stop"})
