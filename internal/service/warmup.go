@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/auth"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
@@ -76,13 +78,16 @@ func (s *Service) Warmup(ctx context.Context) {
 	}
 }
 
-// warmups 返回需要唤醒的账户与周额度桶：账户已就绪，最近一次读到的该桶剩余不低于 99.9%、resetTime 为读取时间加 7 天（窗口未开始计时，每次读取都随读取时间后移），6 天内没有唤醒过，且该组有可用的对话模型
+// warmups 返回需要唤醒的账户与周额度桶：账户已启用且就绪，最近一次读到的该桶剩余不低于 99.9%、resetTime 为读取时间加 7 天（窗口未开始计时，每次读取都随读取时间后移），6 天内没有唤醒过，且该组有可用的对话模型
 func (s *Service) warmups() []warmup {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var targets []warmup
 	for id := range s.accounts {
+		if !s.store.Enabled(id) {
+			continue
+		}
 		read := s.quotas[id]
 		for _, group := range read.summary.Groups {
 			for _, bucket := range group.Buckets {
@@ -99,6 +104,32 @@ func (s *Service) warmups() []warmup {
 	return targets
 }
 
+// WarmupModels 按账户顺序合并全部账户（含停用账户）上一次保存的目录中的对话模型并去重，按 public 合并 Agent 模型的档位，供管理端预热选择模型；defaults 为各额度组由 cheapest 选出的模型的公开 ID
+func (s *Service) WarmupModels() (models []antigravity.Model, defaults []string) {
+	records := s.store.Accounts()
+	ids := make(map[string]string)
+	var catalog []antigravity.CatalogModel
+	s.mu.Lock()
+	for _, record := range records {
+		for _, model := range s.catalogs[record.ID] {
+			if model.Kind == "" && ids[model.ID] == "" {
+				family, _ := familyOf(model)
+				ids[model.ID] = cmp.Or(family, model.ID)
+				catalog = append(catalog, model)
+			}
+		}
+	}
+	s.mu.Unlock()
+	groups := make(map[string]bool)
+	for _, model := range catalog {
+		if group := model.QuotaGroup(); !groups[group] {
+			groups[group] = true
+			defaults = append(defaults, ids[cheapest(catalog, group)])
+		}
+	}
+	return public(catalog), defaults
+}
+
 // cheapest 返回目录中该额度组按价目表估算费用最低的对话模型，没有单价的模型排在后面，都没有单价时取目录中的第一个
 func cheapest(models []antigravity.CatalogModel, group string) string {
 	best, lowest := "", math.Inf(1)
@@ -106,7 +137,7 @@ func cheapest(models []antigravity.CatalogModel, group string) string {
 		if model.Kind != "" || model.QuotaGroup() != group {
 			continue
 		}
-		cost, ok := requestdb.Cost(model.ID, 1000, 0, 1000)
+		cost, ok := requestdb.Cost(model.ID, time.Now(), 1000, 0, 1000)
 		if !ok {
 			cost = math.MaxFloat64
 		}
@@ -117,14 +148,19 @@ func cheapest(models []antigravity.CatalogModel, group string) string {
 	return best
 }
 
-// Prewarm 是管理端的手动预热：以账户与模型经生成路径发送一条 Hi 并读完回答，成功后重新读取该账户的额度，返回模型所属额度组；账户不存在、已停用、未就绪或模型目录中没有该模型时不发送并返回原因
+// Prewarm 是管理端的手动预热：以账户与模型经生成路径发送一条 Hi 并读完回答，成功后重新读取该账户的额度，返回模型所属额度组；停用账户按冷启动临时初始化，只供手动预热使用，没有进行中的预热满 borrowLinger 后移出调度；账户不存在、未就绪或模型目录中没有该模型时不发送并返回原因
 func (s *Service) Prewarm(ctx context.Context, id, name string) (string, error) {
 	record, ok := s.store.Account(id)
-	switch {
-	case !ok:
+	if !ok {
 		return "", &Error{Status: http.StatusNotFound, Message: "账户不存在: " + id}
-	case !record.Enabled:
-		return "", &Error{Status: http.StatusConflict, Message: "账户已停用"}
+	}
+	if !record.Enabled {
+		if err := s.borrow(ctx, &record); err != nil {
+			return "", &Error{Status: http.StatusServiceUnavailable, Message: "账户未就绪 " + err.Error()}
+		}
+		defer s.giveBack(id)
+	}
+	switch {
 	case s.account(id) == nil:
 		s.mu.Lock()
 		reason := s.failures[id]
@@ -169,4 +205,59 @@ func (s *Service) ping(ctx context.Context, target warmup) error {
 		}
 	}
 	return failure
+}
+
+// borrowLinger 是手动预热临时启动的停用账户在没有进行中的预热后保留的时长，同一账户接着预热其他模型时复用这次初始化
+const borrowLinger = 10 * time.Second
+
+// borrowed 是一个手动预热临时启动的停用账户，active 为进行中的预热数，retire 为没有进行中的预热后移出调度的计时器
+type borrowed struct {
+	active int
+	retire *time.Timer
+}
+
+// borrow 为停用账户的一次手动预热取得临时启动的账户：停止待执行的移出，账户不在账户池时按冷启动临时初始化
+func (s *Service) borrow(ctx context.Context, record *auth.Account) error {
+	s.mu.Lock()
+	item := s.borrowed[record.ID]
+	if item == nil {
+		item = &borrowed{}
+		s.borrowed[record.ID] = item
+	}
+	item.active++
+	if item.retire != nil {
+		item.retire.Stop()
+		item.retire = nil
+	}
+	_, running := s.accounts[record.ID]
+	s.mu.Unlock()
+	if running {
+		return nil
+	}
+	if err := s.initialize(ctx, record, true); err != nil {
+		s.giveBack(record.ID)
+		return err
+	}
+	return nil
+}
+
+// giveBack 结束停用账户的一次手动预热，没有进行中的预热满 borrowLinger 后在账户仍为停用时移出调度并停止伴随请求
+func (s *Service) giveBack(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item := s.borrowed[id]
+	if item.active--; item.active > 0 {
+		return
+	}
+	item.retire = time.AfterFunc(borrowLinger, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.borrowed[id] != item || item.active > 0 {
+			return
+		}
+		delete(s.borrowed, id)
+		if !s.store.Enabled(id) {
+			s.remove(id)
+		}
+	})
 }

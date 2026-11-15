@@ -2,7 +2,7 @@ import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-quer
 import { useEffect } from 'react'
 
 import { invalidate, requestDependents } from '@/app/sync'
-import { accountsKey } from '@/features/accounts/queries'
+import { accountsKey, loginFailuresKey, loginKey, loginsKey } from '@/features/accounts/queries'
 import type { Account, Login } from '@/features/accounts/types'
 import type { LogEntry } from '@/features/logs/types'
 import type { RequestRecord } from '@/features/requests/types'
@@ -57,9 +57,18 @@ function apply(client: QueryClient, event: AdminEvent) {
       if (record.state !== 'running') invalidate(client, requestDependents)
       break
     }
-    case 'login':
-      client.setQueryData(['login', event.data.id], event.data)
+    case 'login': {
+      const login = event.data
+      const known =
+        client.getQueryData<Login>(loginKey(login.id))?.state === 'pending' ||
+        client.getQueryData<Login[]>(loginsKey)?.some((item) => item.id === login.id)
+      client.setQueryData(loginKey(login.id), login)
+      if (login.state === 'failed' && known) {
+        client.setQueryData<Login[]>(loginFailuresKey, (failures = []) => [...failures, login])
+      }
+      void client.invalidateQueries({ queryKey: loginsKey })
       break
+    }
     case 'ready':
       client.setQueryData<Connection>(connectionKey, 'open')
       break

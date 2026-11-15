@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
-	"regexp"
 	"slices"
 	"strings"
 	"text/template"
@@ -20,15 +19,6 @@ var (
 	//go:embed templates/medium.user.tmpl
 	mediumUser string
 )
-
-// clientIdentity 匹配客户端系统提示中行首带归属声明的身份句：You are 加以 agent、assistant 或 AI 结尾的身份短语，8 个字符内接 created by、built on、based on 等归属声明，到句号为止
-var clientIdentity = regexp.MustCompile(`(?im)^([ \t]*)(?:you are|you're)\s+(?:an?\s+)?(?:[\w'-]+[\s,]+){0,8}(?:agent|assistant|ai)\b[^.!?\n<>]{0,8}?\b(?:(?:created|built|made|developed|designed|trained|powered|maintained|published|released|provided)\s+(?:by|on|upon)|based\s+on)\s+[^\n<>]{1,80}?\.([ \t]|$)`)
-
-// neutralIdentity 为替换客户端身份句的中性身份句
-const neutralIdentity = "You are an AI Agent."
-
-// keywordsLine 匹配客户端系统提示中含 RFC 2119 keywords 的一行与行尾换行，不区分大小写；上游拒绝带这一写法的关键词说明句
-var keywordsLine = regexp.MustCompile(`(?im)^.*RFC 2119 keywords.*\n?`)
 
 const (
 	// featuredSection 为推荐插件段的段名，没有推荐插件时该段为空
@@ -180,10 +170,11 @@ func (c *Composer) Tier() Tier {
 	return c.tier
 }
 
-// Compose 以会话 ID、账户设备档案、推荐插件段的货架正文与账户实时的布尔实验开关渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示中带归属声明的身份句改写为中性身份句，含 RFC 2119 keywords 的行删去，工具声明保持不变；模板执行出错时返回该错误
+// Compose 以会话 ID、账户设备档案、推荐插件段的货架正文与账户实时的布尔实验开关渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示与 user 轮中上游拒绝的整句删去，工具声明保持不变；模板执行出错时返回该错误
 func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string, experiments map[string]bool) (antigravity.GenerateRequest, error) {
 	data := deviceData(model, conversation, device, plugins, experiments)
-	data.Client = keywordsLine.ReplaceAllString(clientIdentity.ReplaceAllString(request.System, "${1}"+neutralIdentity+"${2}"), "")
+	data.Client = dropRejected(request.System, systemRejected)
+	request.Contents = dropUserRejected(request.Contents)
 	var err error
 	if request.System, err = execute(c.system, data); err != nil {
 		return request, err

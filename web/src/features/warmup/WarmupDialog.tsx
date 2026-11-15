@@ -1,4 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Flame, LoaderCircle } from 'lucide-react'
 import { type ReactNode, useState } from 'react'
 import { Link } from 'react-router'
@@ -11,9 +11,8 @@ import { Table, Td, Th } from '@/components/ui/table'
 import { AccountStatusBadge } from '@/features/accounts/AccountStatus'
 import { accountsKey } from '@/features/accounts/queries'
 import type { Account } from '@/features/accounts/types'
-import { useModels } from '@/features/models/queries'
-import { kindOf } from '@/features/models/types'
-import { bucketParts, compareBuckets, nameOf } from '@/features/quota/quota'
+import type { Model } from '@/features/models/types'
+import { bucketParts, compareBuckets, groups, nameOf } from '@/features/quota/quota'
 import type { QuotaBucket } from '@/features/quota/types'
 import { api, errorMessage } from '@/lib/api'
 import { formatDuration, formatPercent } from '@/lib/format'
@@ -40,11 +39,21 @@ interface Run {
   running: boolean
 }
 
-// toggle 返回加入或移出 value 后的集合
-function toggle(set: ReadonlySet<string>, value: string, on: boolean) {
+// WarmupModel 对应 GET /api/warmup 的模型条目：全部账户（含停用账户）上一次目录中的对话模型，warmup 表示它是所属额度组默认选中的模型
+interface WarmupModel extends Omit<Model, 'accounts'> {
+  warmup?: boolean
+}
+
+// warmupKey 是预热对话框模型列表的查询键
+const warmupKey = ['warmup'] as const
+
+// toggle 返回加入或移出 values 后的集合
+function toggle(set: ReadonlySet<string>, values: string[], on: boolean) {
   const next = new Set(set)
-  if (on) next.add(value)
-  else next.delete(value)
+  for (const value of values) {
+    if (on) next.add(value)
+    else next.delete(value)
+  }
   return next
 }
 
@@ -73,17 +82,24 @@ function QuotaChange({ before, after }: { before: QuotaBucket[]; after: QuotaBuc
   )
 }
 
-// WarmupDialog 选定账户与对话模型后对每个组合发一次最小生成请求，各账户并行、同一账户内依次进行，逐行显示结果、耗时、错误原因与额度变化；selected 非空时默认选中这些账户，否则默认选中就绪账户
+// WarmupDialog 选定账户与对话模型后对每个组合发一次最小生成请求，各账户并行、同一账户内依次进行，逐行显示结果、耗时、错误原因与额度变化；selected 非空时默认选中这些账户，否则默认选中就绪账户；模型取全部账户（含停用账户）上一次的目录，打开时重新读取，按额度组分组，用户改动前默认选中各额度组费用最低的模型
 export function WarmupDialog({ accounts, selected }: { accounts: Account[]; selected: string[] }) {
   const w = useMessages('warmup')
+  const q = useMessages('quota')
   const app = useMessages('app')
   const { locale } = useI18n()
   const queryClient = useQueryClient()
-  const models = useModels()
-  const chat = (models.data?.models ?? []).filter((model) => kindOf(model) === 'chat')
   const [open, setOpen] = useState(false)
+  const models = useQuery({
+    queryKey: warmupKey,
+    queryFn: () => api<{ models: WarmupModel[] }>('/api/warmup'),
+    enabled: open,
+  })
+  const chat = models.data?.models ?? []
   const [pickedAccounts, setPickedAccounts] = useState<ReadonlySet<string>>(new Set())
-  const [pickedModels, setPickedModels] = useState<ReadonlySet<string>>(new Set())
+  const [changedModels, setChangedModels] = useState<ReadonlySet<string>>()
+  const pickedModels =
+    changedModels ?? new Set(chat.filter((model) => model.warmup).map((model) => model.id))
   const [runs, setRuns] = useState<Run[]>()
   const running = runs?.some((run) => !run.result) ?? false
 
@@ -97,6 +113,7 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
             : accounts.filter((account) => account.state === 'ready').map((account) => account.id),
         ),
       )
+      setChangedModels(undefined)
       setRuns(undefined)
     }
     setOpen(next)
@@ -221,7 +238,9 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
                 {runs.map((run) => (
                   <tr key={run.account + '\n' + run.model} data-warmup-row>
                     <Td className="max-sm:w-full">
-                      <div className="wrap-anywhere">{run.account}</div>
+                      <div className="wrap-anywhere">
+                        <Email address={run.account} />
+                      </div>
                       <div className="mt-1 font-mono text-xs text-foreground-muted">
                         {run.model}
                       </div>
@@ -271,23 +290,53 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
             </Table>
           </div>
         ) : (
-          <div className="grid gap-6 sm:grid-cols-2">
+          <div className="grid gap-6 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
             <Picker
               legend={w.models}
+              hint={w.modelsHint}
               selectAll={w.selectAll}
-              empty={w.noModels}
-              options={chat.map((model) => ({ value: model.id, label: model.id }))}
+              empty={
+                models.isPending
+                  ? app.loading
+                  : models.isError
+                    ? errorMessage(models.error)
+                    : w.noModels
+              }
+              sections={[...new Set([...groups, ...chat.map((model) => model.quota_group ?? '')])]
+                .map((group) => ({
+                  label: nameOf(q, group),
+                  options: chat
+                    .filter((model) => (model.quota_group ?? '') === group)
+                    .map((model) => ({
+                      value: model.id,
+                      label: (
+                        <span className="font-mono text-xs whitespace-nowrap">{model.id}</span>
+                      ),
+                      badge: model.warmup && <Badge tone="neutral">{w.cheapest}</Badge>,
+                    })),
+                }))
+                .filter((section) => section.options.length > 0)}
               picked={pickedModels}
-              onChange={setPickedModels}
+              onChange={setChangedModels}
             />
             <Picker
               legend={w.accounts}
+              hint={w.accountsHint}
               selectAll={w.selectAll}
-              options={accounts.map((account) => ({
-                value: account.id,
-                label: account.label ? account.label + ' · ' + account.id : account.id,
-                badge: <AccountStatusBadge account={account} />,
-              }))}
+              sections={[
+                {
+                  options: accounts.map((account) => ({
+                    value: account.id,
+                    label: (
+                      <>
+                        {account.label && account.label + ' · '}
+                        <Email address={account.id} />
+                      </>
+                    ),
+                    badge: <AccountStatusBadge account={account} />,
+                  })),
+                },
+              ]}
               picked={pickedAccounts}
               onChange={setPickedAccounts}
             />
@@ -298,56 +347,124 @@ export function WarmupDialog({ accounts, selected }: { accounts: Account[]; sele
   )
 }
 
-// Picker 是带全选的复选框列表，没有选项时显示 empty
+// Email 显示邮箱地址，换行时优先在 @ 之前断开
+function Email({ address }: { address: string }) {
+  const at = address.indexOf('@')
+  if (at <= 0) return address
+  return (
+    <>
+      {address.slice(0, at)}
+      <wbr />
+      {address.slice(at)}
+    </>
+  )
+}
+
+// PickerOption 是复选框列表的一项，badge 显示在右侧，放不下时换到下一行右侧
+interface PickerOption {
+  value: string
+  label: ReactNode
+  badge?: ReactNode
+}
+
+// Picker 是带全选的复选框列表，选项分成若干节，带 label 的节有自己的整节勾选；没有选项时显示 empty，hint 是标题下的说明
 function Picker({
   legend,
+  hint,
   selectAll,
   empty,
-  options,
+  sections,
   picked,
   onChange,
 }: {
   legend: string
+  hint?: string
   selectAll: string
   empty?: string
-  options: { value: string; label: string; badge?: ReactNode }[]
+  sections: { label?: string; options: PickerOption[] }[]
   picked: ReadonlySet<string>
   onChange: (next: ReadonlySet<string>) => void
 }) {
-  const chosen = options.filter((option) => picked.has(option.value)).length
+  const options = sections.flatMap((section) => section.options)
   return (
     <fieldset className="flex min-w-0 flex-col gap-2" data-warmup-picker={legend}>
-      <legend className="mb-2 text-sm font-medium">{legend}</legend>
+      <legend className="text-sm font-medium">{legend}</legend>
+      {hint && <p className="text-xs text-foreground-muted">{hint}</p>}
       {options.length === 0 ? (
         <p className="text-sm text-foreground-muted">{empty}</p>
       ) : (
         <div className="flex flex-col overflow-y-auto rounded-md border border-border">
-          <label className="flex items-center gap-2 border-b border-border bg-muted px-3 py-2 text-sm">
-            <Checkbox
-              checked={chosen === 0 ? false : chosen === options.length ? true : 'indeterminate'}
-              onCheckedChange={(checked) => {
-                onChange(new Set(checked === true ? options.map((option) => option.value) : []))
-              }}
-            />
-            {selectAll}
-          </label>
-          {options.map((option) => (
-            <label
-              key={option.value}
-              className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/60"
-            >
-              <Checkbox
-                checked={picked.has(option.value)}
-                onCheckedChange={(checked) => {
-                  onChange(toggle(picked, option.value, checked === true))
-                }}
-              />
-              <span className="min-w-0 flex-1 wrap-anywhere">{option.label}</span>
-              {option.badge}
-            </label>
+          <Toggle label={selectAll} options={options} picked={picked} onChange={onChange} />
+          {sections.map((section, index) => (
+            <div key={section.label ?? index} className="flex flex-col">
+              {section.label && (
+                <Toggle
+                  label={section.label}
+                  options={section.options}
+                  picked={picked}
+                  onChange={onChange}
+                  heading
+                />
+              )}
+              {section.options.map((option) => (
+                <label
+                  key={option.value}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-sm hover:bg-muted/60"
+                >
+                  <Checkbox
+                    checked={picked.has(option.value)}
+                    onCheckedChange={(checked) => {
+                      onChange(toggle(picked, [option.value], checked === true))
+                    }}
+                  />
+                  <span className="flex-1 wrap-anywhere">{option.label}</span>
+                  {option.badge && <span className="ml-auto">{option.badge}</span>}
+                </label>
+              ))}
+            </div>
           ))}
         </div>
       )}
     </fieldset>
+  )
+}
+
+// Toggle 是一组选项的整组勾选行，heading 为节标题样式
+function Toggle({
+  label,
+  options,
+  picked,
+  onChange,
+  heading = false,
+}: {
+  label: string
+  options: PickerOption[]
+  picked: ReadonlySet<string>
+  onChange: (next: ReadonlySet<string>) => void
+  heading?: boolean
+}) {
+  const chosen = options.filter((option) => picked.has(option.value)).length
+  return (
+    <label
+      className={
+        heading
+          ? 'pb-1.5 flex items-center gap-2 border-y border-border px-3 pt-3 text-xs font-medium text-foreground-muted'
+          : 'flex items-center gap-2 border-b border-border bg-muted px-3 py-2 text-sm'
+      }
+    >
+      <Checkbox
+        checked={chosen === 0 ? false : chosen === options.length ? true : 'indeterminate'}
+        onCheckedChange={(checked) => {
+          onChange(
+            toggle(
+              picked,
+              options.map((option) => option.value),
+              checked === true,
+            ),
+          )
+        }}
+      />
+      {label}
+    </label>
   )
 }

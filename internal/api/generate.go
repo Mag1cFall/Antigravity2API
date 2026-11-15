@@ -76,29 +76,65 @@ func (result *generationResult) apply(event antigravity.Event) error {
 	return nil
 }
 
-// awaitStreamStart 在写出流式响应头前等待首个事件，首个事件为错误时返回该错误，心跳间隔内没有事件时直接返回原事件流；返回的首个事件在事件流中仍会重放
-func awaitStreamStart(ctx context.Context, events <-chan antigravity.Event) (<-chan antigravity.Event, antigravity.Event, error) {
+// startGeneration 开始一次生成：非流式时直接调用 generate；流式时在后台调用 generate，写出流式响应头前等待首个用量以外的事件，generate 失败或这样的事件为错误时返回该错误，从调用起心跳间隔内没有这样的事件时返回事件流，此后 generate 的失败为流中的错误事件；先到的用量与返回的首个事件在事件流中仍会重放
+func startGeneration(ctx context.Context, stream bool, generate func() (<-chan antigravity.Event, error)) (<-chan antigravity.Event, antigravity.Event, error) {
+	if !stream {
+		events, err := generate()
+		return events, antigravity.Event{}, err
+	}
 	timer := time.NewTimer(streamHeartbeatInterval)
 	defer timer.Stop()
+	events := make(chan antigravity.Event)
+	go func() {
+		defer close(events)
+		upstream, err := generate()
+		if err != nil {
+			upstream = failedEvents(err)
+		}
+		for event := range upstream {
+			select {
+			case events <- event:
+			case <-ctx.Done():
+			}
+		}
+	}()
 	var first antigravity.Event
-	select {
-	case <-ctx.Done():
-		return nil, first, ctx.Err()
-	case <-timer.C:
-		return events, first, nil
-	case event, ok := <-events:
-		if !ok {
-			return nil, first, errIncompleteStream
+	var held []antigravity.Event
+	for first.Kind == "" {
+		select {
+		case <-ctx.Done():
+			return nil, first, ctx.Err()
+		case <-timer.C:
+			if len(held) == 0 {
+				return events, first, nil
+			}
+			first = held[0]
+		case event, ok := <-events:
+			if !ok {
+				return nil, first, errIncompleteStream
+			}
+			switch event.Kind {
+			case antigravity.EventError:
+				return nil, first, event.Err
+			case antigravity.EventUsage:
+				held = append(held, event)
+			default:
+				first = event
+				held = append(held, event)
+			}
 		}
-		if event.Kind == antigravity.EventError {
-			return nil, first, event.Err
-		}
-		first = event
 	}
 	replay := make(chan antigravity.Event)
 	go func() {
 		defer close(replay)
-		for event, ok := first, true; ok; event, ok = <-events {
+		for _, event := range held {
+			select {
+			case replay <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+		for event := range events {
 			select {
 			case replay <- event:
 			case <-ctx.Done():
@@ -107,6 +143,14 @@ func awaitStreamStart(ctx context.Context, events <-chan antigravity.Event) (<-c
 		}
 	}()
 	return replay, first, nil
+}
+
+// failedEvents 返回只含一个 err 错误事件的事件流
+func failedEvents(err error) <-chan antigravity.Event {
+	failed := make(chan antigravity.Event, 1)
+	failed <- antigravity.Event{Kind: antigravity.EventError, Err: err}
+	close(failed)
+	return failed
 }
 
 // consumeEvents 收集全部事件，emit 不为空时逐个交给 emit

@@ -60,6 +60,48 @@ func (e *ContentPolicyError) Error() string {
 	return "上游因内容策略结束生成: " + e.Reason
 }
 
+// AbnormalFinishError 表示上游以格式错误的函数调用、意外的工具调用或格式错误的回复结束、重新生成用完仍如此且这次生成没有输出，Usage 为上游最后给出的用量
+type AbnormalFinishError struct {
+	Reason  string
+	Message string
+	Usage   *Usage
+}
+
+func (e *AbnormalFinishError) Error() string {
+	if e.Message != "" {
+		return "上游异常结束生成且没有输出: " + e.Reason + ": " + e.Message
+	}
+	return "上游异常结束生成且没有输出: " + e.Reason
+}
+
+// PromptFeedbackError 表示上游以 promptFeedback 按输入本身拒绝请求且没有返回候选，同一输入重发仍被拒绝；Reason 为 blockReason，Message 为 blockReasonMessage，Usage 为上游计入的输入用量
+type PromptFeedbackError struct {
+	Reason  string
+	Message string
+	Usage   *Usage
+}
+
+func (e *PromptFeedbackError) Error() string {
+	if e.Message != "" {
+		return "上游拒绝当前输入: " + e.Reason + ": " + e.Message
+	}
+	return "上游拒绝当前输入: " + e.Reason
+}
+
+// HTTPStatus 返回输入拒绝对应的 400
+func (e *PromptFeedbackError) HTTPStatus() int {
+	return http.StatusBadRequest
+}
+
+// inputBlock 判断 promptFeedback 的 blockReason 是否表示按输入本身拒绝：安全设置、屏蔽词与禁止内容
+func inputBlock(reason string) bool {
+	switch reason {
+	case "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT":
+		return true
+	}
+	return false
+}
+
 // contentPolicyFinish 判断 finishReason 是否属于内容策略类：安全、背诵、屏蔽词、禁止内容、个人敏感信息与对应的图片原因
 func contentPolicyFinish(reason string) bool {
 	switch reason {
@@ -137,6 +179,7 @@ type WireRequest struct {
 	Labels            map[string]string    `json:"labels,omitempty"`
 	GenerationConfig  WireGenerationConfig `json:"generationConfig"`
 	SessionID         string               `json:"sessionId"`
+	ContinuationToken string               `json:"continuationToken,omitempty"`
 }
 
 // WireContent 表示上游的一条消息
@@ -226,7 +269,7 @@ type WireGenerationConfig struct {
 // thinkingLevels 为目录 thinkingLevel 中有枚举名的取值，其余取值（如 XHigh 档的 100）按官方客户端以数字发出
 var thinkingLevels = map[int]string{1: "LOW", 2: "MEDIUM", 3: "HIGH"}
 
-// BuildEnvelope 按官方客户端的信封格式组装一次 Agent 生成请求，system 为已按档位组装好的系统指令，config 中只有模型族接受且生效的参数进入 generationConfig，GPT-OSS 族没有描述的函数以函数名为描述，Claude 族的参数 Schema 去掉 anyOf；函数结果无法关联到调用时返回错误
+// BuildEnvelope 按官方客户端的信封格式组装一次 Agent 生成请求，system 为已按档位组装好的系统指令，config 中只有模型族接受且生效的参数进入 generationConfig，GPT-OSS 族没有描述的函数以函数名为描述，Claude 族的参数 Schema 去掉 anyOf；函数结果的配对与改写见 wireContents，函数结果转录失败时返回错误
 func BuildEnvelope(project string, model CatalogModel, conversation Conversation, system string, contents []Content, tools Tools, config GenerationConfig, now time.Time) (Envelope, error) {
 	wired, err := wireContents(contents, model)
 	if err != nil {
@@ -314,11 +357,11 @@ func labels(model CatalogModel, conversation Conversation) map[string]string {
 	return values
 }
 
-// wireContents 把规范消息转成上游消息：Claude 族没有 ID 的函数调用生成 ID，函数结果按调用补齐名称与 ID，结果所在轮的角色 Claude 族为 user、其余族为 model，相邻消息的结果并入同一轮，被 user 轮隔开的结果移回调用之后，同一消息中的其余 part 在其他族另成 user 轮
+// wireContents 把规范消息转成上游消息：Claude 与 GPT-OSS 族没有 ID 的函数调用生成 ID，函数结果按调用补齐名称与 ID，结果所在轮的角色 Claude 族为 user、其余族为 model，相邻消息的结果并入同一轮，被 user 轮隔开的结果移回调用之后，同一消息中的其余 part 在其他族另成 user 轮；Claude 族的函数调用在其后的 user 消息与函数结果消息中没有结果时补上中断结果，末尾 assistant 轮的函数调用保持原样
 func wireContents(contents []Content, model CatalogModel) ([]WireContent, error) {
 	claude := model.ModelProvider == ProviderAnthropic
 	google := model.ModelProvider == ProviderGoogle
-	if claude {
+	if !google {
 		contents = slices.Clone(contents)
 		for index := range contents {
 			contents[index] = identifyCalls(contents[index], index)
@@ -327,7 +370,14 @@ func wireContents(contents []Content, model CatalogModel) ([]WireContent, error)
 	contents = regroupResults(contents)
 	var wired []WireContent
 	var pendingCalls []FunctionCall
+	answering := false
 	for index, content := range contents {
+		answered := slices.ContainsFunc(content.Parts, func(part Part) bool { return part.FunctionResult != nil })
+		if claude && len(pendingCalls) > 0 && (content.Role == RoleUser && !answered || content.Role == RoleAssistant && answering) {
+			wired = appendResults(wired, wireRoleUser, interruptedResults(pendingCalls))
+			pendingCalls = nil
+		}
+		answering = content.Role != RoleAssistant
 		content, err := linkFunctionResults(content, &pendingCalls)
 		if err != nil {
 			return nil, fmt.Errorf("contents[%d]: %w", index, err)
@@ -354,6 +404,9 @@ func wireContents(contents []Content, model CatalogModel) ([]WireContent, error)
 		default:
 			wired = appendContent(appendResults(wired, wireRoleModel, results), wireRoleUser, rest)
 		}
+	}
+	if claude && len(pendingCalls) > 0 && answering {
+		wired = appendResults(wired, wireRoleUser, interruptedResults(pendingCalls))
 	}
 	return wired, nil
 }
@@ -530,18 +583,19 @@ func regroupResults(contents []Content) []Content {
 	return regrouped
 }
 
-// linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按调用顺序取第一个同名（结果无名称时取第一个）待返回调用补齐；不含函数结果的 user 轮清空待返回调用，无法关联时返回错误
+// linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按调用顺序取第一个同名（结果无名称时取第一个）待返回调用补齐；关联不到调用的函数结果改写为 {"functionResponse":{"name","response"}} 文本转录，其中的媒体随后作为普通 part；不含函数结果的 user 轮清空待返回调用
 func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content, error) {
 	if content.Role == RoleUser && !slices.ContainsFunc(content.Parts, func(part Part) bool { return part.FunctionResult != nil }) {
 		*pendingCalls = nil
 	}
-	cloned := false
+	parts := make([]Part, 0, len(content.Parts))
 	for index, part := range content.Parts {
 		if part.FunctionCall != nil {
 			*pendingCalls = append(*pendingCalls, *part.FunctionCall)
 		}
 		result := part.FunctionResult
 		if result == nil {
+			parts = append(parts, part)
 			continue
 		}
 		matched := slices.IndexFunc(*pendingCalls, func(call FunctionCall) bool { return result.ID != "" && call.ID == result.ID })
@@ -549,23 +603,37 @@ func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content
 			matched = slices.IndexFunc(*pendingCalls, func(call FunctionCall) bool { return result.Name == "" || call.Name == result.Name })
 		}
 		if matched < 0 {
-			if result.Name == "" {
-				return Content{}, fmt.Errorf("part %d: function result has no name and matches no function call", index)
+			transcript, err := marshal(map[string]any{"functionResponse": map[string]any{"name": result.Name, "response": result.Content}})
+			if err != nil {
+				return Content{}, fmt.Errorf("part %d: function result: %w", index, err)
 			}
+			parts = append(append(parts, Part{Text: string(transcript)}), result.Parts...)
 			continue
 		}
 		if result.Name == "" || result.ID == "" {
-			if !cloned {
-				content.Parts = slices.Clone(content.Parts)
-				cloned = true
-			}
 			linked := *result
 			linked.Name, linked.ID = cmp.Or(result.Name, (*pendingCalls)[matched].Name), cmp.Or(result.ID, (*pendingCalls)[matched].ID)
-			content.Parts[index].FunctionResult = &linked
+			part.FunctionResult = &linked
 		}
+		parts = append(parts, part)
 		*pendingCalls = slices.Delete(*pendingCalls, matched, matched+1)
 	}
+	content.Parts = parts
 	return content, nil
+}
+
+// interruptedOutput 为 Claude 族中没有回传结果的函数调用补上的函数结果正文
+const interruptedOutput = "Tool execution interrupted. No result provided."
+
+// interruptedResults 为没有回传结果的函数调用生成正文为 interruptedOutput 的函数结果
+func interruptedResults(calls []FunctionCall) []WirePart {
+	parts := make([]WirePart, 0, len(calls))
+	for _, call := range calls {
+		response := &WireFunctionResponse{ID: call.ID, Name: call.Name}
+		response.Response.Output = interruptedOutput
+		parts = append(parts, WirePart{FunctionResponse: response})
+	}
+	return parts
 }
 
 // functionOutput 返回函数结果在 response.output 中的文本：JSON 字符串与只有 output 字符串的对象取该文本，其余 JSON 取紧凑编码
@@ -636,6 +704,7 @@ type streamChunk struct {
 			Content           WireContent `json:"content"`
 			FinishReason      string      `json:"finishReason"`
 			FinishMessage     string      `json:"finishMessage"`
+			ContinuationToken string      `json:"continuationToken"`
 			GroundingMetadata *Grounding  `json:"groundingMetadata"`
 		} `json:"candidates"`
 		UsageMetadata *struct {
@@ -645,6 +714,10 @@ type streamChunk struct {
 			CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
 			TotalTokenCount         int64 `json:"totalTokenCount"`
 		} `json:"usageMetadata"`
+		PromptFeedback *struct {
+			BlockReason        string `json:"blockReason"`
+			BlockReasonMessage string `json:"blockReasonMessage"`
+		} `json:"promptFeedback"`
 		ModelVersion string `json:"modelVersion"`
 		ResponseID   string `json:"responseId"`
 	} `json:"response"`
@@ -663,8 +736,80 @@ type Exchange struct {
 	Response []byte
 }
 
-// StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回本次请求与响应的正文；Tab 补全信封以编辑器版的 User-Agent 发出
+// StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回本次请求与响应的正文；Tab 补全信封以编辑器版的 User-Agent 发出。上游以 CONTINUATION 结束一跳时以同一信封带上续接令牌发下一跳，各跳事件接在同一通道，后续各跳的用量加上此前各跳的合计，以 CONTINUATION 结束的一跳不发出自己的 usage 事件；交换记录的请求正文为第一跳的，响应正文为各跳依次相接
 func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (<-chan Event, *Exchange, error) {
+	exchange := &Exchange{URL: c.base + "/v1internal:streamGenerateContent?alt=sse"}
+	response, payload, err := c.streamHop(ctx, envelope, exchange)
+	exchange.Request = payload
+	if err != nil {
+		return nil, exchange, err
+	}
+	events := make(chan Event)
+	go func() {
+		defer close(events)
+		var before Usage
+		for {
+			hop := make(chan Event)
+			var body bytes.Buffer
+			go func() {
+				defer close(hop)
+				defer response.Body.Close()
+				DecodeStream(io.TeeReader(response.Body, &body), hop)
+			}()
+			var token string
+			var last Usage
+			var usage *Event
+			for event := range hop {
+				if event.Kind == EventFinish && event.FinishReason == "CONTINUATION" && event.ContinuationToken != "" {
+					token, usage = event.ContinuationToken, nil
+					continue
+				}
+				if event.Usage != nil {
+					last = *event.Usage
+					event.Usage = addUsage(before, last)
+				}
+				if event.Kind == EventUsage {
+					usage = &event
+					continue
+				}
+				if usage != nil {
+					events <- *usage
+					usage = nil
+				}
+				events <- event
+			}
+			if usage != nil {
+				events <- *usage
+			}
+			exchange.Response = append(exchange.Response, body.Bytes()...)
+			if token == "" {
+				return
+			}
+			before = *addUsage(before, last)
+			envelope.Request.ContinuationToken = token
+			if response, _, err = c.streamHop(ctx, envelope, exchange); err != nil {
+				events <- Event{Kind: EventError, Err: err}
+				return
+			}
+		}
+	}()
+	return events, exchange, nil
+}
+
+// addUsage 返回此前各跳的合计 a 与这一跳的用量 b 逐项相加的结果，PromptTokens 为第一跳的输入
+func addUsage(a, b Usage) *Usage {
+	return &Usage{
+		InputTokens:     a.InputTokens + b.InputTokens,
+		CachedTokens:    a.CachedTokens + b.CachedTokens,
+		OutputTokens:    a.OutputTokens + b.OutputTokens,
+		ReasoningTokens: a.ReasoningTokens + b.ReasoningTokens,
+		TotalTokens:     a.TotalTokens + b.TotalTokens,
+		PromptTokens:    cmp.Or(a.PromptTokens, b.InputTokens),
+	}
+}
+
+// streamHop 发出一次 streamGenerateContent，返回状态码 2xx 的响应与请求正文；非 2xx 时读出正文追加到交换记录并返回 UpstreamError
+func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exchange) (*http.Response, []byte, error) {
 	encode := c.device.hubJSON
 	if envelope.RequestType == requestTypeTab {
 		encode = marshal
@@ -673,10 +818,9 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 	if err != nil {
 		return nil, nil, err
 	}
-	exchange := &Exchange{URL: c.base + "/v1internal:streamGenerateContent?alt=sse", Request: payload}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, exchange.URL, io.NopCloser(bytes.NewReader(payload)))
 	if err != nil {
-		return nil, exchange, err
+		return nil, payload, err
 	}
 	agent := c.device.UserAgent()
 	if envelope.RequestType == requestTypeTab {
@@ -686,30 +830,23 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.http.Do(c.traced(request))
 	if err != nil {
-		return nil, exchange, err
+		return nil, payload, err
 	}
 	if response.StatusCode/100 != 2 {
 		defer response.Body.Close()
-		exchange.Response, _ = io.ReadAll(response.Body)
-		return nil, exchange, &UpstreamError{Status: response.StatusCode, Body: exchange.Response}
+		body, _ := io.ReadAll(response.Body)
+		exchange.Response = append(exchange.Response, body...)
+		return nil, payload, &UpstreamError{Status: response.StatusCode, Body: body}
 	}
-	events := make(chan Event)
-	go func() {
-		defer close(events)
-		defer response.Body.Close()
-		var body bytes.Buffer
-		DecodeStream(io.TeeReader(response.Body, &body), events)
-		exchange.Response = body.Bytes()
-	}()
-	return events, exchange, nil
+	return response, payload, nil
 }
 
-// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion，usageMetadata 没有 promptTokenCount 时输入用量取总量减去输出与思考；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；已发出函数调用后上游没有结束帧就结束或读取中断时以 STOP 结束、结束事件的 Err 带该原因；不带 role 的过滤提示记为原因 OTHER，它与内容策略类原因在已发出函数调用时以 STOP 结束、结束事件的 Err 带被忽略的 ContentPolicyError，否则以 ContentPolicyError 结束
+// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion，usageMetadata 没有 promptTokenCount 时输入用量取总量减去输出与思考；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；已发出函数调用后上游没有结束帧就结束或读取中断时以 STOP 结束、结束事件的 Err 带该原因；promptFeedback 的 blockReason 在没有发出函数调用时以安全设置、屏蔽词或禁止内容结束为 PromptFeedbackError；不带 role 的过滤提示记为原因 OTHER，它、其余 blockReason 与内容策略类原因在已发出函数调用时以 STOP 结束、结束事件的 Err 带被忽略的 ContentPolicyError，否则以 ContentPolicyError 结束
 func DecodeStream(reader io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 64<<20)
 	var usage *Usage
-	var called, filtered bool
+	var called, filtered, prompted bool
 	finish := Event{Kind: EventFinish}
 	for scanner.Scan() {
 		line, ok := bytes.CutPrefix(scanner.Bytes(), []byte("data: "))
@@ -739,6 +876,10 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 				TotalTokens:     metadata.TotalTokenCount,
 			}
 		}
+		if feedback := chunk.Response.PromptFeedback; feedback != nil && feedback.BlockReason != "" {
+			prompted = true
+			finish.FinishReason, finish.FinishMessage = feedback.BlockReason, feedback.BlockReasonMessage
+		}
 		for _, candidate := range chunk.Response.Candidates {
 			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, filterBlockedText) {
 				filtered = true
@@ -754,7 +895,7 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 			}
 			switch {
 			case candidate.FinishReason != "":
-				finish.FinishReason, finish.FinishMessage = candidate.FinishReason, candidate.FinishMessage
+				finish.FinishReason, finish.FinishMessage, finish.ContinuationToken = candidate.FinishReason, candidate.FinishMessage, candidate.ContinuationToken
 			case candidate.FinishMessage != "":
 				finish.FinishReason, finish.FinishMessage = "IMAGE_OTHER", candidate.FinishMessage
 			}
@@ -777,7 +918,11 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 		}
 		finish.FinishReason, finish.Err = "STOP", cmp.Or(finish.Err, ErrIncompleteStream)
 	}
-	if filtered || contentPolicyFinish(finish.FinishReason) {
+	if prompted && !called && inputBlock(finish.FinishReason) {
+		events <- Event{Kind: EventError, Err: &PromptFeedbackError{Reason: finish.FinishReason, Message: finish.FinishMessage, Usage: usage}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+		return
+	}
+	if filtered || prompted || contentPolicyFinish(finish.FinishReason) {
 		policy := &ContentPolicyError{Reason: finish.FinishReason, Message: finish.FinishMessage}
 		if !called {
 			events <- Event{Kind: EventError, Err: policy, TraceID: finish.TraceID, ResponseID: finish.ResponseID}

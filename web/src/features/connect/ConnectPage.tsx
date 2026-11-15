@@ -1,8 +1,9 @@
-import { Code, KeyRound, Link2 } from 'lucide-react'
+import { Code, KeyRound, Link2, Sparkles } from 'lucide-react'
 
 import { Card, CardBody, CardHeader } from '@/components/ui/card'
 import { PageHeader } from '@/components/ui/page'
 import { AddKeyButton, ApiKeyList, useApiKeys } from '@/features/connect/ApiKeys'
+import { CapabilityList } from '@/features/connect/CapabilityList'
 import { ClientConfigs } from '@/features/connect/ClientConfigs'
 import { EndpointList } from '@/features/connect/EndpointList'
 import { codeText, useMessages } from '@/lib/i18n'
@@ -26,13 +27,13 @@ function KeysCard() {
   )
 }
 
-// ConnectPage 是接入页：三种协议的接口地址、API key 管理与各客户端的现成配置
+// ConnectPage 是接入页：三种协议的接口地址、API key 管理、按用途列出的能力与示例和各客户端的现成配置
 export function ConnectPage() {
   const m = useMessages('connect')
   return (
     <>
       <PageHeader title={m.title} />
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
         <Card>
           <CardHeader
             icon={<Link2 size={16} aria-hidden />}
@@ -45,6 +46,16 @@ export function ConnectPage() {
         </Card>
         <KeysCard />
       </div>
+      <Card>
+        <CardHeader
+          icon={<Sparkles size={16} aria-hidden />}
+          title={m.capabilities}
+          description={m.capabilitiesHint}
+        />
+        <CardBody>
+          <CapabilityList />
+        </CardBody>
+      </Card>
       <Card>
         <CardHeader
           icon={<Code size={16} aria-hidden />}

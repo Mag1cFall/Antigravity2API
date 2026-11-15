@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,18 @@ func (s *server) createLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, state)
+}
+
+// listLogins 返回进行中的登录，按开始先后排列
+func (s *server) listLogins(w http.ResponseWriter, r *http.Request) {
+	s.logins.mu.Lock()
+	states := make([]loginState, 0, len(s.logins.items))
+	for _, item := range s.logins.items {
+		states = append(states, item.state)
+	}
+	s.logins.mu.Unlock()
+	slices.SortFunc(states, func(a, b loginState) int { return a.ExpiresAt.Compare(b.ExpiresAt) })
+	writeJSON(w, http.StatusOK, states)
 }
 
 // cancelLogin 取消进行中的登录，结果经事件流推送

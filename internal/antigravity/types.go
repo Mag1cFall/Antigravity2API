@@ -154,6 +154,8 @@ type GenerateRequest struct {
 	Unary bool `json:"-"`
 	// Background 标记客户端不等待输出的后台响应
 	Background bool `json:"-"`
+	// KeepAbnormalFinish 表示异常结束重新生成用完且没有输出时仍以该结束原因结束，供按官方形状输出的 Gemini 入口使用
+	KeepAbnormalFinish bool `json:"-"`
 }
 
 // Model 表示实时模型目录中的模型
@@ -182,6 +184,8 @@ type Usage struct {
 	OutputTokens    int64 `json:"output_tokens"`
 	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
 	TotalTokens     int64 `json:"total_tokens"`
+	// PromptTokens 是第一跳的输入 token 数，长输出续接时 InputTokens 为各跳输入之和
+	PromptTokens int64 `json:"-"`
 }
 
 // EventKind 表示规范流事件类型
@@ -258,6 +262,8 @@ type Event struct {
 	ThoughtSignature string `json:"thought_signature,omitempty"`
 	// StopSequence 为本地停止序列命中时结束事件上的序列
 	StopSequence string `json:"stop_sequence,omitempty"`
+	// ContinuationToken 为上游以 CONTINUATION 结束一跳时结束事件上的续接令牌
+	ContinuationToken string `json:"-"`
 	// Grounding 为搜索事件的来源
 	Grounding *Grounding `json:"grounding,omitempty"`
 	// Err 为错误事件的错误；结束事件上为已发出函数调用后被忽略的内容策略结束、缺少结束帧或读取中断

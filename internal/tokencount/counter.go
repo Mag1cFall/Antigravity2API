@@ -20,8 +20,8 @@ import (
 
 	_ "golang.org/x/image/webp"
 
+	"github.com/Mag1cFall/tiktoken-go"
 	sentencepiece "github.com/eliben/go-sentencepiece"
-	"github.com/pkoukk/tiktoken-go"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )

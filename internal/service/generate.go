@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -183,6 +184,8 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 	deadline := watch(ctx, cfg.RequestTimeout)
 	tried := make(map[string]bool)
 	waited := make(map[string]bool)
+	// reconnect 为最近一次连接错误的账户，没有其他可调度账户时在它上面再试一次，每个请求只再试一次
+	reconnect, reconnected := "", false
 	var last error
 	attempts := 0
 	turns := make(map[string]*antigravity.SessionTurn)
@@ -233,7 +236,7 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 		return s.fail(ctx, stream.current, stream.lease.Model, stream.err, composer.Tier())
 	}
 	hedged := false
-	// open 在尚未尝试的账户上发出生成请求并等待首个上游事件，本请求还没有发起过备用请求时按 hedgeDelay 发起一个，返回胜出的上游尝试；broken 为上一次尝试的流中断原因，此时换新的输出处理，已尝试 maxAccounts 个账户或超时后返回它；again 不为空时该账户可再次使用且不计入尝试数
+	// open 在尚未尝试的账户上发出生成请求并等待首个上游事件，本请求还没有发起过备用请求时按 hedgeDelay 发起一个，返回胜出的上游尝试；broken 为上一次尝试的流中断原因，此时换新的输出处理，已尝试 maxAccounts 个账户或超时后返回它；again 不为空时该账户可再次使用且不计入尝试数；没有其他可调度账户时在最近一次连接错误的账户上再试一次
 	open := func(broken error, again string) (*upstreamStream, error) {
 		if again != "" {
 			delete(tried, again)
@@ -248,7 +251,13 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 		}
 		for {
 			attempts++
-			lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, skip(request, tried), s.lowerTier(model))
+			lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, skip(request, tried, s.store.Enabled), s.lowerTier(model))
+			if err != nil && reconnect != "" && !reconnected && deadline.Err() == nil {
+				reconnected = true
+				delete(tried, reconnect)
+				attempts--
+				continue
+			}
 			if err != nil {
 				var cooldown *balancer.CooldownError
 				if last != nil && errors.As(err, &cooldown) {
@@ -305,6 +314,9 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 				attempts--
 				continue
 			}
+			if switched && connectionFailure(err) {
+				reconnect = stream.lease.ID
+			}
 			if !switched || attempts >= accountLimit(err) || deadline.Err() != nil {
 				return nil, deadline.failure(err)
 			}
@@ -318,7 +330,7 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 		deadline.stop()
 		return nil, err
 	}
-	return s.relay(ctx, deadline, stream, open, request.Unary, digests, session.Cascade, composer.Tier()), nil
+	return s.relay(ctx, deadline, stream, open, request, digests, session.Cascade, composer.Tier()), nil
 }
 
 // upstreamStream 表示一次上游尝试：账户租约、上游事件、往返正文、开始时刻、本次尝试的输出处理与会话轮次；hedge 标记备用请求，begun 为发出时刻，first 与 firstAt 为首个上游事件及其到达时刻，err 为流开始前的错误，cancel 取消本次尝试，done 在流开始失败或收到首个事件后关闭
@@ -443,11 +455,13 @@ func attempt(account string, exchange *antigravity.Exchange, started time.Time, 
 	return record
 }
 
-// fail 按上游错误原因处理账户并写日志：内容策略结束（含过滤提示）与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
+// fail 按上游错误原因处理账户并写日志：内容策略结束（含过滤提示）、输入拒绝、异常结束用完重新生成与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
 func (s *Service) fail(ctx context.Context, current *account, model antigravity.CatalogModel, err error, tier prompt.Tier) bool {
 	var policy *antigravity.ContentPolicyError
+	var feedback *antigravity.PromptFeedbackError
+	var abnormal *antigravity.AbnormalFinishError
 	var local *Error
-	if errors.As(err, &policy) || errors.As(err, &local) {
+	if errors.As(err, &policy) || errors.As(err, &feedback) || errors.As(err, &abnormal) || errors.As(err, &local) {
 		return false
 	}
 	var upstream *antigravity.UpstreamError
@@ -476,7 +490,7 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 	case upstream.Status == http.StatusForbidden && (reason == "VALIDATION_REQUIRED" || strings.Contains(strings.ToLower(message), "verify your account")):
 		slog.WarnContext(ctx, "账户需要验证，停止请求", "source", current.id)
 		s.mu.Lock()
-		s.stop(current.id, "需要验证："+string(upstream.Body))
+		s.stop(current.id, verifyReason(upstream.Body))
 		s.mu.Unlock()
 	case upstream.Status == http.StatusForbidden && (reason == "TOS_VIOLATION" || strings.Contains(strings.ToLower(message), "terms of service")):
 		slog.ErrorContext(ctx, "账户违反服务条款，已停用", "source", current.id)
@@ -529,6 +543,12 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 		return false
 	}
 	return true
+}
+
+// connectionFailure 判断错误是否为发出请求或读取响应头时的连接错误（连接断开、HTTP/2 流被重置等），不含认证失败与取消
+func connectionFailure(err error) bool {
+	var transport *url.Error
+	return errors.As(err, &transport) && !unauthorized(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // unauthorized 判断错误是否为账户认证失败：上游 401 或 token 端点拒绝刷新
@@ -628,25 +648,26 @@ func localTimes(times []int64, device antigravity.Device) []string {
 	return formatted
 }
 
-// skip 返回请求不能使用的账户判断：已尝试的账户，指定 AccountID 时其余账户，Accounts 非空时不在其中的账户
-func skip(request antigravity.GenerateRequest, tried map[string]bool) func(string) bool {
+// skip 返回请求不能使用的账户判断：已尝试的账户，指定 AccountID 时其余账户，Accounts 非空时不在其中的账户，以及没有被请求指定的停用账户（手动预热临时初始化的账户）
+func skip(request antigravity.GenerateRequest, tried map[string]bool, enabled func(string) bool) func(string) bool {
 	return func(id string) bool {
-		return tried[id] || request.AccountID != "" && id != request.AccountID || len(request.Accounts) > 0 && !slices.Contains(request.Accounts, id)
+		return tried[id] || request.AccountID != "" && id != request.AccountID || len(request.Accounts) > 0 && !slices.Contains(request.Accounts, id) || id != request.AccountID && !enabled(id)
 	}
 }
 
-// relay 转发一次上游尝试的事件：客户端尚未收到正文、函数调用与媒体时按失败原因经 open 在同一账户重新生成或换账户，正常结束时记下会话状态、归还槽位并关闭输出
-func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstreamStream, open func(error, string) (*upstreamStream, error), unary bool, digests []string, cascade string, tier prompt.Tier) <-chan antigravity.Event {
+// relay 转发一次上游尝试的事件：客户端尚未收到正文、函数调用与媒体时按失败原因经 open 在同一账户重新生成或换账户，正常结束时记下会话状态、归还槽位并关闭输出；request 为非流式时事件暂存到结束，没有要求保留异常结束时，重新生成用完仍以格式错误的函数调用、意外的工具调用或格式错误的回复结束、且没有正文、函数调用、媒体与可见思考的生成以 AbnormalFinishError 结束
+func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstreamStream, open func(error, string) (*upstreamStream, error), request antigravity.GenerateRequest, digests []string, cascade string, tier prompt.Tier) <-chan antigravity.Event {
 	events := make(chan antigravity.Event)
 	go func() {
 		defer deadline.stop()
 		regenerated := 0
 		for {
 			var held []antigravity.Event
-			delivered, committed := false, false
+			delivered, committed, reasoned := false, false, false
 			emit := func(event antigravity.Event) {
 				committed = committed || content(event)
-				if unary || event.Kind == antigravity.EventError || !committed && (event.Kind == antigravity.EventUsage || event.Kind == antigravity.EventFinish) {
+				reasoned = reasoned || event.Kind == antigravity.EventReasoning && event.Text != ""
+				if request.Unary || event.Kind == antigravity.EventError || !committed && (event.Kind == antigravity.EventUsage || event.Kind == antigravity.EventFinish) {
 					held = append(held, event)
 					return
 				}
@@ -658,15 +679,23 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 				deliver(ctx, events, event)
 			}
 			reported, final, err := forward(stream.events, emit, stream.out, deadline)
-			record := stream.record(err, final)
 			retry := regenerable(ctx, err, final, committed)
 			regenerate := retry != nil && open != nil && regenerated < regenerations
+			if retry != nil && open != nil && !regenerate && err == nil && !request.KeepAbnormalFinish && (request.Config.HideThinking || !reasoned) && abnormalFinish(final.FinishReason) {
+				err = &antigravity.AbnormalFinishError{Reason: final.FinishReason, Message: final.FinishMessage, Usage: reported}
+				for index, event := range held {
+					if event.Kind == antigravity.EventFinish {
+						held[index] = antigravity.Event{Kind: antigravity.EventError, Err: err}
+					}
+				}
+			}
+			record := stream.record(err, final)
 			switched := !regenerate && err != nil && s.fail(ctx, stream.current, stream.lease.Model, err, tier)
 			if regenerate || switched && open != nil && !delivered && ctx.Err() == nil {
 				record.Usage = reported
 			}
 			requestdb.TraceFrom(ctx).AddAttempt(record)
-			if final.Err != nil {
+			if final.Kind == antigravity.EventFinish && final.Err != nil {
 				slog.WarnContext(ctx, "上游在函数调用之后异常结束，按 STOP 结束 | 错误="+final.Err.Error(), "source", stream.current.id)
 			}
 			if regenerate {
@@ -702,7 +731,7 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 			}
 			succeeded := err == nil && reported != nil
 			if succeeded && stream.out != nil {
-				if err := s.conversations.record(cascade, digests, stream.out.reply(), stream.lease.Model.ID, len(stream.out.prompt.Contents), reported.InputTokens, stream.out.signatures()); err != nil {
+				if err := s.conversations.record(cascade, digests, stream.out.reply(), stream.lease.Model.ID, len(stream.out.prompt.Contents), stream.out.prefixTokens(*reported), stream.out.signatures()); err != nil {
 					slog.WarnContext(ctx, "写入会话记录失败 | 错误="+err.Error(), "source", stream.lease.ID)
 				}
 			}
@@ -720,6 +749,15 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 	return events
 }
 
+// abnormalFinish 判断结束原因是否为格式错误的函数调用、意外的工具调用或格式错误的回复
+func abnormalFinish(reason string) bool {
+	switch strings.ToUpper(reason) {
+	case "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE":
+		return true
+	}
+	return false
+}
+
 // content 判断事件是否为客户端收到后不能随重新生成丢弃的正文、函数调用或媒体
 func content(event antigravity.Event) bool {
 	switch event.Kind {
@@ -731,7 +769,7 @@ func content(event antigravity.Event) bool {
 	return false
 }
 
-// regenerable 返回尝试可在客户端尚未收到内容时重新生成的原因：流中断（提前结束、连接重置、HTTP/2 流重置、TLS 记录错误等读取错误）、流尾 5xx，或以函数调用格式错误、意外的工具调用或没有内容的 STOP 结束；上游 4xx、内容策略结束、本地错误与超时返回 nil
+// regenerable 返回尝试可在客户端尚未收到内容时重新生成的原因：流中断（提前结束、连接重置、HTTP/2 流重置、TLS 记录错误等读取错误）、流尾 5xx，或以函数调用格式错误、意外的工具调用、格式错误的回复或没有内容的 STOP 结束；上游 4xx、内容策略结束、输入拒绝、本地错误与超时返回 nil
 func regenerable(ctx context.Context, err error, final antigravity.Event, committed bool) error {
 	if committed || ctx.Err() != nil {
 		return nil
@@ -739,6 +777,7 @@ func regenerable(ctx context.Context, err error, final antigravity.Event, commit
 	if err != nil {
 		var upstream *antigravity.UpstreamError
 		var policy *antigravity.ContentPolicyError
+		var feedback *antigravity.PromptFeedbackError
 		var local *Error
 		switch {
 		case errors.As(err, &upstream):
@@ -746,14 +785,14 @@ func regenerable(ctx context.Context, err error, final antigravity.Event, commit
 				return err
 			}
 			return nil
-		case errors.As(err, &policy), errors.As(err, &local), errors.Is(err, requestdb.ErrRequestTimeout), errors.Is(err, context.Canceled):
+		case errors.As(err, &policy), errors.As(err, &feedback), errors.As(err, &local), errors.Is(err, requestdb.ErrRequestTimeout), errors.Is(err, context.Canceled):
 			return nil
 		}
 		return err
 	}
 	if final.Kind == antigravity.EventFinish {
 		switch strings.ToUpper(final.FinishReason) {
-		case "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "STOP":
+		case "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE", "STOP":
 			return fmt.Errorf("上游以 %s 结束且没有内容", final.FinishReason)
 		}
 	}

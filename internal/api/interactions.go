@@ -205,10 +205,8 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		w = &discardResponseWriter{header: http.Header{}, body: failure}
 	}
 	r = r.WithContext(ctx)
-	events, err := s.service.Generate(ctx, generate)
-	if err == nil && request.Stream {
-		events, _, err = awaitStreamStart(ctx, events)
-	}
+	start := func() (<-chan antigravity.Event, error) { return s.service.Generate(ctx, generate) }
+	events, _, err := startGeneration(ctx, request.Stream, start)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeGeminiRequestError(w, err)

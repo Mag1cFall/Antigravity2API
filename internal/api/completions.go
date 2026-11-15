@@ -50,13 +50,16 @@ func (s *server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := newID("cmpl")
-	events, err := s.service.Generate(r.Context(), antigravity.GenerateRequest{
-		ID:       id,
-		Model:    request.Model,
-		Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: []antigravity.Part{{Text: prompt}}}},
-		Suffix:   request.Suffix,
-		Unary:    !request.Stream || s.fakeStream(),
-	})
+	generate := func() (<-chan antigravity.Event, error) {
+		return s.service.Generate(r.Context(), antigravity.GenerateRequest{
+			ID:       id,
+			Model:    request.Model,
+			Contents: []antigravity.Content{{Role: antigravity.RoleUser, Parts: []antigravity.Part{{Text: prompt}}}},
+			Suffix:   request.Suffix,
+			Unary:    !request.Stream || s.fakeStream(),
+		})
+	}
+	events, _, err := startGeneration(r.Context(), request.Stream, generate)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeOpenAIRequestError(w, err)

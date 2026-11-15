@@ -197,7 +197,7 @@ func (t *Trace) AddAttempt(attempt Attempt) {
 		index, attempt.Status, attempt.Code, attempt.RetryDelay, attempt.DurationMS, attempt.Error))
 }
 
-// Observe 按生成事件累计首事件耗时、用量、工具调用、终止原因、上游模型版本与流中错误；其他事件携带的累计用量暂存，流在 usage 事件之前结束时由 Finish 计入
+// Observe 按生成事件累计首事件耗时、用量、工具调用、是否输出图片、终止原因、上游模型版本与流中错误；其他事件携带的累计用量暂存，流在 usage 事件之前结束时由 Finish 计入
 func (t *Trace) Observe(event antigravity.Event) {
 	if t == nil {
 		return
@@ -215,6 +215,8 @@ func (t *Trace) Observe(event antigravity.Event) {
 		if event.Kind == antigravity.EventToolCall {
 			t.row.ToolCalls++
 		}
+	case antigravity.EventMedia:
+		t.row.ImageOutput = t.row.ImageOutput || strings.HasPrefix(event.Media.MIME, "image/")
 	case antigravity.EventUsage:
 		t.addUsage(event.Usage)
 		t.pending = nil

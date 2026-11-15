@@ -37,17 +37,12 @@ func (s *server) startChatChoices(ctx context.Context, request antigravity.Gener
 		events := make(chan antigravity.Event)
 		choices.events[index] = events
 		go func() {
-			upstream, err := s.service.Generate(choices.ctx, choice)
-			source := upstream
-			if err == nil && stream {
-				source, _, err = awaitStreamStart(choices.ctx, upstream)
-			}
+			generate := func() (<-chan antigravity.Event, error) { return s.service.Generate(choices.ctx, choice) }
+			upstream, _, err := startGeneration(choices.ctx, stream, generate)
 			started <- err
+			source := upstream
 			if err != nil {
-				failed := make(chan antigravity.Event, 1)
-				failed <- antigravity.Event{Kind: antigravity.EventError, Err: err}
-				close(failed)
-				source = failed
+				source = failedEvents(err)
 			}
 			relayEvents(choices.ctx, source, events)
 			if upstream != nil {

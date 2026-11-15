@@ -161,7 +161,7 @@ func (s *Service) hedgeLease(request antigravity.GenerateRequest, primary string
 			idle[id] = true
 		}
 	}
-	excluded := skip(request, tried)
+	excluded := skip(request, tried, s.store.Enabled)
 	lowerTier := s.lowerTier(model)
 	if lease, err := s.pool.Acquire(now, model.ID, "", func(id string) bool { return excluded(id) || !idle[id] }, lowerTier); err == nil {
 		return lease

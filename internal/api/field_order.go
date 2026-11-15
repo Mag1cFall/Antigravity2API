@@ -282,14 +282,17 @@ func (order *fieldOrder) object(fields map[string]any, parent string) any {
 				Capabilities:               fields["capabilities"],
 				CapabilityOptions:          fields["capability_options"],
 				Channels:                   fields["channels"],
-				DefaultThinkingLevel:       fields["default_thinking_level"],
+				ContextLength:              fields["context_length"],
+				DefaultReasoningLevel:      fields["default_reasoning_level"],
 				Description:                fields["description"],
+				InputModalities:            fields["input_modalities"],
 				InputTokenLimit:            fields["input_token_limit"],
+				MaxCompletionTokens:        fields["max_completion_tokens"],
 				Name:                       fields["name"],
 				OutputTokenLimit:           fields["output_token_limit"],
 				Paid:                       fields["paid"],
 				SupportedGenerationMethods: fields["supported_generation_methods"],
-				ThinkingLevels:             fields["thinking_levels"],
+				SupportedReasoningLevels:   fields["supported_reasoning_levels"],
 			}
 		}
 	}
@@ -420,14 +423,17 @@ type openAIModelJSON struct {
 	Capabilities               any `json:"capabilities,omitempty"`
 	CapabilityOptions          any `json:"capability_options,omitempty"`
 	Channels                   any `json:"channels,omitempty"`
-	DefaultThinkingLevel       any `json:"default_thinking_level,omitempty"`
+	ContextLength              any `json:"context_length,omitempty"`
+	DefaultReasoningLevel      any `json:"default_reasoning_level,omitempty"`
 	Description                any `json:"description,omitempty"`
+	InputModalities            any `json:"input_modalities,omitempty"`
 	InputTokenLimit            any `json:"input_token_limit,omitempty"`
+	MaxCompletionTokens        any `json:"max_completion_tokens,omitempty"`
 	Name                       any `json:"name,omitempty"`
 	OutputTokenLimit           any `json:"output_token_limit,omitempty"`
 	Paid                       any `json:"paid,omitempty"`
 	SupportedGenerationMethods any `json:"supported_generation_methods,omitempty"`
-	ThinkingLevels             any `json:"thinking_levels,omitempty"`
+	SupportedReasoningLevels   any `json:"supported_reasoning_levels,omitempty"`
 }
 
 // ranksFor 返回对象所属种类的字段先后：Global 优先，否则按 type、object 或所在字段名查 Kinds

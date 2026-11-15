@@ -18,6 +18,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/tokencount"
 )
 
 // finishStopSequence 为本地停止序列命中时的结束原因
@@ -208,6 +209,15 @@ func sourceIn(web antigravity.GroundingWeb, domains []string) bool {
 	return false
 }
 
+// prefixTokens 返回会话校准记下的前缀 token 数：第一跳的上游输入用量减去本次接在最后一个用户轮上的输出格式指令，下一轮该指令移到新的最后一个用户轮
+func (o *output) prefixTokens(reported antigravity.Usage) int64 {
+	tokens := cmp.Or(reported.PromptTokens, reported.InputTokens)
+	if o.json != nil && o.json.instruction != "" {
+		tokens -= tokencount.Text(o.provider, o.json.instruction)
+	}
+	return tokens
+}
+
 // signatures 返回本次输出中的思考签名
 func (o *output) signatures() signatureRecord {
 	return o.signed
@@ -383,13 +393,14 @@ func (contract *toolContract) check(call antigravity.FunctionCall, count int) er
 	return nil
 }
 
-// jsonOutput 表示暂存的结构化正文、其签名与模型，以及输出的 Schema 或枚举值
+// jsonOutput 表示暂存的结构化正文、其签名与模型，输出的 Schema 或枚举值，以及接在最后一个用户轮上的输出格式指令
 type jsonOutput struct {
-	schema    *schemaValidator
-	enum      []string
-	text      strings.Builder
-	signature string
-	model     string
+	schema      *schemaValidator
+	enum        []string
+	text        strings.Builder
+	signature   string
+	model       string
+	instruction string
 }
 
 // validate 去掉首尾空白与 Markdown 代码块围栏后校验 JSON 与 Schema，返回去掉围栏的正文；要求枚举时正文去掉引号后须为其中一个值

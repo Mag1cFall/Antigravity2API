@@ -6,6 +6,7 @@ import magpieIcon from '@lobehub/icons-static-svg/icons/magpie.svg?raw'
 import openClawIcon from '@lobehub/icons-static-svg/icons/openclaw-color.svg?raw'
 import openCodeIcon from '@lobehub/icons-static-svg/icons/opencode.svg?raw'
 
+import { curlExample } from '@/features/connect/capabilities'
 import type { Model } from '@/features/models/types'
 import type { Catalog } from '@/locales/zh-CN'
 
@@ -644,31 +645,15 @@ export const clients: Client[] = [
         blocks: [
           {
             file: 'OpenAI Chat Completions',
-            code: [
-              `curl ${input.origin}/v1/chat/completions \\`,
-              `  -H "Authorization: Bearer ${input.key}" \\`,
-              '  -H "Content-Type: application/json" \\',
-              `  -d '{"model": "${input.modelID}", "stream": true, "messages": [{"role": "user", "content": "Hello"}]}'`,
-            ].join('\n'),
+            code: curlExample('openai', input.origin, input.key, input.modelID),
           },
           {
             file: 'Anthropic Messages',
-            code: [
-              `curl ${input.origin}/v1/messages \\`,
-              `  -H "x-api-key: ${input.key}" \\`,
-              '  -H "anthropic-version: 2023-06-01" \\',
-              '  -H "Content-Type: application/json" \\',
-              `  -d '{"model": "${input.modelID}", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hello"}]}'`,
-            ].join('\n'),
+            code: curlExample('anthropic', input.origin, input.key, input.modelID),
           },
           {
             file: 'Gemini generateContent',
-            code: [
-              `curl "${input.origin}/v1beta/models/${input.modelID}:generateContent" \\`,
-              `  -H "x-goog-api-key: ${input.key}" \\`,
-              '  -H "Content-Type: application/json" \\',
-              `  -d '{"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]}'`,
-            ].join('\n'),
+            code: curlExample('gemini', input.origin, input.key, input.modelID),
           },
         ],
       },

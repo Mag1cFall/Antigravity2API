@@ -47,7 +47,7 @@
 
 服务启动时读取各账户的 Antigravity 模型目录并保存到 `RUNTIME_DIR/catalogs/`，运行后以 `/v1/models` 为准：
 
-- 上表是官方客户端模型选择器中的 Agent 模型，每个模型的条目带 `thinking_levels` 与 `default_thinking_level`
+- 上表是官方客户端模型选择器中的 Agent 模型，每个模型的条目带可选思考档位与默认档位：OpenAI 格式为 `supported_reasoning_levels` 与 `default_reasoning_level`，Anthropic 格式为 `thinking_levels` 与 `default_thinking_level`，Gemini 格式为 `thinkingLevels` 与 `defaultThinkingLevel`
 - 目录中的图像生成模型（例如 `gemini-3.1-flash-image`）与语音转写模型（例如 `proactive-observer-v10`）随后列出，能力分别标注 `image_generation` 与 `transcription`
 - 目录中其他可用条目以目录 ID 公开，例如 Pro 账户目录中的 `claude-sonnet-4-6` 与 `claude-opus-4-6-thinking`
 - 重启后账户初始化完成前，`/v1/models` 列出上一次保存的目录；只在初始化未完成的账户目录中的模型返回 503
@@ -222,7 +222,7 @@ POST   /v1beta/interactions/{id}/cancel
 
 ## 客户端接入
 
-OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8017/v1`，Anthropic 与 Google GenAI SDK 使用 `http://127.0.0.1:8017`。管理端的接入页按当前地址、API key 与实时模型目录生成 Claude Code、Codex、OpenCode、OpenClaw、Magpie、pi、omp、dsh、Cherry Studio 与 curl 的配置，可直接复制；OpenCode、OpenClaw、pi、omp、dsh 与 Cherry Studio 可选择接入协议，Claude Code、Codex、OpenCode、OpenClaw、pi、Cherry Studio 与 Magpie 另有一键导入链接。
+OpenAI SDK 的 base URL 使用 `http://127.0.0.1:8017/v1`，Anthropic 与 Google GenAI SDK 使用 `http://127.0.0.1:8017`。管理端的接入页按当前地址、API key 与实时模型目录生成 Claude Code、Codex、OpenCode、OpenClaw、Magpie、pi、omp、dsh、Cherry Studio 与 curl 的配置，可直接复制；OpenCode、OpenClaw、pi、omp、dsh 与 Cherry Studio 可选择接入协议，Claude Code、Codex、OpenCode、OpenClaw、pi、Cherry Studio 与 Magpie 另有一键导入链接。接入页同时列出全部接口与常用能力，点开可查看主要参数、curl 示例与官方文档。
 
 ```bash
 curl http://127.0.0.1:8017/v1/chat/completions \

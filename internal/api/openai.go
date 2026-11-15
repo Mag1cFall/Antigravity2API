@@ -112,7 +112,7 @@ type openAITool struct {
 	legacy bool
 }
 
-// openAIModelObject 投影列表与单模型共用的公开字段
+// openAIModelObject 投影列表与单模型共用的公开字段，input_modalities 按图片、视频与转写能力列出输入模态
 func openAIModelObject(model antigravity.Model) map[string]any {
 	item := map[string]any{
 		"id": model.ID, "object": "model", "created": 0, "owned_by": "google",
@@ -124,8 +124,15 @@ func openAIModelObject(model antigravity.Model) map[string]any {
 	if len(model.Capabilities) > 0 {
 		item["capabilities"] = model.Capabilities
 	}
+	input := []string{"text"}
+	for _, capability := range [][2]string{{"images", "image"}, {"video", "video"}, {"transcription", "audio"}} {
+		if model.Capabilities[capability[0]] {
+			input = append(input, capability[1])
+		}
+	}
+	item["input_modalities"] = input
 	if len(model.ThinkingLevels) > 0 {
-		item["thinking_levels"], item["default_thinking_level"] = model.ThinkingLevels, model.DefaultThinkingLevel
+		item["supported_reasoning_levels"], item["default_reasoning_level"] = model.ThinkingLevels, model.DefaultThinkingLevel
 	}
 	return item
 }

@@ -244,10 +244,10 @@ type openAIError struct {
 	Code    string  `json:"code"`
 }
 
-// writeOpenAIStreamError 在流已开始后把请求错误以 OpenAI 错误体写为一个 SSE 事件，客户端已断开时不写
+// writeOpenAIStreamError 在流已开始后把请求错误以 OpenAI 错误体写为一个 SSE 事件，可重试时在消息末尾写明重试时间，客户端已断开时不写
 func writeOpenAIStreamError(w http.ResponseWriter, r *http.Request, err error) {
 	if shouldWriteRequestError(r, err) {
-		_ = writeSSE(w, "", openAIErrorBody(statusFromError(err), openAIErrorCode(err), err.Error()))
+		_ = writeSSE(w, "", openAIErrorBody(statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), retryAfterSeconds(err))))
 	}
 }
 
@@ -262,30 +262,54 @@ func openAIErrorType(status int, code string) string {
 	return "server_error"
 }
 
-// writeOpenAIRequestError 以 OpenAI 错误体写出请求失败，可重试时带 Retry-After
+// writeOpenAIRequestError 以 OpenAI 错误体写出请求失败，可重试时带 Retry-After 并在消息末尾写明重试时间
 func writeOpenAIRequestError(w http.ResponseWriter, err error) {
-	setRetryAfter(w, err)
-	writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), err.Error())
+	seconds := setRetryAfter(w, err)
+	writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
 }
 
-// writeAnthropicRequestError 以 Anthropic 错误体写出请求失败，可重试时带 Retry-After
+// writeAnthropicRequestError 以 Anthropic 错误体写出请求失败，可重试时带 Retry-After 并在消息末尾写明重试时间
 func writeAnthropicRequestError(w http.ResponseWriter, err error) {
-	setRetryAfter(w, err)
-	writeAnthropicError(w, statusFromError(err), anthropicErrorType(err), anthropicErrorMessage(err))
+	seconds := setRetryAfter(w, err)
+	writeAnthropicError(w, statusFromError(err), anthropicErrorType(err), retryMessage(anthropicErrorMessage(err), seconds))
+}
+
+// retryMessage 在 seconds 大于 0 时于消息末尾按 OpenAI 限流消息的写法另起一句 Please try again in <seconds>s.
+func retryMessage(message string, seconds int64) string {
+	if seconds <= 0 {
+		return message
+	}
+	if !strings.HasSuffix(message, ".") {
+		message += "."
+	}
+	return message + " Please try again in " + strconv.FormatInt(seconds, 10) + "s."
 }
 
 // writeGeminiRequestError 以 Gemini 错误体写出请求失败，可重试时带 Retry-After 与 RetryInfo
 func writeGeminiRequestError(w http.ResponseWriter, err error) {
-	status := statusFromError(err)
-	payload := map[string]any{"code": status, "message": err.Error(), "status": geminiErrorStatus(err)}
-	if seconds := setRetryAfter(w, err); seconds > 0 {
+	writeJSON(w, statusFromError(err), officialOrder("gemini", map[string]any{"error": geminiErrorPayload(err, setRetryAfter(w, err))}))
+}
+
+// geminiErrorPayload 返回 Gemini 错误对象，seconds 大于 0 时 details 带该时长的 RetryInfo
+func geminiErrorPayload(err error, seconds int64) map[string]any {
+	payload := map[string]any{"code": statusFromError(err), "message": err.Error(), "status": geminiErrorStatus(err)}
+	if seconds > 0 {
 		payload["details"] = []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": strconv.FormatInt(seconds, 10) + "s"}}
 	}
-	writeJSON(w, status, officialOrder("gemini", map[string]any{"error": payload}))
+	return payload
 }
 
 // setRetryAfter 在错误给出可重试时刻时写入 Retry-After 秒数并返回它，否则返回 0
 func setRetryAfter(w http.ResponseWriter, err error) int64 {
+	seconds := retryAfterSeconds(err)
+	if seconds > 0 {
+		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	}
+	return seconds
+}
+
+// retryAfterSeconds 返回错误给出的可重试时刻距现在的秒数，没有可重试时刻时返回 0
+func retryAfterSeconds(err error) int64 {
 	var retry interface{ RetryAt(time.Time) time.Time }
 	if !errors.As(err, &retry) {
 		return 0
@@ -295,9 +319,7 @@ func setRetryAfter(w http.ResponseWriter, err error) int64 {
 	if !at.After(now) {
 		return 0
 	}
-	seconds := int64(math.Ceil(at.Sub(now).Seconds()))
-	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-	return seconds
+	return int64(math.Ceil(at.Sub(now).Seconds()))
 }
 
 // writeAnthropicError 写出 Anthropic 错误响应
@@ -334,6 +356,10 @@ func openAIErrorCode(err error) string {
 	}
 	if contextOverflow(err) {
 		return "context_length_exceeded"
+	}
+	var feedback *antigravity.PromptFeedbackError
+	if errors.As(err, &feedback) {
+		return "invalid_prompt"
 	}
 	switch statusFromError(err) {
 	case http.StatusNotFound:

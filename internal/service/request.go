@@ -17,11 +17,11 @@ import (
 const (
 	// assistantPrefixInstruction 为末尾 assistant 轮改写为续写前缀时追加的系统指令
 	assistantPrefixInstruction = "Continue the assistant response after the following prefix. Return only the continuation, without repeating the prefix."
-	// jsonInstruction 为要求 JSON 输出时追加的系统指令
+	// jsonInstruction 为要求 JSON 输出时追加的输出格式指令
 	jsonInstruction = "Respond with a single JSON value only, without Markdown code fences or any other text."
-	// schemaInstruction 为要求按 JSON Schema 输出时追加的系统指令前缀
+	// schemaInstruction 为要求按 JSON Schema 输出时追加的输出格式指令前缀
 	schemaInstruction = "Respond with a single JSON value that conforms to this JSON Schema, without Markdown code fences or any other text:\n"
-	// enumInstruction 为要求输出枚举值时追加的系统指令前缀
+	// enumInstruction 为要求输出枚举值时追加的输出格式指令前缀
 	enumInstruction = "Respond with exactly one of the following values, without quotes, Markdown code fences or any other text:\n"
 )
 
@@ -34,7 +34,7 @@ var claudeFunctionName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 // functionName 为其他模型族接受的函数名：字母或下划线开头，只含字母、数字、下划线、点、冒号与连字符
 var functionName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.:-]{0,127}$`)
 
-// prepare 把客户端请求改写为上游接受的形状并返回输出处理：目录条目不支持图片的模型收到图片时返回 400，去掉其他模型族生成的签名并补回会话保存的函数调用签名，末尾 assistant 轮与只有系统提示的请求按模型族改写，工具选择、单调用与结构化输出写入系统指令并在输出中核对，模型族不接受的函数名可逆改名
+// prepare 把客户端请求改写为上游接受的形状并返回输出处理：目录条目不支持图片的模型收到图片时返回 400，去掉其他模型族生成的签名并补回会话保存的函数调用签名，末尾 assistant 轮与只有系统提示的请求按模型族改写，工具选择与单调用写入系统指令、结构化输出写入最后一个用户轮，并在输出中核对，模型族不接受的函数名可逆改名
 func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel, signed signatureRecord) (antigravity.GenerateRequest, *output, error) {
 	if !model.SupportsImages && hasImage(request.Contents) {
 		return request, nil, &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("model %s does not support image input", model.ID)}
@@ -304,7 +304,7 @@ func prepareSearch(request antigravity.GenerateRequest) (antigravity.GenerateReq
 	return request, search
 }
 
-// prepareJSON 把 JSON 或枚举输出要求写入系统指令，返回输出时的 JSON、Schema 或枚举校验
+// prepareJSON 把 JSON 或枚举输出要求写入最后一个用户轮，返回输出时的 JSON、Schema 或枚举校验
 func prepareJSON(request antigravity.GenerateRequest) (antigravity.GenerateRequest, *jsonOutput, error) {
 	config := request.Config
 	if strings.EqualFold(config.ResponseMIMEType, "text/x.enum") {
@@ -314,22 +314,32 @@ func prepareJSON(request antigravity.GenerateRequest) (antigravity.GenerateReque
 		if json.Unmarshal(config.ResponseSchema, &schema) != nil || len(schema.Enum) == 0 {
 			return request, nil, &Error{Status: http.StatusBadRequest, Message: "responseMimeType text/x.enum requires a responseSchema with a string enum"}
 		}
-		request.System = joinInstruction(request.System, enumInstruction+strings.Join(schema.Enum, "\n"))
-		return request, &jsonOutput{enum: schema.Enum}, nil
+		return requireOutput(request, &jsonOutput{enum: schema.Enum}, enumInstruction+strings.Join(schema.Enum, "\n"))
 	}
 	if len(config.ResponseSchema) == 0 && !strings.EqualFold(config.ResponseMIMEType, "application/json") {
 		return request, nil, nil
 	}
 	if len(config.ResponseSchema) == 0 {
-		request.System = joinInstruction(request.System, jsonInstruction)
-		return request, &jsonOutput{}, nil
+		return requireOutput(request, &jsonOutput{}, jsonInstruction)
 	}
 	validator, err := compileSchema(config.ResponseSchema)
 	if err != nil {
 		return request, nil, &Error{Status: http.StatusBadRequest, Message: "response schema: " + err.Error()}
 	}
-	request.System = joinInstruction(request.System, schemaInstruction+string(config.ResponseSchema))
-	return request, &jsonOutput{schema: validator}, nil
+	return requireOutput(request, &jsonOutput{schema: validator}, schemaInstruction+string(config.ResponseSchema))
+}
+
+// requireOutput 把输出格式指令作为一个文本 part 接在最后一个用户轮末尾并记入 out.instruction，没有用户轮时接在系统提示之后
+func requireOutput(request antigravity.GenerateRequest, out *jsonOutput, instruction string) (antigravity.GenerateRequest, *jsonOutput, error) {
+	for index := len(request.Contents) - 1; index >= 0; index-- {
+		if request.Contents[index].Role == antigravity.RoleUser {
+			request.Contents[index].Parts = append(request.Contents[index].Parts, antigravity.Part{Text: instruction})
+			out.instruction = instruction
+			return request, out, nil
+		}
+	}
+	request.System = joinInstruction(request.System, instruction)
+	return request, out, nil
 }
 
 // renameFunctions 把模型族不接受的函数名换成该族接受的名称：不允许的字符换成下划线，Claude 族只留字母、数字、下划线与连字符，其他族另留点与冒号并在非字母开头时加下划线，超长或重名时截断并加原名摘要；返回上游名到原名的映射

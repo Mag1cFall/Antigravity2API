@@ -1,5 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  CircleAlert,
   CircleCheck,
   Download,
   ExternalLink,
@@ -10,6 +11,7 @@ import {
   type LucideIcon,
   Plus,
   Server,
+  X,
 } from 'lucide-react'
 import { ToggleGroup } from 'radix-ui'
 import { type ReactNode, type SyntheticEvent, useEffect, useState } from 'react'
@@ -20,7 +22,7 @@ import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { keepAccounts, useImportAccounts } from '@/features/accounts/actions'
-import { accountsKey } from '@/features/accounts/queries'
+import { accountsKey, loginFailuresKey, loginKey, loginsKey } from '@/features/accounts/queries'
 import { ImportAccountFiles } from '@/features/accounts/TransferDialog'
 import type { Login, Pairing } from '@/features/accounts/types'
 import { api } from '@/lib/api'
@@ -34,7 +36,19 @@ function countdown(ms: number) {
   return String(Math.floor(seconds / 60)) + ':' + String(seconds % 60).padStart(2, '0')
 }
 
-// LoginProgress 显示已生成的登录链接、等待状态与授权码输入
+// cancelLogin 取消进行中的登录，结果经事件流更新
+function cancelLogin(id: string) {
+  return api('/api/logins/' + encodeURIComponent(id), { method: 'DELETE' })
+}
+
+// dismissLoginFailure 移除一次登录的失败提示
+function dismissLoginFailure(client: QueryClient, id: string) {
+  client.setQueryData<Login[]>(loginFailuresKey, (failures = []) =>
+    failures.filter((item) => item.id !== id),
+  )
+}
+
+// LoginProgress 显示已生成的登录链接、等待状态、授权码输入与取消登录；关闭对话框后登录在后台继续
 function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => void }) {
   const m = useMessages('accounts')
   const client = useQueryClient()
@@ -45,6 +59,10 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
   useEffect(() => {
     if (login.state === 'completed' && login.account) keepAccounts([login.account])
   }, [login.state, login.account])
+  const cancel = useMutation({
+    mutationFn: () => cancelLogin(login.id),
+    onSuccess: onRestart,
+  })
   const submit = useMutation({
     mutationFn: (value: string) =>
       api<Login>('/api/logins/' + encodeURIComponent(login.id) + '/code', {
@@ -52,7 +70,7 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
         json: { code: value },
       }),
     onSuccess: (result) => {
-      client.setQueryData(['login', login.id], result)
+      client.setQueryData(loginKey(login.id), result)
       void client.invalidateQueries({ queryKey: accountsKey })
     },
     onError: (failure) => {
@@ -113,6 +131,7 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
           <span>· {fill(m.expiresIn, { time: countdown(remaining) })}</span>
         </p>
       )}
+      <p className="text-xs text-foreground-muted">{m.loginKeepHint}</p>
       <form noValidate onSubmit={onSubmit} className="flex flex-col gap-3">
         <Field
           id={codeId}
@@ -141,28 +160,48 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
           ) : (
             <span />
           )}
-          <Button type="submit" loading={submit.isPending}>
-            {login.mode === 'browser' ? m.submitCallback : m.submit}
-          </Button>
+          <span className="flex gap-2">
+            <Button
+              variant="ghost"
+              loading={cancel.isPending}
+              onClick={() => {
+                cancel.mutate()
+              }}
+            >
+              {m.loginCancel}
+            </Button>
+            <Button type="submit" loading={submit.isPending}>
+              {login.mode === 'browser' ? m.submitCallback : m.submit}
+            </Button>
+          </span>
         </div>
       </form>
     </div>
   )
 }
 
-// RemotePairing 生成配对令牌，在有浏览器的电脑上运行 login --remote 完成登录后账户写入本服务
+// RemotePairing 生成配对令牌，在有浏览器的电脑上运行 login --remote 完成登录后账户写入本服务；有效期内重新打开仍显示同一令牌，可随时换新
 function RemotePairing() {
   const m = useMessages('accounts')
   const now = useNow(1000)
+  const client = useQueryClient()
+  const current = useQuery({
+    queryKey: ['pairing'],
+    queryFn: async () => (await api<Pairing | undefined>('/api/pairing')) ?? null,
+  })
   const pairing = useMutation({
     mutationFn: () => api<Pairing>('/api/pairing', { method: 'POST' }),
+    onSuccess: (created) => {
+      client.setQueryData(['pairing'], created)
+    },
   })
-  if (!pairing.data) {
+  const token = current.data
+  if (!token) {
     return (
       <div className="flex flex-col items-start gap-3">
         <Button
           variant="primary"
-          loading={pairing.isPending}
+          loading={pairing.isPending || current.isPending}
           onClick={() => {
             pairing.mutate()
           }}
@@ -177,9 +216,9 @@ function RemotePairing() {
       </div>
     )
   }
-  const remaining = new Date(pairing.data.expires_at).getTime() - now.getTime()
+  const remaining = new Date(token.expires_at).getTime() - now.getTime()
   const command =
-    'antigravity2api login --remote ' + window.location.origin + ' --token ' + pairing.data.token
+    'antigravity2api login --remote ' + window.location.origin + ' --token ' + token.token
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-start gap-1 rounded-md bg-muted p-3">
@@ -192,15 +231,14 @@ function RemotePairing() {
         <span className="text-sm text-foreground-muted">
           {remaining > 0 ? fill(m.expiresIn, { time: countdown(remaining) }) : m.pairingExpired}
         </span>
-        {remaining <= 0 && (
-          <Button
-            onClick={() => {
-              pairing.mutate()
-            }}
-          >
-            {m.pairingStart}
-          </Button>
-        )}
+        <Button
+          loading={pairing.isPending}
+          onClick={() => {
+            pairing.mutate()
+          }}
+        >
+          {remaining > 0 ? m.pairingRenew : m.pairingStart}
+        </Button>
       </div>
     </div>
   )
@@ -276,60 +314,64 @@ function ImportOfficial() {
   )
 }
 
-// AddAccountDialog 是添加账户的五种方式：登录 Google（浏览器登录、粘贴授权码、远程配对）与导入已登录的账户（本机官方客户端、账户文件）；trigger 是打开对话框的按钮，method 是打开时选中的方式
-export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; method?: Method }) {
+// AddAccountDialog 是添加账户的五种方式：登录 Google（浏览器登录、粘贴授权码、远程配对）与导入已登录的账户（本机官方客户端、账户文件）；trigger 是打开对话框的按钮，method 是打开时选中的方式；给出 resume 时对话框创建即打开并续接这次登录，登录结束后显示结果直到关闭
+export function AddAccountDialog({
+  trigger,
+  method,
+  resume,
+}: {
+  trigger?: ReactNode
+  method?: Method
+  resume?: Login
+}) {
   const m = useMessages('accounts')
   const app = useMessages('app')
   const text = useMethodText()
   const client = useQueryClient()
-  const [open, setOpen] = useState(false)
-  const [chosen, setChosen] = useState<Method>()
-  const [loginId, setLoginId] = useState<string>()
+  const [open, setOpen] = useState(resume !== undefined)
+  const [chosen, setChosen] = useState<Method | undefined>(resume?.mode)
+  const [loginId, setLoginId] = useState(resume?.id)
   const current = chosen ?? method ?? preferredMethod()
   const create = useMutation({
     mutationFn: (value: 'browser' | 'code') =>
       api<Login>('/api/logins', { method: 'POST', json: { mode: value } }),
     onSuccess: (login) => {
-      client.setQueryData(['login', login.id], login)
+      client.setQueryData(loginKey(login.id), login)
       setLoginId(login.id)
     },
   })
   const login = useQuery({
-    queryKey: ['login', loginId],
-    queryFn: () => client.getQueryData<Login>(['login', loginId]) ?? null,
+    queryKey: loginKey(loginId),
+    queryFn: () => client.getQueryData<Login>(loginKey(loginId)) ?? null,
     enabled: false,
+    initialData: loginId === resume?.id ? resume : undefined,
   })
   const reset = () => {
+    if (loginId) dismissLoginFailure(client, loginId)
     setLoginId(undefined)
     create.reset()
   }
-  const close = (next: boolean) => {
-    if (!next && loginId && login.data?.state === 'pending') {
-      void api('/api/logins/' + encodeURIComponent(loginId), { method: 'DELETE' }).catch(
-        () => undefined,
-      )
-    }
-    if (!next) {
-      reset()
-      setChosen(undefined)
-    }
-    setOpen(next)
+  const closeDialog = () => {
+    reset()
+    setChosen(undefined)
+    setOpen(false)
   }
   const completed = login.data?.state === 'completed'
   return (
-    <Dialog open={open} onOpenChange={close}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setOpen(true)
+        else closeDialog()
+      }}
+    >
+      {trigger && <DialogTrigger asChild>{trigger}</DialogTrigger>}
       <DialogContent
         width="wide"
         title={m.dialogTitle}
         closeLabel={app.closeDialog}
         footer={
-          <Button
-            variant={completed ? 'primary' : 'secondary'}
-            onClick={() => {
-              close(false)
-            }}
-          >
+          <Button variant={completed ? 'primary' : 'secondary'} onClick={closeDialog}>
             {completed ? m.done : m.close}
           </Button>
         }
@@ -429,6 +471,98 @@ export function AddAccountDialog({ trigger, method }: { trigger: ReactNode; meth
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// LoginTasks 在账户页列出关闭对话框后仍在进行的登录（方式、剩余时间、继续与取消）与对话框关着时失败或到期的登录（失败原因，可关掉）；“继续”打开的对话框不随任务行消失
+export function LoginTasks() {
+  const m = useMessages('accounts')
+  const app = useMessages('app')
+  const text = useMethodText()
+  const now = useNow(1000)
+  const client = useQueryClient()
+  const [resumed, setResumed] = useState<{ login: Login; count: number }>()
+  const logins = useQuery({ queryKey: loginsKey, queryFn: () => api<Login[]>('/api/logins') })
+  const failures =
+    useQuery({
+      queryKey: loginFailuresKey,
+      queryFn: () => client.getQueryData<Login[]>(loginFailuresKey) ?? [],
+      staleTime: Number.POSITIVE_INFINITY,
+    }).data ?? []
+  const pending = (logins.data ?? []).filter(
+    (login) => login.state === 'pending' && new Date(login.expires_at).getTime() > now.getTime(),
+  )
+  return (
+    <>
+      {pending.length + failures.length > 0 && (
+        <ul
+          aria-label={m.loginTasks}
+          className="flex flex-col overflow-hidden rounded-md border border-border bg-surface"
+        >
+          {pending.map((login) => (
+            <li
+              key={login.id}
+              data-login-task={login.id}
+              className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border px-4 py-2 first:border-t-0"
+            >
+              <LoaderCircle size={16} aria-hidden className="animate-spin text-primary" />
+              <span className="text-sm font-medium">{text.methods[login.mode][0]}</span>
+              <span className="text-sm text-foreground-muted">
+                {fill(m.expiresIn, {
+                  time: countdown(new Date(login.expires_at).getTime() - now.getTime()),
+                })}
+              </span>
+              <span className="ml-auto flex gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setResumed((previous) => ({ login, count: (previous?.count ?? 0) + 1 }))
+                  }}
+                >
+                  {m.loginResume}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    void cancelLogin(login.id).catch(() => undefined)
+                  }}
+                >
+                  {m.loginCancel}
+                </Button>
+              </span>
+            </li>
+          ))}
+          {failures.map((login) => (
+            <li
+              key={login.id}
+              role="alert"
+              data-login-failure={login.id}
+              className="flex items-center gap-3 border-t border-border py-2 pr-2 pl-4 first:border-t-0"
+            >
+              <CircleAlert size={16} aria-hidden className="shrink-0 text-error-text" />
+              <span className="min-w-0 flex-1 text-sm break-words">
+                <span className="font-medium">{text.methods[login.mode][0]}</span>
+                <span className="text-error-text">
+                  {' · ' + fill(m.failed, { message: serverText(login.error ?? '') })}
+                </span>
+              </span>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label={app.dismiss}
+                onClick={() => {
+                  dismissLoginFailure(client, login.id)
+                }}
+              >
+                <X size={16} aria-hidden />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {resumed && <AddAccountDialog key={resumed.count} resume={resumed.login} />}
+    </>
   )
 }
 

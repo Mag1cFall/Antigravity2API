@@ -66,7 +66,7 @@ func (s *server) respondBackground(w http.ResponseWriter, r *http.Request, reque
 		s.storeResponse(id, request, prepared, generationResult{}, responseShell(id, created, "cancelled", request))
 	case err != nil:
 		failed := responseShell(id, created, "failed", request)
-		failed["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}
+		failed["error"] = responsesError(err)
 		s.storeResponse(id, request, prepared, generationResult{}, failed)
 	default:
 		s.storeResponse(id, request, prepared, result, buildResponsesObject(id, created, request, result, compaction, searchOnly(prepared.generate.Tools)))
@@ -125,7 +125,7 @@ func (s *server) streamBackground(w http.ResponseWriter, r *http.Request, reques
 		s.storeResponse(id, request, prepared, generationResult{}, responseShell(id, created, "cancelled", request))
 	case err != nil:
 		failed := responseShell(id, created, "failed", request)
-		failed["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}
+		failed["error"] = responsesError(err)
 		s.storeResponse(id, request, prepared, generationResult{}, failed)
 	}
 }

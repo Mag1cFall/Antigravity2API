@@ -531,13 +531,15 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	events, err := s.generateResponses(r.Context(), request, &prepared)
-	if err == nil {
-		events = s.hostedImages(r.Context(), request.allTools(), prepared.generate.Session, prepared.generate.Contents, events)
+	attempt := prepared
+	generate := func() (<-chan antigravity.Event, error) {
+		events, err := s.generateResponses(r.Context(), request, &attempt)
+		if err != nil {
+			return nil, err
+		}
+		return s.hostedImages(r.Context(), request.allTools(), attempt.generate.Session, attempt.generate.Contents, events), nil
 	}
-	if err == nil && request.Stream {
-		events, _, err = awaitStreamStart(r.Context(), events)
-	}
+	events, _, err := startGeneration(r.Context(), request.Stream, generate)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeOpenAIRequestError(w, err)
@@ -1910,8 +1912,13 @@ func (writer *responsesStreamWriter) failed(err error) error {
 		output = append(output, responseIncludeView(item, writer.request.Include))
 	}
 	response["output"] = output
-	response["error"] = map[string]any{"code": responsesErrorCode(err), "message": publicErrorMessage(statusFromError(err), err.Error())}
+	response["error"] = responsesError(err)
 	return writer.emit("response.failed", map[string]any{"response": response})
+}
+
+// responsesError 返回 Responses 失败对象的 error 字段，消息末尾带重试时间
+func responsesError(err error) map[string]any {
+	return map[string]any{"code": responsesErrorCode(err), "message": retryMessage(publicErrorMessage(statusFromError(err), err.Error()), retryAfterSeconds(err))}
 }
 
 // responsesErrorCode 返回 Responses 失败响应 error.code 的枚举值：限流为 rate_limit_exceeded，请求内容被拒为 invalid_prompt，其余为 server_error

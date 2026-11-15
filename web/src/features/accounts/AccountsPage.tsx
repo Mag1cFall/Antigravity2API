@@ -25,7 +25,7 @@ import {
   useVerifyAccount,
   useVerifyingAccounts,
 } from '@/features/accounts/actions'
-import { AddAccountButton } from '@/features/accounts/AddAccountDialog'
+import { AddAccountButton, LoginTasks } from '@/features/accounts/AddAccountDialog'
 import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { useAccounts } from '@/features/accounts/queries'
 import { RefreshAllButton } from '@/features/accounts/RefreshAllButton'
@@ -185,6 +185,7 @@ export function AccountsPage() {
           </>
         }
       />
+      <LoginTasks />
       <Card>
         {accounts.isPending ? (
           <Loading label={app.loading} />

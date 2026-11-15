@@ -151,6 +151,8 @@ type Row struct {
 	ReasoningTokens int64  `json:"reasoning_tokens"`
 	ReplyTokens     int64  `json:"reply_tokens"`
 	ToolCalls       int    `json:"tool_calls"`
+	// ImageOutput 表示回答中有模型输出的图片，只用于估算费用，不入库
+	ImageOutput bool `json:"-"`
 	// CostUSD 是按上游模型官方单价估算的美元费用，模型没有单价时为 null
 	CostUSD  *float64  `json:"cost_usd"`
 	Error    string    `json:"error"`

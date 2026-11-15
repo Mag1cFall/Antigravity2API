@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/HugoSmits86/nativewebp v1.3.0
+	github.com/Mag1cFall/tiktoken-go v0.1.9
 	github.com/bogdanfinn/tls-client v1.16.0
 	github.com/bogdanfinn/utls v1.7.8-barnius
 	github.com/dlclark/regexp2/v2 v2.5.2
@@ -14,7 +15,6 @@ require (
 	github.com/mewkiz/flac v1.0.14
 	github.com/minio/selfupdate v0.6.0
 	github.com/oov/audio v0.0.0-20171004131523-88a2be6dbe38
-	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/refraction-networking/uquic v0.0.7-0.20260804184259-837c7ce1b72b
 	github.com/refraction-networking/utls v1.8.3-0.20261108164504-a13c59ffe98b
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3

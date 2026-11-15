@@ -163,11 +163,8 @@ func (s *server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		writeAnthropicCompactionPause(w, request, messageID, contextResult)
 		return
 	}
-	events, err := s.service.Generate(r.Context(), generateRequest)
-	var first antigravity.Event
-	if err == nil && request.Stream {
-		events, first, err = awaitStreamStart(r.Context(), events)
-	}
+	generate := func() (<-chan antigravity.Event, error) { return s.service.Generate(r.Context(), generateRequest) }
+	events, first, err := startGeneration(r.Context(), request.Stream, generate)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
 			writeAnthropicRequestError(w, err)
@@ -847,7 +844,7 @@ func buildAnthropicResponse(id string, model string, result generationResult, th
 	return response
 }
 
-// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，没有时在请求要求思考类块时为 redacted_thinking 块，紧跟 text 块的独立签名不输出，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
+// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，没有时在请求要求思考类块时为正文为空、带该签名的 thinking 块，紧跟 text 块的独立签名不输出，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
 func anthropicBlocks(id string, result generationResult, thinking, omitted bool, media mediaOutput) []anthropicContentBlock {
 	blocks := make([]anthropicContentBlock, 0)
 	open := func() *anthropicContentBlock {
@@ -863,7 +860,8 @@ func anthropicBlocks(id string, result generationResult, thinking, omitted bool,
 		case block != nil && *block.Signature == "":
 			*block.Signature = signature
 		case block == nil && thinking:
-			blocks = append(blocks, anthropicContentBlock{Type: "redacted_thinking", Data: signature})
+			text := ""
+			blocks = append(blocks, anthropicContentBlock{Type: "thinking", Thinking: &text, Signature: &signature})
 		}
 	}
 	mediaBlock := -1
@@ -1310,7 +1308,7 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 	return nil
 }
 
-// sign 记下正在进行的 thinking 块的签名，没有进行中的 thinking 块且请求要求思考类块时写出 redacted_thinking 块
+// sign 记下正在进行的 thinking 块的签名，没有进行中的 thinking 块且请求要求思考类块时写出正文为空、带该签名的 thinking 块
 func (writer *anthropicStreamWriter) sign(signature string) error {
 	switch {
 	case signature == "":
@@ -1319,14 +1317,10 @@ func (writer *anthropicStreamWriter) sign(signature string) error {
 			writer.thinkingSignature = signature
 		}
 	case writer.thinking:
-		if err := writer.closeBlock(); err != nil {
+		if err := writer.ensureBlock("thinking"); err != nil {
 			return err
 		}
-		block := map[string]any{"type": "redacted_thinking", "data": signature}
-		if err := writer.emit("content_block_start", map[string]any{"type": "content_block_start", "index": writer.blockIndex, "content_block": block}); err != nil {
-			return err
-		}
-		writer.currentBlock = "redacted_thinking"
+		writer.thinkingSignature = signature
 		return writer.closeBlock()
 	}
 	return nil
@@ -1416,7 +1410,7 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 func (writer *anthropicStreamWriter) error(err error) error {
 	return writer.emit("error", map[string]any{
 		"type":  "error",
-		"error": map[string]string{"type": anthropicErrorType(err), "message": publicErrorMessage(statusFromError(err), anthropicErrorMessage(err))},
+		"error": map[string]string{"type": anthropicErrorType(err), "message": retryMessage(publicErrorMessage(statusFromError(err), anthropicErrorMessage(err)), retryAfterSeconds(err))},
 	})
 }
 

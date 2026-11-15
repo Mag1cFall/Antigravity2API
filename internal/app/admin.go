@@ -51,10 +51,13 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("POST /api/accounts/import/json", s.importAccountFile)
 	mux.HandleFunc("GET /api/accounts/export", s.exportAccounts)
 	mux.HandleFunc("POST /api/accounts/refresh", s.refreshAccounts)
+	mux.HandleFunc("GET /api/logins", s.listLogins)
 	mux.HandleFunc("POST /api/logins", s.createLogin)
 	mux.HandleFunc("POST /api/logins/{id}/code", s.submitLoginCode)
 	mux.HandleFunc("DELETE /api/logins/{id}", s.cancelLogin)
+	mux.HandleFunc("GET /api/pairing", s.currentPairing)
 	mux.HandleFunc("POST /api/pairing", s.createPairing)
+	mux.HandleFunc("GET /api/warmup", s.listWarmupModels)
 	mux.HandleFunc("POST /api/warmup", s.postWarmup)
 	mux.HandleFunc("GET /api/models", s.listModels)
 	mux.HandleFunc("GET /api/quota/snapshots", s.listQuotaSnapshots)
@@ -310,6 +313,22 @@ func (s *server) listModels(w http.ResponseWriter, r *http.Request) {
 	listed := make([]adminModel, len(models))
 	for i, model := range models {
 		listed[i] = adminModel{Model: model, Accounts: counts[model.ID]}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": listed})
+}
+
+// warmupModel 是预热对话框的模型条目，Warmup 表示默认选中它
+type warmupModel struct {
+	antigravity.Model
+	Warmup bool `json:"warmup,omitempty"`
+}
+
+// listWarmupModels 返回全部账户（含停用账户）上一次目录中的对话模型，每个额度组的默认预热模型标为默认选中
+func (s *server) listWarmupModels(w http.ResponseWriter, r *http.Request) {
+	models, defaults := s.deps.Service.WarmupModels()
+	listed := []warmupModel{}
+	for _, model := range models {
+		listed = append(listed, warmupModel{Model: model, Warmup: slices.Contains(defaults, model.ID)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"models": listed})
 }

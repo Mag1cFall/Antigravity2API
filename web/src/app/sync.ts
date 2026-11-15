@@ -3,8 +3,8 @@ import { hashKey, type QueryClient, type QueryKey } from '@tanstack/react-query'
 import { accountsKey } from '@/features/accounts/queries'
 import type { Account } from '@/features/accounts/types'
 
-// accountDependents 是账户的就绪状态或额度读取时间变化后需要重新读取的查询：模型目录与各模型的可用账户数、额度变化曲线
-const accountDependents: QueryKey[] = [['models'], ['quota-snapshots']]
+// accountDependents 是账户列表、就绪状态或额度读取时间变化后需要重新读取的查询：模型目录与各模型的可用账户数、额度变化曲线、预热的模型列表、远程配对令牌（导入账户后失效）
+const accountDependents: QueryKey[] = [['models'], ['quota-snapshots'], ['warmup'], ['pairing']]
 
 // requestDependents 是请求结束后需要重新读取的查询：请求记录、最近请求与用量
 export const requestDependents: QueryKey[] = [['requests'], ['usage']]

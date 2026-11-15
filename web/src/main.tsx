@@ -10,6 +10,7 @@ import { router } from '@/app/router'
 import { syncQueries } from '@/app/sync'
 import { Toaster } from '@/components/ui/toast'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { loginFailuresKey } from '@/features/accounts/queries'
 import { sessionKey } from '@/features/service/queries'
 import { ApiError } from '@/lib/api'
 import { I18nProvider, loadInitialLocale, useMessages } from '@/lib/i18n'
@@ -35,6 +36,8 @@ const queryClient: QueryClient = new QueryClient({
   },
 })
 queryClient.setQueryDefaults(logsKey, { structuralSharing: false, gcTime: Infinity })
+queryClient.setQueryDefaults(['login'], { gcTime: Infinity })
+queryClient.setQueryDefaults(loginFailuresKey, { gcTime: Infinity })
 
 syncQueries(queryClient)
 

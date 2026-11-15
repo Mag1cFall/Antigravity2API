@@ -13,6 +13,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/balancer"
 	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
+	"github.com/Mag1cFall/Antigravity2API/internal/tokencount"
 )
 
 // transcriptionURL 为语音转写双向流在账本中记录的地址
@@ -67,7 +68,10 @@ func (s *Service) generateImage(ctx context.Context, request antigravity.Generat
 	})
 }
 
-// transcribe 把请求中的音频解码为 16 kHz PCM，经 aicode 双向流转写，转写文本作为正文输出
+// transcriptionTokens 是 Gemini API 定价页估算 Gemini 3.5 Transcribe 费用所用的每秒音频 token 数
+const transcriptionTokens = 25
+
+// transcribe 把请求中的音频解码为 16 kHz PCM，经 aicode 双向流转写，转写文本作为正文输出；上游不返回用量，用量按音频时长与转写文本的本地计数估算
 func (s *Service) transcribe(ctx context.Context, request antigravity.GenerateRequest, model antigravity.CatalogModel, tier prompt.Tier) (<-chan antigravity.Event, error) {
 	blobs := audioParts(request.Contents)
 	if len(blobs) == 0 {
@@ -93,10 +97,12 @@ func (s *Service) transcribe(ctx context.Context, request antigravity.GenerateRe
 		if err != nil {
 			return nil, exchange, err
 		}
-		events := make(chan antigravity.Event, 2)
+		events := make(chan antigravity.Event, 3)
 		if result.Text != "" {
 			events <- antigravity.Event{Kind: antigravity.EventText, Text: result.Text, ProviderModel: catalog.ID}
 		}
+		input, output := int64(len(pcm))*transcriptionTokens/(transcriptionRate*2), tokencount.Text(catalog.ModelProvider, result.Text)
+		events <- antigravity.Event{Kind: antigravity.EventUsage, Usage: &antigravity.Usage{InputTokens: input, OutputTokens: output, TotalTokens: input + output}, ProviderModel: catalog.ID}
 		events <- antigravity.Event{Kind: antigravity.EventFinish, FinishReason: "STOP", ProviderModel: catalog.ID}
 		close(events)
 		return events, exchange, nil
@@ -109,9 +115,16 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 	deadline := watch(ctx, s.live.Load().RequestTimeout)
 	tried := make(map[string]bool)
 	waited := make(map[string]bool)
+	reconnect, reconnected := "", false
 	var last error
 	for attempts := 1; ; attempts++ {
-		lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, skip(request, tried), s.lowerTier(model))
+		lease, err := s.pool.Acquire(deadline, model.ID, session.Cascade, skip(request, tried, s.store.Enabled), s.lowerTier(model))
+		if err != nil && reconnect != "" && !reconnected && deadline.Err() == nil {
+			reconnected = true
+			delete(tried, reconnect)
+			attempts--
+			continue
+		}
 		if err != nil {
 			deadline.stop()
 			var cooldown *balancer.CooldownError
@@ -138,7 +151,7 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 			upstream, exchange, err = call(deadline, current, lease.Model)
 		}
 		if err == nil {
-			return s.relay(ctx, deadline, &upstreamStream{lease: lease, current: current, events: upstream, exchange: exchange, started: started}, nil, false, digests, session.Cascade, tier), nil
+			return s.relay(ctx, deadline, &upstreamStream{lease: lease, current: current, events: upstream, exchange: exchange, started: started}, nil, request, digests, session.Cascade, tier), nil
 		}
 		trace.AddAttempt(attempt(lease.ID, exchange, started, err, antigravity.Event{}))
 		lease.Release()
@@ -152,6 +165,9 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 			delete(tried, lease.ID)
 			attempts--
 			continue
+		}
+		if switched && connectionFailure(err) {
+			reconnect = lease.ID
 		}
 		if !switched || attempts >= accountLimit(err) || deadline.Err() != nil {
 			deadline.stop()

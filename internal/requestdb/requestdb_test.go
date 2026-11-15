@@ -230,7 +230,7 @@ func TestUsageMatchesRecords(t *testing.T) {
 			durations = append(durations, duration)
 		}
 		row.UpstreamModel = upstream[index%3]
-		if value, ok := Cost(row.UpstreamModel, 10, 2, 8); ok {
+		if value, ok := Cost(row.UpstreamModel, row.Time, 10, 2, 8); ok {
 			cost += value
 		} else {
 			unpriced++
@@ -463,11 +463,29 @@ func TestCost(t *testing.T) {
 		{"gemini-2.5-pro", 1_000_000, 0, 1_000_000, 17.5, true},
 		{"gemini-2.5-pro", 100_000, 0, 0, 0.125, true},
 		{"claude-opus-4-6-thinking", 1_000_000, 1_000_000, 0, 0.50, true},
+		{"gemini-4-hydrogen-xhigh", 1_000_000, 1_000_000, 1_000_000, 7.575, true},
+		{"gemini-flash-worker-agy", 1_000_000, 0, 0, 1.50, true},
 		{"gpt-6-astra", 1_000_000, 0, 0, 0, false},
 	} {
-		got, priced := Cost(test.model, test.input, test.cached, test.output)
+		got, priced := Cost(test.model, time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC), test.input, test.cached, test.output)
 		if priced != test.priced || math.Abs(got-test.want) > 1e-9 {
 			t.Errorf("%s=%v,%v 期望 %v,%v", test.model, got, priced, test.want, test.priced)
+		}
+	}
+	pacific := time.FixedZone("PST", -8*3600)
+	for _, test := range []struct {
+		model string
+		at    time.Time
+		want  float64
+	}{
+		{"gemini-4-carbon-high", time.Date(2026, 11, 30, 23, 59, 0, 0, pacific), 11.05},
+		{"gemini-4-carbon-high", time.Date(2026, 12, 1, 0, 0, 0, 0, pacific), 22.10},
+		{"gemini-pro-orchestrator-argon", time.Date(2026, 12, 2, 0, 0, 0, 0, pacific), 22.10},
+		{"gemini-3.8-flash-low", time.Date(2026, 12, 31, 23, 59, 0, 0, pacific), 4.1625},
+		{"gemini-3.8-flash-low", time.Date(2027, 1, 1, 0, 0, 0, 0, pacific), 8.325},
+	} {
+		if got, priced := Cost(test.model, test.at, 1_000_000, 500_000, 1_000_000); !priced || math.Abs(got-test.want) > 1e-9 {
+			t.Errorf("%s %s=%v,%v 期望 %v", test.model, test.at, got, priced, test.want)
 		}
 	}
 	if value := rowCost(&Row{UpstreamModel: ""}); value == nil || *value != 0 {
@@ -475,5 +493,11 @@ func TestCost(t *testing.T) {
 	}
 	if value := rowCost(&Row{UpstreamModel: "gpt-6-astra", ReplyTokens: 1}); value != nil {
 		t.Fatalf("没有单价的请求 cost=%v", *value)
+	}
+	for image, want := range map[bool]float64{true: 0.084305, false: 0.004505} {
+		row := Row{UpstreamModel: "gemini-3.1-flash-image", Time: time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC), InputTokens: 10, ReasoningTokens: 100, ReplyTokens: 1400, ImageOutput: image}
+		if value := rowCost(&row); value == nil || math.Abs(*value-want) > 1e-9 {
+			t.Errorf("生图模型 图片=%v cost=%v 期望 %v", image, value, want)
+		}
 	}
 }

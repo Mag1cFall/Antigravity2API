@@ -284,7 +284,7 @@ func (s *server) readQuotas(ctx context.Context) map[string]error {
 	return failed
 }
 
-// retryAccounts 在定时额度刷新后重新初始化异常与需要验证的账户，成功的账户恢复调度
+// retryAccounts 在定时额度刷新后重新初始化初始化失败与认证失败的账户，成功的账户恢复调度
 func (s *server) retryAccounts(ctx context.Context) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()

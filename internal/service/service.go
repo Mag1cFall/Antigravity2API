@@ -82,6 +82,8 @@ type Service struct {
 	launchOnce sync.Once
 	// warmed 是各账户各周额度桶最近一次唤醒的时间，保存在 RUNTIME_DIR/warmups.json
 	warmed map[string]map[string]time.Time
+	// borrowed 是手动预热临时启动的停用账户，键为账户 ID
+	borrowed map[string]*borrowed
 	// saving 串行化冷却的读取与写入
 	saving sync.Mutex
 	// firstEvents 是各模型近期原请求的首字等待，启动时从请求账本补入
@@ -140,6 +142,7 @@ func New(store *auth.Store, options Options) (*Service, error) {
 		proxies:       proxypool.New(cfg.Proxies()),
 		proxyCheck:    make(chan struct{}, 1),
 		warmed:        loadWarmups(filepath.Join(cfg.RuntimeDir, warmupsFile)),
+		borrowed:      make(map[string]*borrowed),
 		launched:      make(chan struct{}),
 		firstEvents:   &firstEventStats{samples: make(map[string][]firstEventSample)},
 	}
@@ -353,7 +356,7 @@ func pace(ctx context.Context) error {
 	}
 }
 
-// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，结束时结束启动期间的等待，初始化尚未就绪、账户代理已变或重新登录过的启用账户：相邻两个账户的初始化相隔 pace 开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度，已删除账户的目录与 Hub 状态文件随之删除
+// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，结束时结束启动期间的等待，初始化尚未就绪、账户代理已变或重新登录过的启用账户（需要验证的账户只由 Verify 恢复）：相邻两个账户的初始化相隔 pace 开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度，已删除账户的目录与 Hub 状态文件随之删除
 func (s *Service) Refresh(ctx context.Context) error {
 	defer s.markLaunched()
 	records := s.store.Accounts()
@@ -394,6 +397,12 @@ func (s *Service) Refresh(ctx context.Context) error {
 		if current := s.account(record.ID); current != nil && current.proxy == record.Proxy && current.refresh == token.RefreshToken {
 			continue
 		}
+		s.mu.Lock()
+		verifying := strings.HasPrefix(s.failures[record.ID], verifyReason(nil))
+		s.mu.Unlock()
+		if verifying {
+			continue
+		}
 		if waited {
 			if err := pace(ctx); err != nil {
 				started.Wait()
@@ -402,7 +411,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 		}
 		waited = true
 		started.Go(func() {
-			err := s.initialize(ctx, record)
+			err := s.initialize(ctx, record, false)
 			collect.Lock()
 			errs = append(errs, err)
 			collect.Unlock()
@@ -452,17 +461,22 @@ func (s *Service) forget() {
 // Verify 重新初始化一个启用账户，需要验证或初始化失败的账户由此恢复调度
 func (s *Service) Verify(ctx context.Context, id string) error {
 	if record, ok := s.store.Account(id); ok && record.Enabled {
-		return s.initialize(ctx, &record)
+		return s.initialize(ctx, &record, false)
 	}
 	return fmt.Errorf("账户 %s 不存在或已停用", id)
 }
 
-// RetryFailed 依次重新初始化启用中但初始化失败、认证失败或需要验证的账户，相邻两次之间相隔 pace，返回重试的账户数与仍失败的账户数
+// verifyReason 返回上游要求验证账户时移出调度的原因，body 为上游错误正文，body 为空时为这类原因的前缀
+func verifyReason(body []byte) string {
+	return "需要验证：" + string(body)
+}
+
+// RetryFailed 依次重新初始化启用中但初始化失败或认证失败的账户，相邻两次之间相隔 pace，返回重试的账户数与仍失败的账户数；需要验证的账户只由 Verify 恢复
 func (s *Service) RetryFailed(ctx context.Context) (int, int) {
 	s.mu.Lock()
 	var failed []auth.Account
 	for _, record := range s.store.Accounts() {
-		if _, ok := s.failures[record.ID]; ok && record.Enabled {
+		if reason, ok := s.failures[record.ID]; ok && record.Enabled && !strings.HasPrefix(reason, verifyReason(nil)) {
 			failed = append(failed, *record)
 		}
 	}
@@ -472,7 +486,7 @@ func (s *Service) RetryFailed(ctx context.Context) (int, int) {
 		if index > 0 && pace(ctx) != nil {
 			return index, remaining
 		}
-		if s.initialize(ctx, &record) != nil {
+		if s.initialize(ctx, &record, false) != nil {
 			remaining++
 		}
 	}
@@ -534,8 +548,8 @@ func (s *Service) tokenSource(record *auth.Account, token *oauth2.Token, proxy a
 	})
 }
 
-// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），loadCodeAssist 给出不能使用的套餐且没有项目时按初始化失败处理、原因为 reasonMessage 与套餐原文，成功且账户仍在账户库中启用时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接；账户已从账户库删除时不初始化
-func (s *Service) initialize(ctx context.Context, record *auth.Account) error {
+// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），loadCodeAssist 给出不能使用的套餐且没有项目时按初始化失败处理、原因为 reasonMessage 与套餐原文，成功且账户仍在账户库中启用或 warm 为真（停用账户的手动预热）时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接；账户已从账户库删除时不初始化
+func (s *Service) initialize(ctx context.Context, record *auth.Account, warm bool) error {
 	token := s.store.Token(record.ID)
 	if token == nil {
 		return nil
@@ -557,7 +571,7 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account) error {
 		slog.ErrorContext(ctx, "账户初始化失败 | 错误="+err.Error(), "source", record.ID)
 		reason := err.Error()
 		if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok && upstream.Reason() == "VALIDATION_REQUIRED" {
-			reason = "需要验证：" + string(upstream.Body)
+			reason = verifyReason(upstream.Body)
 		}
 		s.stop(record.ID, reason)
 		return fmt.Errorf("%s: %w", record.ID, err)
@@ -573,7 +587,7 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account) error {
 		s.stop(record.ID, "不能使用套餐："+strings.Join(messages, "；")+" "+string(detail))
 		return fmt.Errorf("%s: %s", record.ID, strings.Join(messages, "；"))
 	}
-	if !s.store.Enabled(record.ID) {
+	if !warm && !s.store.Enabled(record.ID) {
 		cancel()
 		return nil
 	}

@@ -30,9 +30,10 @@ type PairingUpload struct {
 	Device antigravity.Device `json:"device"`
 }
 
-// pairing 保存当前唯一有效配对令牌的摘要，令牌成功导入一个账户后失效
+// pairing 保存当前唯一有效的配对令牌，令牌成功导入一个账户后失效
 type pairing struct {
 	mu      sync.Mutex
+	token   string
 	digest  [sha256.Size]byte
 	expires time.Time
 }
@@ -42,8 +43,15 @@ func (p *pairing) issue(now time.Time) pairingToken {
 	token := rand.Text()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.digest, p.expires = sha256.Sum256([]byte(token)), now.Add(pairingLifetime)
+	p.token, p.digest, p.expires = token, sha256.Sum256([]byte(token)), now.Add(pairingLifetime)
 	return pairingToken{Token: token, ExpiresAt: p.expires.UTC()}
+}
+
+// current 返回未过期的配对令牌
+func (p *pairing) current(now time.Time) (pairingToken, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return pairingToken{Token: p.token, ExpiresAt: p.expires.UTC()}, now.Before(p.expires)
 }
 
 // valid 判断令牌是否为当前未过期的配对令牌
@@ -58,7 +66,16 @@ func (p *pairing) valid(token string, now time.Time) bool {
 func (p *pairing) revoke() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.expires = time.Time{}
+	p.token, p.expires = "", time.Time{}
+}
+
+// currentPairing 返回仍有效的配对令牌，没有时返回 204
+func (s *server) currentPairing(w http.ResponseWriter, r *http.Request) {
+	if token, ok := s.pairing.current(time.Now()); ok {
+		writeJSON(w, http.StatusOK, token)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // createPairing 生成供 login --remote 使用的配对令牌

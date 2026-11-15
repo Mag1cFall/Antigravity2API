@@ -47,7 +47,7 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 
 The service reads the Antigravity model catalog of every account at startup and saves it to `RUNTIME_DIR/catalogs/`; `/v1/models` is authoritative once it runs:
 
-- The table lists the Agent models of the official model picker; each entry carries `thinking_levels` and `default_thinking_level`
+- The table lists the Agent models of the official model picker; each entry carries its thinking levels and default level: `supported_reasoning_levels` and `default_reasoning_level` in the OpenAI format, `thinking_levels` and `default_thinking_level` in the Anthropic format, `thinkingLevels` and `defaultThinkingLevel` in the Gemini format
 - The image generation model (for example `gemini-3.1-flash-image`) and the speech transcription model (for example `proactive-observer-v10`) of the catalog follow, with the capabilities `image_generation` and `transcription`
 - Other usable entries in the catalog are published with their catalog IDs, for example `claude-sonnet-4-6` and `claude-opus-4-6-thinking` in the catalog of a Pro account
 - After a restart, `/v1/models` lists the saved catalogs until the accounts finish initialization; models that only appear in the catalogs of accounts still initializing return 503
@@ -222,7 +222,7 @@ Open `http://127.0.0.1:8017/` in a browser for the admin UI, which uses the `/ap
 
 ## Client Setup
 
-OpenAI SDKs use the base URL `http://127.0.0.1:8017/v1`; Anthropic and Google GenAI SDKs use `http://127.0.0.1:8017`. The Connect page of the admin UI generates ready-to-copy configs for Claude Code, Codex, OpenCode, OpenClaw, Magpie, pi, omp, dsh, Cherry Studio and curl from the current address, API key and live model catalog; OpenCode, OpenClaw, pi, omp, dsh and Cherry Studio let you pick the protocol, and Claude Code, Codex, OpenCode, OpenClaw, pi, Cherry Studio and Magpie also offer one-click import links.
+OpenAI SDKs use the base URL `http://127.0.0.1:8017/v1`; Anthropic and Google GenAI SDKs use `http://127.0.0.1:8017`. The Connect page of the admin UI generates ready-to-copy configs for Claude Code, Codex, OpenCode, OpenClaw, Magpie, pi, omp, dsh, Cherry Studio and curl from the current address, API key and live model catalog; OpenCode, OpenClaw, pi, omp, dsh and Cherry Studio let you pick the protocol, and Claude Code, Codex, OpenCode, OpenClaw, pi, Cherry Studio and Magpie also offer one-click import links. The Connect page also lists every endpoint and common capability; open one to see its main parameters, a curl example and the official docs.
 
 ```bash
 curl http://127.0.0.1:8017/v1/chat/completions \

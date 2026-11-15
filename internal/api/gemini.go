@@ -626,7 +626,7 @@ func (request geminiRequest) toGenerateRequest(id string, model string) (antigra
 		config.HideThinking = !request.GenerationConfig.ThinkingConfig.IncludeThoughts
 	}
 	return antigravity.GenerateRequest{
-		ID: id, Model: model, System: system, Contents: contents, Config: config, Tools: tools,
+		ID: id, Model: model, System: system, Contents: contents, Config: config, Tools: tools, KeepAbnormalFinish: true,
 	}, nil
 }
 
@@ -781,9 +781,6 @@ func mapGeminiParts(input []geminiPart) ([]antigravity.Part, bool, error) {
 				ThoughtSignature: part.ThoughtSignature,
 			})
 		case part.FunctionResponse != nil:
-			if part.FunctionResponse.Name == "" {
-				return nil, false, fmt.Errorf("functionResponse requires name")
-			}
 			response, err := geminiJSONObject(part.FunctionResponse.Response, "functionResponse.response")
 			if err != nil {
 				return nil, false, err
@@ -882,8 +879,9 @@ func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, re
 	}
 	candidates := s.startChatChoices(r.Context(), request, count, stream)
 	defer candidates.cancel()
-	if err := candidates.err; err != nil {
-		writeGeminiFailure(w, r, err)
+	_, rejected := geminiPromptFeedback(request, output.cache, candidates.err)
+	if err := candidates.err; err != nil && !(rejected && stream) {
+		writeGeminiFailure(w, r, request, output.cache, err)
 		return
 	}
 	if stream {
@@ -894,7 +892,7 @@ func (s *server) handleGeminiGenerate(w http.ResponseWriter, r *http.Request, re
 		return consumeEvents(candidates.ctx, events, nil)
 	})
 	if err != nil {
-		writeGeminiFailure(w, r, err)
+		writeGeminiFailure(w, r, request, output.cache, err)
 		return
 	}
 	response := buildGeminiResponse(request, output.cache, results)
@@ -930,11 +928,33 @@ func (s *server) deliverGeminiImages(parts []map[string]any) error {
 	return nil
 }
 
-// writeGeminiFailure 写出响应头之前的生成失败
-func writeGeminiFailure(w http.ResponseWriter, r *http.Request, err error) {
-	if shouldWriteRequestError(r, err) {
-		writeGeminiRequestError(w, err)
+// writeGeminiFailure 写出响应头之前的生成失败，上游按输入拒绝时按 Gemini API 返回 200 与 promptFeedback，cache 非空时用量计入缓存部分
+func writeGeminiFailure(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, cache *geminiCache, err error) {
+	if !shouldWriteRequestError(r, err) {
+		return
 	}
+	if response, ok := geminiPromptFeedback(request, cache, err); ok {
+		writeJSON(w, http.StatusOK, officialOrder("gemini", response))
+		return
+	}
+	writeGeminiRequestError(w, err)
+}
+
+// geminiPromptFeedback 把上游输入拒绝投影为不含候选的 Gemini 响应，用量为上游计入的输入，cache 非空时计入缓存部分
+func geminiPromptFeedback(request antigravity.GenerateRequest, cache *geminiCache, err error) (map[string]any, bool) {
+	var feedback *antigravity.PromptFeedbackError
+	if !errors.As(err, &feedback) {
+		return nil, false
+	}
+	block := map[string]any{"blockReason": feedback.Reason}
+	if feedback.Message != "" {
+		block["blockReasonMessage"] = feedback.Message
+	}
+	response := map[string]any{"promptFeedback": block, "modelVersion": request.Model, "responseId": request.ID}
+	if feedback.Usage != nil {
+		response["usageMetadata"] = geminiUsage(cache.usage(feedback.Usage))
+	}
+	return response, true
 }
 
 // buildGeminiResponse 按候选序号输出各候选内容与终止原因，用量为全部候选之和，cache 非空时计入缓存部分
@@ -1079,6 +1099,8 @@ func geminiFinishReason(reason string) string {
 		return "SPII"
 	case "malformed_function_call":
 		return "MALFORMED_FUNCTION_CALL"
+	case "malformed_response":
+		return "MALFORMED_RESPONSE"
 	case "image_safety":
 		return "IMAGE_SAFETY"
 	case "unexpected_tool_call":
@@ -1224,9 +1246,11 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 		if !shouldWriteRequestError(r, err) || last != nil && write(last) != nil {
 			return
 		}
-		_ = fail(map[string]any{"error": map[string]any{
-			"code": statusFromError(err), "message": err.Error(), "status": geminiErrorStatus(err),
-		}})
+		if response, ok := geminiPromptFeedback(request, output.cache, err); ok && last == nil {
+			_ = write(response)
+			return
+		}
+		_ = fail(map[string]any{"error": geminiErrorPayload(err, retryAfterSeconds(err))})
 		return
 	}
 	model := request.Model
