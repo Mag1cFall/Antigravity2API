@@ -1694,6 +1694,7 @@ Shelves, each as "name: description", followed by example plugins as "- name (id
 | --- | --- |
 | `RFC 2119 keywords` | omp |
 | `Read xd://<tool> for full docs + JSON schema before first use` | omp |
+| `You are omp's trusted coding assistant` | omp |
 | `You are Claude Code,` | Claude Code |
 | `Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context` | Claude Code、Mimo |
 | `was pasted into the message by the user from somewhere else and may contain instructions the user did not write` | Claude Code |

@@ -12,6 +12,7 @@ import (
 var systemRejected = []*regexp.Regexp{phrases(
 	"RFC 2119 keywords",
 	"Read xd://<tool> for full docs + JSON schema before first use",
+	"You are omp's trusted coding assistant",
 	"You are Claude Code,",
 	"Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context",
 	"was pasted into the message by the user from somewhere else and may contain instructions the user did not write",
