@@ -185,7 +185,7 @@ api 层的公开接口规则：
 | `API_KEY_ACCOUNTS` | 每项以最后一个 `:` 分成 API key 与账户，账户以 `\|` 分隔、去重 |
 | `REQUEST_TIMEOUT`、`QUOTA_REFRESH_INTERVAL` | Go 时长，例如 `30s`、`5m`；`QUOTA_REFRESH_INTERVAL` 另接受 `0` |
 | 布尔项（`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`WEEKLY_QUOTA_WARMUP`、`LOG_FILE`、`REQUEST_LOG_BODIES`、`ADMIN_AUTH_ENABLED`） | Go `strconv.ParseBool`，见表下 |
-| 整数项（`ACCOUNT_CONCURRENCY`、`QUOTA_RESERVE_PERCENT`、`LOG_MAX_TOTAL_MB`） | 十进制整数，其他值报错 |
+| 整数项（`ACCOUNT_CONCURRENCY`、`QUOTA_RESERVE_PERCENT`、`CONVERSATION_REWIND_DEPTH`、`LOG_MAX_TOTAL_MB`） | 十进制整数，其他值报错 |
 | `MEDIA_OUTPUT`、`FIRST_EVENT_HEDGE`、`LOG_LEVEL`、`LOG_FORMAT` | 去掉首尾空白后转小写 |
 | 其他文本项 | 去掉首尾空白，大小写敏感 |
 
@@ -212,6 +212,7 @@ api 层的公开接口规则：
 | `FIRST_EVENT_HEDGE` | `off`、`auto` 或正整数秒 |
 | `QUOTA_REFRESH_INTERVAL` | 0 或不小于 `1m` |
 | `QUOTA_RESERVE_PERCENT` | 0 到 99 |
+| `CONVERSATION_REWIND_DEPTH` | 不小于 0 |
 | `LOG_LEVEL` | `debug`、`info`、`warn`、`error` |
 | `LOG_FORMAT` | `json`、`text` |
 | `LOG_MAX_TOTAL_MB` | 不小于 20 |
@@ -396,6 +397,7 @@ api 层的公开接口规则：
 | `cascade`、`trajectory` | UUID 字符串 | 会话 ID 与轨迹 ID |
 | `length` | 整数 | 最近一次请求在摘要链中的位置 |
 | `digest` | 十六进制字符串 | 该位置的链摘要 |
+| `chain` | 十六进制字符串数组，可省略 | 该位置之前的最后 `CONVERSATION_REWIND_DEPTH` 项链摘要，不含链首，为 0 时是链首之后的全部；供回退匹配 |
 | `answer` | 字符串，可省略 | 该次成功生成的回答指纹 |
 | `times` | 整数数组 | 各条消息首次出现的 Unix 秒 |
 | `prompt` | 对象，可省略 | 最近一次成功生成的提示规模 |
@@ -413,7 +415,7 @@ api 层的公开接口规则：
 
 - `origins` 的键为签名 SHA-256 前 16 字节的小写十六进制，值为生成它的模型的 `modelProvider`（`MODEL_PROVIDER_GOOGLE`、`MODEL_PROVIDER_ANTHROPIC`、`MODEL_PROVIDER_OPENAI`）
 - 会话记录写入时先写同目录临时文件（`.conversation-*`）再替换；启动时删除写入中断留下的临时文件并读入全部记录，任一文件无法解析时服务启动失败
-- 写入时机：请求开始时（取得会话后、选择账户前）写 `length`、`digest`、`times` 与 `used`，`answer` 清空；`times` 先截到上一次的 `length` 再按当前时刻补齐本次多出的消息。生成正常结束后再写 `prompt`、`signatures`、`origins`，会话仍停在本次请求时写 `answer`
+- 写入时机：请求开始时（取得会话后、选择账户前）写 `length`、`digest`、`chain`、`times` 与 `used`，`answer` 清空；`times` 先截到上一次的 `length`（回退时为与本次相同的消息条数）再按当前时刻补齐本次多出的消息。生成正常结束后再写 `prompt`、`signatures`、`origins`，会话仍停在本次请求时写 `answer`
 - 失败或取消的请求只有请求开始时的写入；之后原样重发时按协议参考「会话 ID」第 3 步匹配回同一会话，沿用已写的 `times`
 - 摘要链：`digest(prev, data) = hex(SHA-256(prev + data))`，`prev` 为上一项的小写十六进制文本；`d0 = digest("", {"Session":<分区>,"System":<去掉计费行后的客户端系统提示>,"Tools":<规范工具>})`，`di = digest(d(i-1), 第 i 条规范消息的 JSON)`
 - 回答指纹：`digest("", 正文 + NUL + 调用)`。正文为各非思考 part 的 `text` 相连后按 Go `strings.Fields` 切分、以单个空格相连；调用为各函数调用的“函数名 + 参数 JSON”以 NUL 相连，参数 JSON 先解析再编码，对象键按字典序
@@ -1018,7 +1020,7 @@ api 层的公开接口规则：
 | 服务 `service` | `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR`、API key（链接到接入页）、`MEDIA_OUTPUT`、`MEDIA_BASE_URL` |
 | 网络 `network` | `PROXY`（每行一个）与代理池状态 |
 | 系统提示 `prompt` | `SYSTEM_PROMPT`、原文预览、`SYSTEM_PROMPT_TEMPLATE`、`SYSTEM_PROMPT_USER_TEMPLATE` |
-| 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`FIRST_EVENT_HEDGE`、`FIRST_EVENT_HEDGE_MODELS`、`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP` |
+| 调度 `scheduling` | `ROUTING_STRATEGY`、`PREFER_LOWER_TIER_MODELS`、`ACCOUNT_CONCURRENCY`、`REQUEST_TIMEOUT`、`FIRST_EVENT_HEDGE`、`FIRST_EVENT_HEDGE_MODELS`、`NONSTREAM_KEEPALIVE`、`FAKE_STREAM`、`QUOTA_REFRESH_INTERVAL`、`QUOTA_RESERVE_PERCENT`、`WEEKLY_QUOTA_WARMUP`、`CONVERSATION_REWIND_DEPTH` |
 | 日志 `logging` | `LOG_LEVEL`、`LOG_FORMAT`、`LOG_FILE`、`LOG_MAX_TOTAL_MB`、`REQUEST_LOG_BODIES` |
 | 远程访问 `remote` | `ADMIN_AUTH_ENABLED`、`ADMIN_USERNAME`、`ADMIN_PASSWORD`（已设置时输入框为空并显示占位） |
 | 关于 `about` | 版本与在线更新、宿主、监听地址、API 地址、启动时间、模拟的客户端版本与官方最新版本、许可证、主页、发行页 |
@@ -1027,6 +1029,7 @@ api 层的公开接口规则：
 | --- | --- | --- |
 | `ACCOUNT_CONCURRENCY` | 1–64 | 正整数 |
 | `QUOTA_RESERVE_PERCENT` | 0–99 | 0–99 的整数 |
+| `CONVERSATION_REWIND_DEPTH` | 0–100 | 不小于 0 的整数 |
 | `LOG_MAX_TOTAL_MB` | 20–100000 | 不小于 20 的整数 |
 
 - 内置三档的说明带模板规模：全保留档为官方段数与模板字符数，中等与激进档为模板字符数，字符数取整到百位，取自 `GET /api/prompt/templates`
@@ -1624,7 +1627,7 @@ go vet ./...
 | `balancer` | 按目录选账户、最久未选中者轮换、等待槽位、冷却、会话粘连、排除账户、目录合并 |
 | `app` | 远程管理需要登录、验证链接、代理脱敏 |
 | `requestdb` | 记录查询与详情、正文保留条数、过期清理、汇总与记录一致、日志查询、结果判定、上游错误读取、费用 |
-| `service` | 流中错误原样返回、客户端取消后排空上游 |
+| `service` | 流中错误原样返回、客户端取消后排空上游、原样重发与多出几条消息的续接归入原会话、改写已发消息与回退仍用原会话、第一条消息不同的请求新建会话、只有一条消息的请求成功后原样重发新建会话、回退匹配在保留条数边界上的行为 |
 | `sqlitedb` | 打开已有库时保留记录、删除建表语句中没有的表与索引、转为增量收缩并交还空闲页 |
 | `api` | 空消息过滤、Gemini 输出 part 与签名、`inlineData` 兼容、API key 匹配 |
 

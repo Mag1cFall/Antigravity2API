@@ -1022,6 +1022,9 @@ export const messages: Catalog = {
     warmup: 'Weekly quota warmup',
     warmupHint:
       'After each automatic quota refresh, send "Hi" from every ready account whose weekly window has not started, so the weekly timer starts. At most once per account and quota group every 6 days.',
+    rewindDepth: 'Rewind matching depth',
+    rewindDepthHint:
+      'How many trailing message digests a conversation record keeps for recognizing a rewind. A request that rewinds or edits within the last that many messages stays in the same conversation; beyond that a new conversation starts. 0 keeps them all.',
     logLevel: 'Log level',
     logLevelHint:
       'Service logs below this level are not recorded; switch to DEBUG while troubleshooting.',
@@ -1065,6 +1068,7 @@ export const messages: Catalog = {
     errDuration: 'Enter a number greater than 0.',
     errLogTotal: 'Enter a whole number of at least 20.',
     errReserve: 'Enter a whole number from 0 to 99.',
+    errRewind: 'Enter a whole number of at least 0.',
     errAdminUser: 'Remote sign-in needs a username.',
     errAdminPassword: 'Remote sign-in needs a password.',
     errMediaBase: 'Enter an address starting with http:// or https://, or leave it empty.',

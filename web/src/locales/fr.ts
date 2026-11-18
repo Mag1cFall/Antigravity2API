@@ -1047,6 +1047,9 @@ export const messages: Catalog = {
     warmup: 'Amorçage du quota hebdomadaire',
     warmupHint:
       'Après chaque actualisation automatique du quota, envoie « Hi » depuis chaque compte prêt dont la fenêtre hebdomadaire n’a pas commencé, pour lancer le décompte hebdomadaire. Au plus une fois tous les 6 jours par compte et par groupe de quota.',
+    rewindDepth: 'Profondeur de retour arrière',
+    rewindDepthHint:
+      'Nombre de condensés de messages récents que l’enregistrement d’une conversation conserve pour reconnaître un retour arrière. Une requête qui revient en arrière ou modifie l’un de ces derniers messages reste dans la même conversation ; au-delà, une nouvelle conversation commence. À 0, tous sont conservés.',
     logLevel: 'Niveau de journalisation',
     logLevelHint:
       'Les journaux du service sous ce niveau ne sont pas enregistrés ; passez à DEBUG pour un diagnostic.',
@@ -1093,6 +1096,7 @@ export const messages: Catalog = {
     errDuration: 'Saisissez un nombre supérieur à 0.',
     errLogTotal: 'Saisissez un nombre entier d’au moins 20.',
     errReserve: 'Saisissez un nombre entier de 0 à 99.',
+    errRewind: 'Saisissez un nombre entier d’au moins 0.',
     errAdminUser: 'La connexion à distance exige un nom d’utilisateur.',
     errAdminPassword: 'La connexion à distance exige un mot de passe.',
     errMediaBase: 'Saisissez une adresse commençant par http:// ou https://, ou laissez vide.',

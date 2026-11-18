@@ -971,6 +971,9 @@ export const messages: Catalog = {
     warmup: '每週額度喚醒',
     warmupHint:
       '每次自動重新整理額度後，替每週額度時段尚未開始計時的就緒帳號送出一則 Hi，開始本週計時；同一帳號的每個額度群組 6 天內最多一次。',
+    rewindDepth: '回退比對則數',
+    rewindDepthHint:
+      '對話紀錄為辨識回退所保留的訊息摘要則數。用戶端回退或改寫最近這幾則訊息後再送出請求時仍歸入原對話，超出時建立新對話。填 0 時不限制。',
     logLevel: '日誌等級',
     logLevelHint: '低於此等級的服務日誌不會記錄；疑難排解時可暫時改為 DEBUG。',
     logFormat: '日誌格式',
@@ -1010,6 +1013,7 @@ export const messages: Catalog = {
     errDuration: '填寫大於 0 的數值。',
     errLogTotal: '填寫不小於 20 的整數。',
     errReserve: '填寫 0 到 99 的整數。',
+    errRewind: '填寫不小於 0 的整數。',
     errAdminUser: '啟用遠端登入需要使用者名稱。',
     errAdminPassword: '啟用遠端登入需要設定密碼。',
     errMediaBase: '填寫以 http:// 或 https:// 開頭的位址，或留空。',

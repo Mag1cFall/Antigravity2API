@@ -47,6 +47,7 @@ var Keys = []string{
 	"QUOTA_REFRESH_INTERVAL",
 	"QUOTA_RESERVE_PERCENT",
 	"WEEKLY_QUOTA_WARMUP",
+	"CONVERSATION_REWIND_DEPTH",
 	"LOG_LEVEL",
 	"LOG_FORMAT",
 	"LOG_FILE",
@@ -131,6 +132,8 @@ type Config struct {
 	QuotaReservePercent int
 	// WeeklyQuotaWarmup 为真时在定时额度刷新后为周额度窗口未开始计时的账户发一次最小请求
 	WeeklyQuotaWarmup bool
+	// ConversationRewindDepth 是会话记录为回退匹配保留的链摘要条数，即最多能认出回退几条消息，为 0 时全部保留
+	ConversationRewindDepth int
 	// Invalid 是加载时取值无效、改用默认值的配置项
 	Invalid []InvalidValue
 	// Environment 是取自进程环境变量、覆盖 .env 的配置项
@@ -164,6 +167,7 @@ func Default() Config {
 		FirstEventHedgeModels:    []string{"gemini-4-argon"},
 		NonstreamKeepalive:       true,
 		QuotaRefreshInterval:     15 * time.Minute,
+		ConversationRewindDepth:  3,
 		LogLevel:                 "info",
 		LogFormat:                "json",
 		LogFile:                  true,
@@ -282,6 +286,7 @@ func (c *Config) Set(values map[string]string) error {
 	duration("QUOTA_REFRESH_INTERVAL", &c.QuotaRefreshInterval)
 	integer("QUOTA_RESERVE_PERCENT", &c.QuotaReservePercent)
 	boolean("WEEKLY_QUOTA_WARMUP", &c.WeeklyQuotaWarmup)
+	integer("CONVERSATION_REWIND_DEPTH", &c.ConversationRewindDepth)
 	text("LOG_LEVEL", &c.LogLevel)
 	c.LogLevel = strings.ToLower(c.LogLevel)
 	text("LOG_FORMAT", &c.LogFormat)
@@ -323,6 +328,7 @@ func (c Config) Values() map[string]string {
 		"QUOTA_REFRESH_INTERVAL":      formatDuration(c.QuotaRefreshInterval),
 		"QUOTA_RESERVE_PERCENT":       strconv.Itoa(c.QuotaReservePercent),
 		"WEEKLY_QUOTA_WARMUP":         strconv.FormatBool(c.WeeklyQuotaWarmup),
+		"CONVERSATION_REWIND_DEPTH":   strconv.Itoa(c.ConversationRewindDepth),
 		"LOG_LEVEL":                   c.LogLevel,
 		"LOG_FORMAT":                  c.LogFormat,
 		"LOG_FILE":                    strconv.FormatBool(c.LogFile),
@@ -445,6 +451,12 @@ var checks = []struct {
 	{[]string{"QUOTA_RESERVE_PERCENT"}, func(c Config) error {
 		if c.QuotaReservePercent < 0 || c.QuotaReservePercent > 99 {
 			return fmt.Errorf("QUOTA_RESERVE_PERCENT 必须是 0 到 99 的整数")
+		}
+		return nil
+	}},
+	{[]string{"CONVERSATION_REWIND_DEPTH"}, func(c Config) error {
+		if c.ConversationRewindDepth < 0 {
+			return fmt.Errorf("CONVERSATION_REWIND_DEPTH 不能小于 0")
 		}
 		return nil
 	}},

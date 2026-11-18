@@ -324,6 +324,7 @@ docs/                 # protocol, development and logging docs
 | `QUOTA_REFRESH_INTERVAL` | Interval for reading the quota of every account, disabled ones included, in the background; minimum `1m`, `0` turns it off | `15m` |
 | `QUOTA_RESERVE_PERCENT` | Quota reserve, 0–99 | `0` |
 | `WEEKLY_QUOTA_WARMUP` | Start weekly quota timers automatically | `false` |
+| `CONVERSATION_REWIND_DEPTH` | Rewind matching depth, `0` for no limit | `3` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `LOG_FORMAT` | Log format: `json` or `text` | `json` |
 | `LOG_FILE` | Also write logs to `RUNTIME_DIR/logs/`, rotating at 10 MB per file | `true` |
@@ -337,6 +338,7 @@ docs/                 # protocol, development and logging docs
 - `ROUTING_STRATEGY`: among the highest-priority accounts, `round-robin` picks the one with the fewest running requests and, on ties, the one picked least recently; `fill-first` fills one account first
 - `QUOTA_RESERVE_PERCENT`: when the 5-hour or weekly remaining share of an account quota group is at or below this percentage, the group is not scheduled until that window resets; with `0` only used-up groups are skipped
 - `WEEKLY_QUOTA_WARMUP`: after each automatic quota refresh, send `Hi` from every ready account whose weekly window has not started, so the weekly timer starts; at most once per account and quota group every 6 days
+- `CONVERSATION_REWIND_DEPTH`: how many trailing message digests a conversation record keeps for recognizing a rewind; a request that rewinds or edits within the last that many messages stays in the same conversation, and beyond that a new conversation starts
 - `REQUEST_LOG_BODIES`: store public request and response bodies and the upstream attempt bodies of successful requests; upstream attempt bodies of failed requests are always stored; each is truncated to 64 KiB, keeping the latest 1000 of each
 
 Process environment variables override the same keys in `.env`.

@@ -17,6 +17,7 @@
   "API_KEY_ACCOUNTS 中 API key 的账户不能为空": "API_KEY_ACCOUNTS 中 API key 的帳號不能為空",
   "API_KEY_ACCOUNTS 的每一项必须是 API key:账户|账户": "API_KEY_ACCOUNTS 的每一項必須是 API key:帳號|帳號",
   "AUTH_DIR 不能为空": "AUTH_DIR 不能為空",
+  "CONVERSATION_REWIND_DEPTH 不能小于 0": "CONVERSATION_REWIND_DEPTH 不能小於 0",
   "Docker 部署随镜像更新": "Docker 部署隨映像檔更新",
   "FIRST_EVENT_HEDGE 必须是 off、auto 或正整数秒": "FIRST_EVENT_HEDGE 必須是 off、auto 或正整數秒",
   "LISTEN 必须是 host:port": "LISTEN 必須是 host:port",

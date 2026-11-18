@@ -738,10 +738,11 @@ func (s *Service) RefreshQuotas(ctx context.Context) map[string]error {
 	return failed
 }
 
-// configure 把实时配置的单账户并发上限、调度策略与额度保留比例交给账户池
+// configure 把实时配置的单账户并发上限、调度策略与额度保留比例交给账户池，回退匹配保留的链摘要条数交给会话记录
 func (s *Service) configure(cfg *config.Config) {
 	s.pool.Configure(cfg.AccountConcurrency, cfg.RoutingStrategy == "fill-first")
 	s.pool.Reserve(float64(cfg.QuotaReservePercent) / 100)
+	s.conversations.retain(cfg.ConversationRewindDepth)
 }
 
 // composer 返回实时配置档位对应的 Composer，档位或自定义档的模板变化时重建

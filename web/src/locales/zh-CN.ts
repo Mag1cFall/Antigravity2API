@@ -963,6 +963,9 @@ export const messages = {
     warmup: '周额度唤醒',
     warmupHint:
       '每次自动刷新额度后，为每周额度窗口尚未开始计时的就绪账户发送一条 Hi，开始本周计时；同一账户的每个额度组 6 天内最多一次。',
+    rewindDepth: '回退匹配条数',
+    rewindDepthHint:
+      '会话记录为识别回退保留的消息摘要条数。客户端回退或改写最近这几条消息后再发请求时仍归入原会话，超出时新建会话。填 0 时不限制。',
     logLevel: '日志级别',
     logLevelHint: '低于此级别的服务日志不记录；排查问题时临时改为 DEBUG。',
     logFormat: '日志格式',
@@ -1001,6 +1004,7 @@ export const messages = {
     errDuration: '填写大于 0 的数值。',
     errLogTotal: '填写不小于 20 的整数。',
     errReserve: '填写 0 到 99 的整数。',
+    errRewind: '填写不小于 0 的整数。',
     errAdminUser: '开启远程登录需要用户名。',
     errAdminPassword: '开启远程登录需要设置密码。',
     errMediaBase: '填写 http:// 或 https:// 开头的地址，或留空。',

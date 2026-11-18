@@ -17,6 +17,7 @@
   "API_KEY_ACCOUNTS 中 API key 的账户不能为空": "Les comptes d’une clé API dans API_KEY_ACCOUNTS ne peuvent pas être vides",
   "API_KEY_ACCOUNTS 的每一项必须是 API key:账户|账户": "Chaque entrée de API_KEY_ACCOUNTS doit être au format clé API:compte|compte",
   "AUTH_DIR 不能为空": "AUTH_DIR ne peut pas être vide",
+  "CONVERSATION_REWIND_DEPTH 不能小于 0": "CONVERSATION_REWIND_DEPTH ne peut pas être inférieur à 0",
   "Docker 部署随镜像更新": "Les déploiements Docker sont mis à jour via l’image",
   "FIRST_EVENT_HEDGE 必须是 off、auto 或正整数秒": "FIRST_EVENT_HEDGE doit être off, auto ou un nombre entier positif de secondes",
   "LISTEN 必须是 host:port": "LISTEN doit être au format host:port",

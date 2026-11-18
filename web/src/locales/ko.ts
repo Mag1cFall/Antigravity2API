@@ -1014,6 +1014,9 @@ export const messages: Catalog = {
     warmup: '주간 할당량 워밍업',
     warmupHint:
       '할당량을 자동으로 새로고침할 때마다 주간 할당량 창의 타이머가 아직 시작되지 않은 준비된 계정에서 Hi를 한 번 보내 이번 주 타이머를 시작합니다. 같은 계정의 할당량 그룹마다 6일에 최대 한 번입니다.',
+    rewindDepth: '되돌리기 매칭 개수',
+    rewindDepthHint:
+      '되돌리기를 인식하기 위해 대화 기록에 남기는 메시지 다이제스트 개수입니다. 클라이언트가 최근 이 개수 이내의 메시지를 되돌리거나 고쳐서 다시 보내면 같은 대화로 처리하고, 그보다 많으면 새 대화를 만듭니다. 0이면 제한하지 않습니다.',
     logLevel: '로그 수준',
     logLevelHint:
       '이 수준보다 낮은 서비스 로그는 기록하지 않습니다. 문제를 해결할 때는 잠시 DEBUG로 바꾸세요.',
@@ -1058,6 +1061,7 @@ export const messages: Catalog = {
     errDuration: '0보다 큰 값을 입력하세요.',
     errLogTotal: '20 이상의 정수를 입력하세요.',
     errReserve: '0~99 사이의 정수를 입력하세요.',
+    errRewind: '0 이상의 정수를 입력하세요.',
     errAdminUser: '원격 로그인을 켜려면 사용자 이름이 필요합니다.',
     errAdminPassword: '원격 로그인을 켜려면 비밀번호를 설정해야 합니다.',
     errMediaBase: 'http:// 또는 https://로 시작하는 주소를 입력하거나 비워 두세요.',
