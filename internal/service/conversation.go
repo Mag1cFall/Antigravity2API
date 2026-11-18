@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -24,7 +25,7 @@ const conversationTTL = 24 * time.Hour
 // conversationTemp 为写入会话文件时同目录临时文件的名称前缀
 const conversationTemp = ".conversation-"
 
-// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、最近一次请求在摘要链中的位置、该位置之前供回退匹配的最后若干项链摘要与其成功生成的回答指纹、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 与各回答指纹的思考签名、各签名摘要对应的模型族
+// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、最近一次请求在摘要链中的位置与该处的链摘要、该次请求成功生成的回答指纹、该位置之前供回退匹配的链摘要、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 与各回答指纹的思考签名、各签名摘要对应的模型族
 type conversation struct {
 	Cascade    string            `json:"cascade"`
 	Trajectory string            `json:"trajectory"`
@@ -49,13 +50,12 @@ type promptUsage struct {
 	Tokens   int64  `json:"tokens"`
 }
 
-// conversations 在内存与 dir 下每个会话一个 JSON 文件中保存会话记录，keep 为每条记录为回退匹配保留的链摘要条数，0 为全部保留
+// conversations 在内存与 dir 下每个会话一个 JSON 文件中保存会话记录
 type conversations struct {
 	dir   string
 	mu    sync.Mutex
 	items map[string]*conversation
 	now   func() time.Time
-	keep  int
 }
 
 // openConversations 读取 dir 下未过期的会话记录并删除写入中断留下的临时文件，目录不存在时创建
@@ -146,7 +146,7 @@ func digest(previous string, data []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// begin 为生成请求取得会话：找最近一次请求是本次前缀或与本次相同的会话，本次只有一条消息时不取已成功生成过这条消息的会话；没有且本次多于一条消息时由 rewind 取回退的会话，仍没有时新建；记下本次的摘要链与新消息的时间并落盘，返回会话副本，新建时副本的 New 为真
+// begin 为生成请求取得会话：找最近一次请求是本次前缀或与本次相同的会话，本次不多于一条消息时不取已成功生成过的会话；本次多于一条消息时另由 rewind 取回退的会话，相同部分更长时改用它；都没有时新建；记下本次的摘要链与新消息的时间并落盘，返回会话副本，新建时副本的 New 为真
 func (c *conversations) begin(digests, answers []string) (conversation, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -155,60 +155,50 @@ func (c *conversations) begin(digests, answers []string) (conversation, error) {
 	item := c.match(digests, answers, func(item *conversation) bool {
 		return length > 1 || item.Length < length || item.Prompt == nil || item.Prompt.Length < item.Length
 	})
-	if item == nil && length > 1 {
-		item = c.rewind(digests)
+	shared := 0
+	if item != nil {
+		shared = item.Length
+	}
+	if length > 1 {
+		if back, kept := c.rewind(digests); kept > shared {
+			item, shared = back, kept
+		}
 	}
 	created := item == nil
 	if created {
 		item = &conversation{Cascade: uuid.NewString(), Trajectory: uuid.NewString()}
 		c.items[item.Cascade] = item
 	}
-	times := item.Times[:min(item.Length, len(item.Times))]
+	times := item.Times[:min(shared, len(item.Times))]
 	for len(times) < length {
 		times = append(times, now.Unix())
 	}
-	item.Length, item.Digest, item.Chain, item.Answer, item.Times, item.Used = length, digests[length], c.tail(digests), "", times, now
+	item.Length, item.Digest, item.Chain, item.Answer, item.Times, item.Used = length, digests[length], history(digests), "", times, now
 	c.sweep()
 	snapshot := c.snapshot(item)
 	snapshot.New = created
 	return snapshot, c.save(item)
 }
 
-// retain 设置每条会话记录为回退匹配保留的链摘要条数，0 为全部保留，下一次请求写入记录时生效
-func (c *conversations) retain(keep int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.keep = keep
-}
-
-// tail 返回摘要链中链位置之前的最后 keep 项的副本，不含链首；keep 为 0 时取链首之后的全部，链位置之前没有消息时为空
-func (c *conversations) tail(digests []string) []string {
-	length := len(digests) - 1
-	from := 1
-	if c.keep > 0 {
-		from = max(length-c.keep, 1)
-	}
-	if from >= length {
+// history 返回摘要链中链首之后、链位置之前各项的副本，链位置之前没有消息时为空
+func history(digests []string) []string {
+	if len(digests) <= 2 {
 		return nil
 	}
-	return append([]string(nil), digests[from:length]...)
+	return slices.Clone(digests[1 : len(digests)-1])
 }
 
-// rewind 取回退的会话：会话保留的链摘要从 start 处起，本次在这些位置上与之相同的项数用二分查找（链摘要逐项累积，某项相同则之前各项都相同），取相同处最靠后的会话，把它的链位置退回到该处并返回；并列时取最近使用者。本次比 start 短或在 start 处已不同时该会话不算，都不算时返回 nil
-func (c *conversations) rewind(digests []string) *conversation {
+// rewind 返回从第 1 条消息起与本次相同条数最多的会话与相同条数：条数按会话保留的链摘要二分查找（链摘要逐项累积，某项相同则之前各项都相同），并列时取最近使用者；第 1 条消息就不同的会话不算，都不算时返回 nil 与 0
+func (c *conversations) rewind(digests []string) (*conversation, int) {
 	var best *conversation
 	kept := 0
 	for _, item := range c.items {
-		start := item.Length - len(item.Chain)
-		count := sort.Search(max(min(len(item.Chain), len(digests)-start), 0), func(i int) bool { return item.Chain[i] != digests[start+i] })
-		if shared := start + count - 1; count > 0 && (shared > kept || shared == kept && item.Used.After(best.Used)) {
-			best, kept = item, shared
+		count := sort.Search(min(len(item.Chain), len(digests)-1), func(i int) bool { return item.Chain[i] != digests[i+1] })
+		if count > kept || count > 0 && count == kept && item.Used.After(best.Used) {
+			best, kept = item, count
 		}
 	}
-	if best != nil {
-		best.Length, best.Digest = kept, digests[kept]
-	}
-	return best
+	return best, kept
 }
 
 // find 返回链位置是本次前缀的会话副本，供计数使用且不改动记录

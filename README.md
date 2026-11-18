@@ -324,7 +324,6 @@ docs/                 # 协议、开发与日志文档
 | `QUOTA_REFRESH_INTERVAL` | 后台读取全部账户（含停用账户）额度的间隔，最短 `1m`，`0` 为不自动刷新 | `15m` |
 | `QUOTA_RESERVE_PERCENT` | 额度保留比例，0–99 | `0` |
 | `WEEKLY_QUOTA_WARMUP` | 自动开始每周额度计时 | `false` |
-| `CONVERSATION_REWIND_DEPTH` | 回退匹配条数，`0` 为不限制 | `3` |
 | `LOG_LEVEL` | 日志级别：`debug`、`info`、`warn`、`error` | `info` |
 | `LOG_FORMAT` | 日志格式：`json` 或 `text` | `json` |
 | `LOG_FILE` | 同时把日志写入 `RUNTIME_DIR/logs/`，单文件 10 MB 轮转 | `true` |
@@ -338,7 +337,6 @@ docs/                 # 协议、开发与日志文档
 - `ROUTING_STRATEGY`：在优先级最高的账户中，`round-robin` 选进行中请求最少者，并列时选最近一次被选中最早的账户；`fill-first` 先用满一个账户
 - `QUOTA_RESERVE_PERCENT`：账户某个额度组的 5 小时或每周剩余比例不高于此百分比时，调度跳过该组，直到该窗口重置；`0` 时只跳过已用尽的组
 - `WEEKLY_QUOTA_WARMUP`：每次自动刷新额度后，为每周额度窗口尚未开始计时的就绪账户发一条 `Hi`，开始本周计时；同一账户的每个额度组 6 天内最多一次
-- `CONVERSATION_REWIND_DEPTH`：会话记录为识别回退保留的消息摘要条数；客户端回退或改写最近这几条消息后再发请求时仍归入原会话，超出时新建会话
 - `REQUEST_LOG_BODIES`：保存公开请求与响应正文和成功请求的上游尝试正文，失败请求的上游尝试正文总是保存；各截断到 64 KiB，各保留最近 1000 条
 
 进程环境变量覆盖 `.env` 中的同名项。

@@ -1043,9 +1043,6 @@ export const messages: Catalog = {
     warmup: 'Wochenkontingent anstoßen',
     warmupHint:
       'Nach jeder automatischen Kontingentaktualisierung sendet jedes bereite Konto, dessen Wochenfenster noch nicht läuft, ein „Hi“, damit die Wochenzählung beginnt. Höchstens einmal pro Konto und Kontingentgruppe alle 6 Tage.',
-    rewindDepth: 'Tiefe der Rücksprung-Erkennung',
-    rewindDepthHint:
-      'Anzahl der letzten Nachrichten-Digests, die ein Gesprächseintrag zum Erkennen eines Rücksprungs behält. Eine Anfrage, die innerhalb dieser letzten Nachrichten zurückspringt oder sie ändert, bleibt in derselben Konversation; darüber hinaus beginnt eine neue. Bei 0 werden alle behalten.',
     logLevel: 'Protokollebene',
     logLevelHint:
       'Dienstprotokolle unter dieser Ebene werden nicht aufgezeichnet; zur Fehlersuche vorübergehend auf DEBUG stellen.',
@@ -1091,7 +1088,6 @@ export const messages: Catalog = {
     errDuration: 'Geben Sie eine Zahl größer als 0 ein.',
     errLogTotal: 'Geben Sie eine ganze Zahl ab 20 ein.',
     errReserve: 'Geben Sie eine ganze Zahl von 0 bis 99 ein.',
-    errRewind: 'Geben Sie eine ganze Zahl ab 0 ein.',
     errAdminUser: 'Der Fernzugriff braucht einen Benutzernamen.',
     errAdminPassword: 'Der Fernzugriff braucht ein Passwort.',
     errMediaBase:

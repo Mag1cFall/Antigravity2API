@@ -17,7 +17,6 @@
   "API_KEY_ACCOUNTS 中 API key 的账户不能为空": "API_KEY_ACCOUNTS에서 API 키의 계정은 비워 둘 수 없습니다",
   "API_KEY_ACCOUNTS 的每一项必须是 API key:账户|账户": "API_KEY_ACCOUNTS의 각 항목은 API 키:계정|계정이어야 합니다",
   "AUTH_DIR 不能为空": "AUTH_DIR은 비워 둘 수 없습니다",
-  "CONVERSATION_REWIND_DEPTH 不能小于 0": "CONVERSATION_REWIND_DEPTH는 0보다 작을 수 없습니다",
   "Docker 部署随镜像更新": "Docker 배포는 이미지를 통해 업데이트됩니다",
   "FIRST_EVENT_HEDGE 必须是 off、auto 或正整数秒": "FIRST_EVENT_HEDGE는 off, auto 또는 양의 정수(초)여야 합니다",
   "LISTEN 必须是 host:port": "LISTEN은 host:port여야 합니다",

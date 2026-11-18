@@ -99,7 +99,6 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   QUOTA_REFRESH_INTERVAL: 'scheduling',
   QUOTA_RESERVE_PERCENT: 'scheduling',
   WEEKLY_QUOTA_WARMUP: 'scheduling',
-  CONVERSATION_REWIND_DEPTH: 'scheduling',
   LOG_LEVEL: 'logging',
   LOG_FORMAT: 'logging',
   LOG_FILE: 'logging',
@@ -549,11 +548,7 @@ function SettingsEditor({
       </FormRow>,
     )
   const number = (
-    key:
-      | 'ACCOUNT_CONCURRENCY'
-      | 'LOG_MAX_TOTAL_MB'
-      | 'QUOTA_RESERVE_PERCENT'
-      | 'CONVERSATION_REWIND_DEPTH',
+    key: 'ACCOUNT_CONCURRENCY' | 'LOG_MAX_TOTAL_MB' | 'QUOTA_RESERVE_PERCENT',
     label: string,
     hint: string,
     min: number,
@@ -774,7 +769,6 @@ function SettingsEditor({
         {duration('QUOTA_REFRESH_INTERVAL', m.quotaRefresh, m.quotaRefreshHint)}
         {number('QUOTA_RESERVE_PERCENT', m.quotaReserve, m.quotaReserveHint, 0, 99)}
         {toggle('WEEKLY_QUOTA_WARMUP', m.warmup, m.warmupHint)}
-        {number('CONVERSATION_REWIND_DEPTH', m.rewindDepth, m.rewindDepthHint, 0, 100)}
         <LinkRow
           label={m.mapping}
           hint={m.mappingHint}

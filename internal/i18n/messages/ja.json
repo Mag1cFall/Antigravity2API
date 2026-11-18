@@ -17,7 +17,6 @@
   "API_KEY_ACCOUNTS 中 API key 的账户不能为空": "API_KEY_ACCOUNTS 内の API キーのアカウントは空にできません",
   "API_KEY_ACCOUNTS 的每一项必须是 API key:账户|账户": "API_KEY_ACCOUNTS の各項目は API キー:アカウント|アカウント である必要があります",
   "AUTH_DIR 不能为空": "AUTH_DIR は空にできません",
-  "CONVERSATION_REWIND_DEPTH 不能小于 0": "CONVERSATION_REWIND_DEPTH は 0 未満にできません",
   "Docker 部署随镜像更新": "Docker デプロイはイメージとともに更新されます",
   "FIRST_EVENT_HEDGE 必须是 off、auto 或正整数秒": "FIRST_EVENT_HEDGE は off、auto、または正の整数秒である必要があります",
   "LISTEN 必须是 host:port": "LISTEN は host:port である必要があります",

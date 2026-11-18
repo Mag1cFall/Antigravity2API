@@ -58,7 +58,6 @@ interface SchemaMessages {
   errDuration: string
   errLogTotal: string
   errReserve: string
-  errRewind: string
   errAdminUser: string
   errAdminPassword: string
   errMediaBase: string
@@ -97,10 +96,6 @@ export function settingsSchema(m: SchemaMessages, passwordSet: boolean) {
         .min(0, m.errReserve)
         .max(99, m.errReserve),
       WEEKLY_QUOTA_WARMUP: z.boolean(),
-      CONVERSATION_REWIND_DEPTH: z
-        .number({ error: m.errRewind })
-        .int(m.errRewind)
-        .min(0, m.errRewind),
       LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']),
       LOG_FORMAT: z.enum(['json', 'text']),
       LOG_FILE: z.boolean(),
@@ -165,7 +160,6 @@ export function toForm(settings: Settings): SettingsForm {
     QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL', '15m'),
     QUOTA_RESERVE_PERCENT: num('QUOTA_RESERVE_PERCENT', '0'),
     WEEKLY_QUOTA_WARMUP: bool('WEEKLY_QUOTA_WARMUP', 'false'),
-    CONVERSATION_REWIND_DEPTH: num('CONVERSATION_REWIND_DEPTH', '3'),
     LOG_LEVEL: v('LOG_LEVEL', 'info') as SettingsForm['LOG_LEVEL'],
     LOG_FORMAT: v('LOG_FORMAT', 'json') as SettingsForm['LOG_FORMAT'],
     LOG_FILE: bool('LOG_FILE', 'true'),
