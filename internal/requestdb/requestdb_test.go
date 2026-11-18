@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -143,7 +144,7 @@ func TestRecordsQueryAndDetail(t *testing.T) {
 	if err != nil || len(records) != 2 || len(records[0]) != len(records[1]) || records[0][0] != "id" || records[1][0] != "req_3" {
 		t.Fatalf("csv=%v err=%v", records, err)
 	}
-	if got := records[1][len(records[1])-2]; got != "'=HYPERLINK(1)" {
+	if got := records[1][slices.Index(records[0], "error")]; got != "'=HYPERLINK(1)" {
 		t.Fatalf("公式文本未转义: %q", got)
 	}
 }

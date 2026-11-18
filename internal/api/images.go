@@ -132,6 +132,7 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 	if request.Model == "" {
 		models, err := s.service.Models(r.Context())
 		if err != nil {
+			recordFailure(r, err)
 			writeOpenAIRequestError(w, err)
 			return
 		}

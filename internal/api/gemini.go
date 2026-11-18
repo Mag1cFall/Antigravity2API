@@ -344,6 +344,7 @@ func (s *server) handleGeminiAction(w http.ResponseWriter, r *http.Request) {
 	if method == "countTokens" {
 		tokens, err := s.service.CountTokens(r.Context(), generateRequest)
 		if err != nil {
+			recordFailure(r, err)
 			writeGeminiRequestError(w, err)
 			return
 		}
@@ -1215,6 +1216,7 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 		}()
 	}
 	single := len(candidates.events) == 1
+	// last 是单候选时暂存的内容块，来自带结束原因的上游 candidate，结束时并入结束原因与最终用量
 	var last map[string]any
 	results, err := candidates.run(func(index int, events <-chan antigravity.Event) (generationResult, error) {
 		return consumeEvents(candidates.ctx, events, func(event antigravity.Event) error {
@@ -1234,12 +1236,17 @@ func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request an
 			if !single {
 				return write(chunk)
 			}
-			previous := last
-			last = chunk
-			if previous == nil {
+			if last != nil {
+				if err := write(last); err != nil {
+					return err
+				}
+				last = nil
+			}
+			if event.Final {
+				last = chunk
 				return nil
 			}
-			return write(previous)
+			return write(chunk)
 		})
 	})
 	if err != nil {

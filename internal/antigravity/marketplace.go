@@ -76,21 +76,33 @@ func marketplaceEnabled(flags []experimentFlag) bool {
 	return ok && flag.BoolValue != nil && *flag.BoolValue
 }
 
-// LoadMarketplace 按官方 language_server 在虚拟进程第一次生成前读取各插件市场目录：每个虚拟进程只读一次，读到目录后等 28–48 ms 再返回读取的开始时刻；没有读到目录时返回零值
+// LoadMarketplace 按官方 language_server 在虚拟进程第一次生成前读取各插件市场目录：每个虚拟进程只读一次，读取在后台进行，还没有保存过目录时等这次读取结束或 ctx 结束；本次发起了读取且实验开关打开时返回发起时刻，否则返回零值
 func (c *Client) LoadMarketplace(ctx context.Context) time.Time {
-	c.market.Lock()
-	defer c.market.Unlock()
 	c.mu.Lock()
-	fetched := c.hub.fetched
-	c.hub.fetched = true
+	reading, saved := c.hub.reading, len(c.hub.state.Marketplaces) != 0
+	fresh := reading == nil
+	flag, _ := findFlag(c.state.mendelFlags(), flagPluginMarketplaces)
+	enabled := fresh && marketplaceEnabled(c.state.mendelFlags()) && flag.StringListValue != nil
+	if fresh {
+		reading = make(chan struct{})
+		c.hub.reading = reading
+	}
 	c.mu.Unlock()
 	started := time.Now()
-	if fetched || !c.readMarketplaces(context.WithoutCancel(ctx)) {
-		return time.Time{}
+	if fresh {
+		go func() {
+			defer close(reading)
+			c.readMarketplaces(context.WithoutCancel(ctx))
+		}()
 	}
-	select {
-	case <-time.After(time.Duration(between(28, 48)) * time.Millisecond):
-	case <-ctx.Done():
+	if !saved {
+		select {
+		case <-reading:
+		case <-ctx.Done():
+		}
+	}
+	if !enabled {
+		return time.Time{}
 	}
 	return started
 }
@@ -103,11 +115,26 @@ type marketplaceRead struct {
 	started, ended time.Time
 }
 
-// readMarketplaces 在实验开关打开时并发读取开关列出的各插件市场目录，200 的目录一起保存，200 与 304 的读取各记下一个读取事件，返回是否读到目录
+// AwaitCatalog 在实验开关打开插件市场而还没有保存过目录时，等本虚拟进程第一次目录读取结束或 ctx 结束
+func (c *Client) AwaitCatalog(ctx context.Context) {
+	c.mu.Lock()
+	catalog := c.hub.catalog
+	wait := catalog != nil && len(c.hub.state.Marketplaces) == 0 && marketplaceEnabled(c.state.mendelFlags())
+	c.mu.Unlock()
+	if wait {
+		select {
+		case <-catalog:
+		case <-ctx.Done():
+		}
+	}
+}
+
+// readMarketplaces 在实验开关打开时并发读取开关列出的各插件市场目录，200 的目录一起保存，200 与 304 的读取各记下一个读取事件，返回是否读到目录；结束时关闭本虚拟进程的第一次目录读取通道
 func (c *Client) readMarketplaces(ctx context.Context) bool {
 	c.mu.Lock()
-	flags := c.state.mendelFlags()
+	flags, catalog := c.state.mendelFlags(), c.hub.catalog
 	c.mu.Unlock()
+	defer c.catalogRead(catalog)
 	flag, _ := findFlag(flags, flagPluginMarketplaces)
 	if !marketplaceEnabled(flags) || flag.StringListValue == nil {
 		return false
@@ -163,6 +190,20 @@ func (c *Client) readMarketplaces(ctx context.Context) bool {
 	return true
 }
 
+// catalogRead 关闭第一次目录读取通道 catalog，已关闭时不做事
+func (c *Client) catalogRead(catalog chan struct{}) {
+	if catalog == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	select {
+	case <-catalog:
+	default:
+		close(catalog)
+	}
+}
+
 // fetchMarketplace 以 Hub User-Agent、no-cache 与保存的 Last-Modified 经 HTTP/2 读取一个目录，200 时返回新目录，304 时返回保存的目录，其余情况返回 nil
 func (c *Client) fetchMarketplace(ctx context.Context, name, address string) *marketplaceRead {
 	read := &marketplaceRead{name: name, started: time.Now()}
@@ -178,8 +219,9 @@ func (c *Client) fetchMarketplace(ctx context.Context, name, address string) *ma
 	if read.cached.LastModified != "" {
 		request.Header.Set("If-Modified-Since", read.cached.LastModified)
 	}
+	request = c.traced(request)
 	defer func() { c.logRequest(request, read.status, read.started, err) }()
-	response, err := c.web.Do(c.traced(request))
+	response, err := c.h2.Do(request)
 	if err != nil {
 		return nil
 	}

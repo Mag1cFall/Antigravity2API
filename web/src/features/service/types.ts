@@ -9,10 +9,11 @@ export interface Status {
   latest_version: string
 }
 
-// Session 对应 internal/app 的 sessionState
+// Session 对应 internal/app 的 sessionState，local 表示页面运行在服务所在的电脑上
 export interface Session {
   enabled: boolean
   authenticated: boolean
+  local: boolean
 }
 
 // UpdateStatus 对应 GET /api/update，mode 为 binary（可在线更新）、container（随镜像更新）或 development（源码构建）

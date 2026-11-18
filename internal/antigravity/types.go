@@ -210,6 +210,8 @@ const (
 	EventError EventKind = "error"
 	// EventGrounding 表示 Google 搜索的查询、来源与正文片段的来源
 	EventGrounding EventKind = "grounding"
+	// EventRestart 表示服务丢弃已向客户端写出思考的上游尝试并重新生成，之后的思考与签名属于新的尝试
+	EventRestart EventKind = "restart"
 )
 
 // Grounding 表示上游 candidate 的 groundingMetadata
@@ -260,9 +262,11 @@ type Event struct {
 	TraceID          string `json:"trace_id,omitempty"`
 	ResponseID       string `json:"response_id,omitempty"`
 	ThoughtSignature string `json:"thought_signature,omitempty"`
+	// Final 表示正文、思考、函数调用、媒体或签名事件所在的上游 candidate 带结束原因
+	Final bool `json:"-"`
 	// StopSequence 为本地停止序列命中时结束事件上的序列
 	StopSequence string `json:"stop_sequence,omitempty"`
-	// ContinuationToken 为上游以 CONTINUATION 结束一跳时结束事件上的续接令牌
+	// ContinuationToken 为上游以 CONTINUATION 结束一跳时结束事件上的续接令牌，或流中断、没有结束原因时错误事件上流中最近一次的续接令牌
 	ContinuationToken string `json:"-"`
 	// Grounding 为搜索事件的来源
 	Grounding *Grounding `json:"grounding,omitempty"`
@@ -275,4 +279,37 @@ type Service interface {
 	Models(context.Context) ([]Model, error)
 	Generate(context.Context, GenerateRequest) (<-chan Event, error)
 	CountTokens(context.Context, GenerateRequest) (int64, error)
+}
+
+// LiveRequest 表示打开 Live 会话的请求：Model 为客户端请求的模型，Setup 按选定的目录条目返回打开上游流后依次发送的消息，AccountID 与 Accounts 同 GenerateRequest
+type LiveRequest struct {
+	Model     string
+	Setup     func(CatalogModel) ([][]byte, error)
+	AccountID string
+	Accounts  []string
+}
+
+// LiveSession 表示已打开的 Live 上游流：Voice 为语音模式 StreamVoice，否则为 BidiGenerateContent；First 为上游的第一条消息；OpenObserver 在同一账户上再次打开语音模式识别用户语音的转写模型双向流并读完 setupComplete；Close 关闭流、归还账户并以结束原因记账
+type LiveSession struct {
+	Model        CatalogModel
+	Voice        bool
+	Stream       LiveConn
+	First        []byte
+	Account      string
+	OpenObserver func(context.Context) (LiveConn, error)
+	// ObserverStream 为打开语音流之前按官方顺序打开的第一条转写模型流，由会话关闭
+	ObserverStream LiveConn
+	Close          func(cause error)
+}
+
+// LiveConn 为一条收发已编码 protobuf 消息的上游双向流，由 LiveStream 实现
+type LiveConn interface {
+	Send(message []byte) error
+	Recv() ([]byte, error)
+	Close()
+}
+
+// LiveService 为提供 Live 会话的服务
+type LiveService interface {
+	OpenLive(context.Context, LiveRequest) (*LiveSession, error)
 }

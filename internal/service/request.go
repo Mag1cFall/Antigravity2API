@@ -225,14 +225,14 @@ func joinInstruction(system, instruction string) string {
 	return system + "\n" + instruction
 }
 
-// prepareTools 按工具选择改写已改名的声明：none 不声明工具，指定函数与 allowed_tools 只声明所选函数，required 与单调用以上游函数名写入系统指令，strict 函数与 validated 模式在输出中校验参数；original 为上游名到原名的映射，返回需要在输出中按原名核对的约定
+// prepareTools 按工具选择改写已改名的声明：none 不声明工具，指定函数与 allowed_tools 只声明所选函数，required 与单调用以上游函数名写入系统指令，strict 函数与 validated 模式在输出中校验参数，声明了必填参数的函数在输出中核对必填参数；original 为上游名到原名的映射，有声明的函数时返回在输出中按原名核对的约定，没有时为 nil
 func prepareTools(request antigravity.GenerateRequest, original map[string]string) (antigravity.GenerateRequest, *toolContract, error) {
 	config := request.Tools.ToolConfig
 	if config.Mode == "none" {
 		request.Tools.Functions, request.Tools.GoogleSearch = nil, nil
 		return request, nil, nil
 	}
-	contract := &toolContract{required: config.Mode == "required", names: map[string]bool{}, schemas: map[string]*schemaValidator{}}
+	contract := &toolContract{required: config.Mode == "required", names: map[string]bool{}, arguments: map[string][]string{}, schemas: map[string]*schemaValidator{}}
 	functions := make([]antigravity.FunctionDeclaration, 0, len(request.Tools.Functions))
 	for _, declaration := range request.Tools.Functions {
 		name := cmp.Or(original[declaration.Name], declaration.Name)
@@ -241,12 +241,18 @@ func prepareTools(request antigravity.GenerateRequest, original map[string]strin
 		}
 		contract.names[name] = true
 		functions = append(functions, declaration)
-		if !declaration.Strict && config.Mode != "validated" {
-			continue
-		}
 		schema := declaration.Schema
 		if len(schema) == 0 {
 			schema = declaration.Parameters
+		}
+		var object struct {
+			Required []string `json:"required"`
+		}
+		if json.Unmarshal(schema, &object) == nil && len(object.Required) > 0 {
+			contract.arguments[name] = object.Required
+		}
+		if !declaration.Strict && config.Mode != "validated" {
+			continue
 		}
 		validator, err := compileSchema(schema)
 		if err != nil {
@@ -274,7 +280,7 @@ func prepareTools(request antigravity.GenerateRequest, original map[string]strin
 		contract.single = true
 		request.System = joinInstruction(request.System, "Call at most one function in this response.")
 	}
-	if !contract.required && !contract.single && len(contract.schemas) == 0 && len(config.AllowedFunctionNames) == 0 {
+	if len(functions) == 0 {
 		return request, nil, nil
 	}
 	return request, contract, nil

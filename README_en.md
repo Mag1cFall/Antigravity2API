@@ -21,7 +21,7 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 
 - **OpenAI compatible**: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/models`, `/v1/images`, `/v1/audio`, `/v1/files`
 - **Claude compatible**: `/v1/messages`, `/v1/messages/count_tokens`
-- **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens`, Files API, Interactions API
+- **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens`, Files API, Interactions API, Live API
 - **Official client identity**: plain Go HTTP that reaches Cloud Code with the TLS and HTTP shape, User-Agent, request envelope, initialization order and companion requests of the official Antigravity client; every account uses the device profile generated when it was added
 - **Agent models**: every Gemini, Claude and GPT-OSS Agent model, published from each account's live catalog; thinking parameters map to the Low, Medium and High thinking levels of the same family
 - **Streaming**: text, thinking and thought signatures stream incrementally; tool calls, parallel function calls, image and PDF input work across the four protocols OpenAI Chat, OpenAI Responses, Claude Messages and Gemini
@@ -30,9 +30,9 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 - **System prompt tiers**: full, medium, aggressive and custom tiers control how much of the official system prompt and user message wrapping is kept
 - **Multi-account scheduling**: accounts are picked by account priority and the Gemini and third-party quota groups, requests rotate across accounts of the same priority, and a conversation stays on one account; selected models can prefer lower-plan accounts; exhausted quota cools down until reset, rate limits, capacity errors and server errors cool down or switch accounts by reason; account quota refreshes on a schedule, and the Accounts page can refresh all accounts or one at any time
 - **Token counting**: input tokens are counted locally per model family; GPT-OSS prompts are rendered with the official chat template before counting, and Gemini and Claude counts are calibrated with the upstream usage of the same conversation
-- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings, in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German, with service logs and error messages shown in the interface language; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
+- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings; account details list the models the account can use and the other accounts that share its weekly quota (usually the same Google One family group), usage and request records can be viewed over preset or custom time ranges, the trend chart shows each period on hover, and exported files are saved to a folder on the computer running the service; in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German, with service logs and error messages shown in the interface language; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
 - **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores the account, model, tokens, cache hits and timing of every request and estimates cost with official API prices
-- **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing, account JSON export and import (accepts the account files of Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
+- **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing, account JSON export and import (all, selected or single accounts; the accounts in a file are listed and checked before import; accepts the account files of Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
 - **Proxy**: global and per-account HTTP, HTTPS and SOCKS5 proxies; the system proxy is used when none is set
 
 ## Supported Models
@@ -208,9 +208,10 @@ POST   /v1beta/interactions
 GET    /v1beta/interactions/{id}
 DELETE /v1beta/interactions/{id}
 POST   /v1beta/interactions/{id}/cancel
+GET    /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
 ```
 
-`streamGenerateContent` without `alt=sse` returns a JSON array. The four Interactions endpoints are also served under `/v1/interactions`. `generationConfig.responseModalities` with `IMAGE` requires an image generation model; images return as `inlineData` parts, and `aspectRatio` and `imageSize` of `imageConfig` apply as given.
+`streamGenerateContent` without `alt=sse` returns a JSON array. The four Interactions endpoints are also served under `/v1/interactions`. The `/v1` paths that Gemini SDKs use by default also work: replace `v1beta` with `v1` for model methods, context caching and file upload, and `/v1/models` and `/v1/files` return the Gemini format when authenticated with `x-goog-api-key` or `key`. The Live API connects at the WebSocket address above (`v1alpha` also works): transcription models return text transcripts of speech, and Agent models talk in voice mode with 24 kHz audio output. `generationConfig.responseModalities` with `IMAGE` requires an image generation model; images return as `inlineData` parts, and `aspectRatio` and `imageSize` of `imageConfig` apply as given.
 
 ### Authentication
 
@@ -273,6 +274,8 @@ The system instruction of every generation request combines the system prompt of
 
 "View text" on the settings page of the admin UI shows the system instruction and first user message each system prompt tier sends upstream. For `custom`, the settings page edits two texts directly: the system instruction and the user message wrapper. "Load preset" puts the full text of a built-in tier into the editor, and "Insert" places an official section or a variable at the cursor. `{{.Client}}` stands for the client's own system prompt and `{{.Text}}` for the original user message. Both texts are Go `text/template` templates, and the line under each editor shows the character count with sample data filled in, or the template error.
 
+Google rejects requests whose system prompt contains certain client identity sentences and instructions (it returns 429). The service removes the sentences containing them before sending. The rule list lives in [`rules/rejected.txt`](rules/rejected.txt) and updates automatically at startup and every hour; the settings page shows the list version and the last check result, "Update now" checks right away, and you can add your own rules (`REJECTED_RULES`), which apply from the next request after saving.
+
 ## Project Layout
 
 ```text
@@ -310,6 +313,7 @@ docs/                 # protocol, development and logging docs
 | `SYSTEM_PROMPT` | System prompt tier: `full`, `medium`, `aggressive`, `custom` | `full` |
 | `SYSTEM_PROMPT_TEMPLATE` | System instruction template of the `custom` tier; write multi-line text as one double-quoted line with `\n` | System instruction of the `medium` tier |
 | `SYSTEM_PROMPT_USER_TEMPLATE` | User message template of the `custom` tier; empty sends messages as is | User message wrapper of the `medium` tier |
+| `REJECTED_RULES` | Custom rejected-sentence rules, used together with the auto-updated list; syntax at the top of `rules/rejected.txt` | Empty |
 | `MODEL_MAPPING` | Client model names mapped to catalog model IDs, each item `alias:model ID`, comma separated | empty |
 | `MEDIA_OUTPUT` | How generated media is given: `inline` or `url` | `inline` |
 | `MEDIA_BASE_URL` | Service address used in media links, for example `https://ai.example.com`; when empty, the address of each request is used, following `X-Forwarded-Proto` behind a reverse proxy | empty |

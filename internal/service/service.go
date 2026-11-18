@@ -259,13 +259,15 @@ func (s *Service) Models(context.Context) ([]antigravity.Model, error) {
 		seen[model.ID] = true
 	}
 	records := s.store.Accounts()
-	var waiting []string
+	var waiting, states []string
 	s.mu.Lock()
 	for _, record := range records {
 		if _, ready := s.pool.Status(record.ID); ready || !record.Enabled {
 			continue
 		}
-		waiting = append(waiting, record.ID+": "+cmp.Or(s.failures[record.ID], "初始化中"))
+		reason, failed := s.failures[record.ID]
+		waiting = append(waiting, record.ID+": "+cmp.Or(reason, "初始化中"))
+		states = append(states, accountState(true, reason, failed))
 		for _, model := range s.catalogs[record.ID] {
 			if !seen[model.ID] {
 				seen[model.ID] = true
@@ -275,7 +277,7 @@ func (s *Service) Models(context.Context) ([]antigravity.Model, error) {
 	}
 	s.mu.Unlock()
 	if len(catalog) == 0 && len(waiting) > 0 {
-		return nil, &Error{Status: http.StatusServiceUnavailable, Message: "账户尚未就绪，还没有模型目录\n" + strings.Join(waiting, "\n")}
+		return nil, &Error{Status: http.StatusServiceUnavailable, Message: "账户尚未就绪，还没有模型目录\n" + strings.Join(waiting, "\n"), States: states}
 	}
 	return s.aliases(public(catalog)), nil
 }
@@ -367,8 +369,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 		if read {
 			continue
 		}
-		now := time.Now()
-		snapshots, err := s.ledger.QuotaSnapshots(ctx, now.AddDate(0, 0, -7), now, record.ID)
+		snapshots, err := s.ledger.LatestQuotaSnapshots(ctx, record.ID, time.Now().AddDate(0, 0, -7))
 		if err != nil {
 			return err
 		}
@@ -548,7 +549,7 @@ func (s *Service) tokenSource(record *auth.Account, token *oauth2.Token, proxy a
 	})
 }
 
-// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），loadCodeAssist 给出不能使用的套餐且没有项目时按初始化失败处理、原因为 reasonMessage 与套餐原文，成功且账户仍在账户库中启用或 warm 为真（停用账户的手动预热）时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证时原因带上游错误正文中的验证链接；账户已从账户库删除时不初始化
+// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），loadCodeAssist 给出不能使用的套餐且没有项目时按初始化失败处理、原因为 reasonMessage 与套餐原文，成功且账户仍在账户库中启用或 warm 为真（停用账户的手动预热）时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证或违反服务条款的 403 按 forbid 处理；账户已从账户库删除时不初始化
 func (s *Service) initialize(ctx context.Context, record *auth.Account, warm bool) error {
 	token := s.store.Token(record.ID)
 	if token == nil {
@@ -564,16 +565,16 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account, warm boo
 	running := s.account(record.ID)
 	login := record.Project == "" || running != nil && running.refresh != token.RefreshToken
 	companion, initialization, err := boot(ctx, watch, client, record.ID, login, record.AuthMethod == antigravity.AuthMethodEnterprise)
+	if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok && s.forbid(ctx, record.ID, upstream) {
+		cancel()
+		return fmt.Errorf("%s: %w", record.ID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err != nil {
 		cancel()
 		slog.ErrorContext(ctx, "账户初始化失败 | 错误="+err.Error(), "source", record.ID)
-		reason := err.Error()
-		if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok && upstream.Reason() == "VALIDATION_REQUIRED" {
-			reason = verifyReason(upstream.Body)
-		}
-		s.stop(record.ID, reason)
+		s.stop(record.ID, err.Error())
 		return fmt.Errorf("%s: %w", record.ID, err)
 	}
 	if assist := initialization.Assist; assist.CloudAICompanionProject == "" && len(assist.IneligibleTiers) > 0 {
@@ -671,6 +672,9 @@ func (s *Service) quote(ctx context.Context, current *account) {
 	}
 	if _, err := current.client.RetrieveUserQuotaSummary(context.WithoutCancel(ctx)); err != nil {
 		slog.WarnContext(ctx, "读取额度摘要失败 | 错误="+err.Error(), "source", current.id)
+		if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok {
+			s.forbid(ctx, current.id, upstream)
+		}
 	}
 }
 
@@ -686,7 +690,7 @@ func (s *Service) setQuota(id string, summary antigravity.QuotaSummary) {
 // quotaWorkers 是同时读取额度摘要的账户数上限
 const quotaWorkers = 5
 
-// RefreshQuota 实时读取一个账户的套餐与额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理读取；先读套餐与项目（已初始化的账户从当前 cloudcode 端点，未初始化的企业 WIF 账户按 BusinessAssist，其余为 daily loadCodeAssist），读到的套餐与额度经 observe 写回
+// RefreshQuota 实时读取一个账户的套餐与额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理读取；先读套餐与项目（已初始化的账户从当前 cloudcode 端点，未初始化的企业 WIF 账户按 BusinessAssist，其余为 daily loadCodeAssist），读到的套餐与额度经 observe 写回；读取遇到需要验证或违反服务条款的 403 时按 forbid 处理
 func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 	record, ok := s.store.Account(id)
 	if !ok {
@@ -707,10 +711,12 @@ func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 			_, err = client.LoadCodeAssist(ctx, antigravity.EndpointDaily)
 		}
 	}
-	if err != nil {
-		return err
+	if err == nil {
+		_, err = client.RetrieveUserQuotaSummary(ctx)
 	}
-	_, err = client.RetrieveUserQuotaSummary(ctx)
+	if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok {
+		s.forbid(ctx, id, upstream)
+	}
 	return err
 }
 

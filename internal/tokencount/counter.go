@@ -107,6 +107,8 @@ const (
 	geminiPDFPage = 516
 	// geminiDeclaration 为 Gemini 族每个函数声明另计的 token 数
 	geminiDeclaration = 8
+	// geminiSignatureChars 与 geminiSignatureBase 为 Gemini 族由思考签名长度估算其思考 token 数的每 token 字符数与签名的固定字符数
+	geminiSignatureChars, geminiSignatureBase = 5.5, 150
 	// claudeImagePatch 为 Claude 族图片计数的像素块边长，每块 1 个 token
 	claudeImagePatch = 28
 	// claudeImageEdge 为 Claude 族图片计数前长边缩放到的上限
@@ -135,12 +137,12 @@ func Text(provider, value string) int64 {
 	return int64(len(processor().Encode(value)))
 }
 
-// Prompt 估算上游请求计入 promptTokenCount 的 token 数：GPT-OSS 族为按 gpt-oss 聊天模板渲染的 harmony 提示的 o200k_base token 数；其余模型族的系统指令与各 part 的文本、函数名、参数和输出按模型族分词计数后乘以模型族的文本系数，各函数声明的 JSON 乘以工具系数，图片与 PDF 另按模型族计数，Gemini 族另加每个函数声明的固定开销，Claude 族另加工具说明、每个函数声明与每个函数调用和结果 part 的固定开销，未知模型族系数为 1
+// Prompt 估算上游请求计入 promptTokenCount 的 token 数：GPT-OSS 族为按 gpt-oss 聊天模板渲染的 harmony 提示的 o200k_base token 数；其余模型族的系统指令与各 part 的文本、函数名、参数和输出按模型族分词计数后乘以模型族的文本系数，各函数声明的 JSON 乘以工具系数，图片与 PDF 另按模型族计数，Gemini 族另加每个函数声明的固定开销与各思考签名的 Signature，Claude 族另加工具说明、每个函数声明与每个函数调用和结果 part 的固定开销，未知模型族系数为 1
 func Prompt(provider string, request antigravity.WireRequest) int64 {
 	if provider == antigravity.ProviderOpenAI {
 		return harmonyTokens(harmonyPrompt(request))
 	}
-	var text, tools, media, declarations, calls int64
+	var text, tools, media, declarations, calls, signatures int64
 	if request.SystemInstruction != nil {
 		for _, part := range request.SystemInstruction.Parts {
 			text += Text(provider, part.Text)
@@ -157,6 +159,7 @@ func Prompt(provider string, request antigravity.WireRequest) int64 {
 	count = func(parts []antigravity.WirePart) {
 		for _, part := range parts {
 			text += Text(provider, part.Text)
+			signatures += Signature(provider, part.ThoughtSignature)
 			if part.InlineData != nil {
 				media += Media(provider, *part.InlineData)
 			}
@@ -177,7 +180,7 @@ func Prompt(provider string, request antigravity.WireRequest) int64 {
 	factor := family(provider)
 	total := int64(float64(text)*factor.Text+float64(tools)*factor.Tools+0.5) + media
 	if provider == antigravity.ProviderGoogle {
-		total += geminiDeclaration * declarations
+		total += geminiDeclaration*declarations + signatures
 	}
 	if provider == antigravity.ProviderAnthropic {
 		total += claudeCallPart * calls
@@ -186,6 +189,14 @@ func Prompt(provider string, request antigravity.WireRequest) int64 {
 		}
 	}
 	return total
+}
+
+// Signature 返回 Gemini 族一个思考签名计入 promptTokenCount 的 token 数：上游把签名所代表的思考按其 thoughtsTokenCount 计入输入，此处由签名长度估算；其余模型族与空签名为 0
+func Signature(provider, signature string) int64 {
+	if provider != antigravity.ProviderGoogle || len(signature) <= geminiSignatureBase {
+		return 0
+	}
+	return int64(float64(len(signature)-geminiSignatureBase)/geminiSignatureChars + 0.5)
 }
 
 // Media 返回一个内联媒体计入 promptTokenCount 的 token 数：Gemini 族每张图片 geminiImageTokens、PDF 每页 geminiPDFPage；Claude 族图片长边缩到 claudeImageEdge 以内后每 28×28 像素块 1 个，PDF 每个文件 claudePDFFile 加每页 claudePDFPage；其余媒体与模型族不计，无法读取尺寸的图片不计

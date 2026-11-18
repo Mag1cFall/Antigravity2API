@@ -54,9 +54,9 @@ var OAuthConfigCloud = oauth2.Config{
 	},
 }
 
-// exchangeContext 返回换取 token 的上下文，请求经克隆的 http.DefaultTransport 与代理发出
+// exchangeContext 返回换取 token 的上下文，请求经 http1Transport 与代理发出
 func exchangeContext(ctx context.Context, proxy Proxy) context.Context {
-	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: webTransport(proxy)})
+	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: newProxyTransport(proxy, http1Transport)})
 }
 
 // LoginBrowser 在本机回环端口等待授权回调，open 负责打开授权链接，授权码经 proxy 换取 token

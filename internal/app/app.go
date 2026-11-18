@@ -80,8 +80,12 @@ type server struct {
 	latest atomic.Pointer[string]
 	// updater 是本程序的在线更新
 	updater *selfUpdater
+	// rejected 是上游拒绝句列表与自定义规则
+	rejected *rejectedFeed
 	// listen 是实际监听地址，reserved 是被 Windows 保留而改用 listen 的配置地址，没有改用时为空
 	listen, reserved string
+	// family 是判断家庭群组的每周额度桶观测
+	family familyBook
 }
 
 // Serve 在启动配置的监听地址上运行服务直到 ctx 结束；live 是已应用命令行覆盖的配置，设置保存后替换为新值供下一次请求读取，账户池在启动后于后台初始化
@@ -95,6 +99,7 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	}
 	s.logins = &logins{server: s, items: map[string]*login{}}
 	s.updater = newSelfUpdater(s)
+	s.rejected = newRejectedFeed(s)
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewMultiHandler(deps.Logger.Handler(), s.events.handler(deps.Logger.Leveler(), s.ledger))))
 	defer slog.SetDefault(previous)
@@ -129,6 +134,7 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	workers.Go(s.refreshWorker)
 	workers.Go(s.quotaWorker)
 	workers.Go(s.checkVersions)
+	workers.Go(s.rejected.watch)
 	workers.Go(func() { deps.Service.WatchProxies(ctx) })
 	defer workers.Wait()
 	defer cancel()
@@ -171,6 +177,7 @@ func (s *server) routes() http.Handler {
 	}))
 	root.Handle("/v1/", public)
 	root.Handle("/v1beta/", public)
+	root.Handle("/ws/", public)
 	root.Handle("/upload/", public)
 	root.Handle("/media/", public)
 	root.HandleFunc("POST /api/pairing/accounts", s.pairAccount)

@@ -17,7 +17,6 @@ import (
 	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/mem"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -77,34 +76,22 @@ type Transcription struct {
 	Messages []string
 }
 
-// Transcribe 按官方语音输入的顺序转写 16 kHz 单声道 PCM：以 grpc-go 打开 BidiGenerateContent 双向流，发送 setup 并等到 setupComplete，再发 activity start，音频按 40 ms 一个 1280 字节的块以实时节奏发送，开头补发流打开以来应已录下的块，最后发 activity end 并结束发送；返回各 inputTranscription 文本以空格相连的结果
+// Transcribe 按官方语音输入的顺序转写 16 kHz 单声道 PCM：经 OpenLive 打开 BidiGenerateContent 双向流，发送 setup 并等到 setupComplete，再发 activity start，音频按 40 ms 一个 1280 字节的块以实时节奏发送，开头补发流打开以来应已录下的块，最后发 activity end 并结束发送；返回各 inputTranscription 文本以空格相连的结果
 func (c *Client) Transcribe(ctx context.Context, model string, pcm []byte) (Transcription, error) {
-	connection, err := grpc.NewClient("passthrough:///"+aicodeTarget,
-		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
-		grpc.WithPerRPCCredentials(bearer{c.source}),
-		grpc.WithContextDialer(c.dialAICode))
-	if err != nil {
-		return Transcription{}, err
-	}
-	defer connection.Close()
-	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancel()
-	stop := context.AfterFunc(ctx, cancel)
-	defer stop()
 	started := time.Now()
-	stream, err := connection.NewStream(streamCtx, &grpc.StreamDesc{ServerStreams: true, ClientStreams: true}, bidiMethod, grpc.ForceCodecV2(rawCodec{}))
+	stream, err := c.OpenLive(ctx)
 	if err != nil {
 		return Transcription{}, transcriptionError(ctx, err)
 	}
-	send := func(message []byte) error { return stream.SendMsg(&message) }
-	if err := send(setupMessage(model)); err != nil {
+	defer stream.Close()
+	if err := stream.Send(setupMessage(model)); err != nil {
 		return Transcription{}, transcriptionError(ctx, err)
 	}
 	var result Transcription
 	var texts []string
 	receive := func() (serverMessage, error) {
-		var raw []byte
-		if err := stream.RecvMsg(&raw); err != nil {
+		raw, err := stream.Recv()
+		if err != nil {
 			return serverMessage{}, err
 		}
 		result.Messages = append(result.Messages, base64.StdEncoding.EncodeToString(raw))
@@ -130,7 +117,7 @@ func (c *Client) Transcribe(ctx context.Context, model string, pcm []byte) (Tran
 			}
 		}
 	}()
-	if err := send(realtimeInput(5, nil)); err != nil {
+	if err := stream.Send(realtimeInput(5, nil)); err != nil {
 		return Transcription{}, transcriptionError(ctx, err)
 	}
 	ticker := time.NewTicker(transcriptionInterval)
@@ -138,19 +125,19 @@ func (c *Client) Transcribe(ctx context.Context, model string, pcm []byte) (Tran
 	for offset := 0; offset < len(pcm); {
 		due := min(len(pcm), (int(time.Since(started)/transcriptionInterval)+1)*transcriptionChunk)
 		for ; offset < due; offset += transcriptionChunk {
-			if err := send(realtimeInput(1, audioBlob(pcm[offset:min(offset+transcriptionChunk, len(pcm))]))); err != nil {
+			if err := stream.Send(realtimeInput(1, audioBlob(pcm[offset:min(offset+transcriptionChunk, len(pcm))]))); err != nil {
 				return Transcription{}, transcriptionError(ctx, err)
 			}
 		}
 		if offset < len(pcm) {
 			select {
 			case <-ticker.C:
-			case <-streamCtx.Done():
-				return Transcription{}, transcriptionError(ctx, streamCtx.Err())
+			case <-ctx.Done():
+				return Transcription{}, ctx.Err()
 			}
 		}
 	}
-	if err := send(realtimeInput(6, nil)); err != nil {
+	if err := stream.Send(realtimeInput(6, nil)); err != nil {
 		return Transcription{}, transcriptionError(ctx, err)
 	}
 	if err := stream.CloseSend(); err != nil {
@@ -163,10 +150,13 @@ func (c *Client) Transcribe(ctx context.Context, model string, pcm []byte) (Tran
 	return result, nil
 }
 
-// transcriptionError 在调用方取消时返回取消原因，否则返回 gRPC 错误
+// transcriptionError 在调用方取消时返回取消原因，否则返回带方法名的 gRPC 错误
 func transcriptionError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if strings.HasPrefix(err.Error(), "aicode ") {
+		return err
 	}
 	return fmt.Errorf("aicode BidiGenerateContent: %w", err)
 }
@@ -207,22 +197,22 @@ type serverMessage struct {
 // parseServerMessage 解码 setupComplete 与 serverContent 中的 inputTranscription 和 turnComplete
 func parseServerMessage(raw []byte) (serverMessage, error) {
 	var message serverMessage
-	err := walkFields(raw, func(field protowire.Number, value []byte) error {
+	err := walkWire(raw, func(field protowire.Number, value []byte, _ uint64) error {
 		switch field {
 		case 1:
 			message.setupComplete = true
 		case 2:
-			return walkFields(value, func(field protowire.Number, value []byte) error {
+			return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
 				switch field {
 				case 6:
-					return walkFields(value, func(field protowire.Number, value []byte) error {
+					return walkWire(value, func(field protowire.Number, value []byte, _ uint64) error {
 						if field == 1 {
 							message.inputTranscription = string(value)
 						}
 						return nil
 					})
 				case 3:
-					message.turnComplete = len(value) > 0 && value[0] == 1
+					message.turnComplete = number > 0
 				}
 				return nil
 			})
@@ -232,38 +222,8 @@ func parseServerMessage(raw []byte) (serverMessage, error) {
 	return message, err
 }
 
-// walkFields 依次回调消息的各字段，长度前缀字段给出内容，varint 字段给出单字节真值
-func walkFields(raw []byte, visit func(protowire.Number, []byte) error) error {
-	for len(raw) > 0 {
-		field, kind, length := protowire.ConsumeTag(raw)
-		if length < 0 {
-			return protowire.ParseError(length)
-		}
-		raw = raw[length:]
-		var value []byte
-		switch kind {
-		case protowire.BytesType:
-			value, length = protowire.ConsumeBytes(raw)
-		case protowire.VarintType:
-			var number uint64
-			number, length = protowire.ConsumeVarint(raw)
-			value = []byte{byte(min(number, 1))}
-		default:
-			length = protowire.ConsumeFieldValue(field, kind, raw)
-		}
-		if length < 0 {
-			return protowire.ParseError(length)
-		}
-		raw = raw[length:]
-		if err := visit(field, value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// dialAICode 按账户代理建立到 aicode 的 TCP 连接：http 与 https 代理以 grpc-go 的 CONNECT 请求建立隧道，socks5 代理经 SOCKS5，没有代理时直连
-func (c *Client) dialAICode(ctx context.Context, address string) (net.Conn, error) {
+// dialAICode 按账户代理建立到 aicode 的 TCP 连接：http 与 https 代理以 User-Agent 为 agent 的 CONNECT 请求建立隧道，socks5 代理经 SOCKS5，没有代理时直连
+func (c *Client) dialAICode(ctx context.Context, address, agent string) (net.Conn, error) {
 	var target *url.URL
 	if c.proxy != nil {
 		var err error
@@ -297,7 +257,7 @@ func (c *Client) dialAICode(ctx context.Context, address string) (net.Conn, erro
 	if target.Scheme == "https" {
 		conn = tls.Client(conn, &tls.Config{ServerName: target.Hostname()})
 	}
-	request := &http.Request{Method: http.MethodConnect, URL: &url.URL{Host: address}, Header: http.Header{"User-Agent": {grpcUserAgent}}}
+	request := &http.Request{Method: http.MethodConnect, URL: &url.URL{Host: address}, Header: http.Header{"User-Agent": {agent}}}
 	if user := target.User; user != nil {
 		password, _ := user.Password()
 		request.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user.Username()+":"+password)))

@@ -219,6 +219,7 @@ export function ModelsPage() {
               ]}
             />
             <SearchInput
+              clearLabel={app.clearSearch}
               aria-label={m.search}
               placeholder={m.search}
               value={query}

@@ -48,14 +48,14 @@ func (s *Service) generateMedia(ctx context.Context, request antigravity.Generat
 
 // generateImage 以 image_gen 信封发出非流式 generateContent，新会话先写轨迹 ACL；图片、正文与签名按流式事件转发
 func (s *Service) generateImage(ctx context.Context, request antigravity.GenerateRequest, model antigravity.CatalogModel, tier prompt.Tier) (<-chan antigravity.Event, error) {
-	digests := chain(request)
-	session, err := s.conversations.begin(digests, replies(request))
+	id := identify(request)
+	session, err := s.conversations.begin(id)
 	if err != nil {
 		return nil, err
 	}
 	conversation := antigravity.NewConversation(session.Cascade, session.Trajectory, request.Contents)
 	contents := slices.DeleteFunc(cloneContents(request.Contents), func(content antigravity.Content) bool { return len(content.Parts) == 0 })
-	return s.dispatch(ctx, request, model, session, digests, "image_gen", conversation.Step+1, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
+	return s.dispatch(ctx, request, model, session, id, "image_gen", conversation.Step+1, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
 		envelope, err := antigravity.BuildImageEnvelope(current.client.Project(), catalog, conversation, request.System, contents, request.Config, time.Now())
 		if err != nil {
 			return nil, nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
@@ -85,12 +85,12 @@ func (s *Service) transcribe(ctx context.Context, request antigravity.GenerateRe
 		}
 		pcm = append(pcm, decoded...)
 	}
-	digests := chain(request)
-	session, err := s.conversations.begin(digests, replies(request))
+	id := identify(request)
+	session, err := s.conversations.begin(id)
 	if err != nil {
 		return nil, err
 	}
-	return s.dispatch(ctx, request, model, session, digests, "audio_transcription", 0, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
+	return s.dispatch(ctx, request, model, session, id, "audio_transcription", 0, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
 		exchange := &antigravity.Exchange{URL: transcriptionURL}
 		result, err := current.client.Transcribe(deadline, "models/"+catalog.ID, pcm)
 		exchange.Response = []byte(strings.Join(result.Messages, "\n"))
@@ -110,7 +110,7 @@ func (s *Service) transcribe(ctx context.Context, request antigravity.GenerateRe
 }
 
 // dispatch 按 Generate 的账户选择、401 重发、限速等待与换号规则执行 call，requestType 与 step 写入账本
-func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequest, model antigravity.CatalogModel, session conversation, digests []string, requestType string, step int, tier prompt.Tier, call upstreamCall) (<-chan antigravity.Event, error) {
+func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequest, model antigravity.CatalogModel, session conversation, id identity, requestType string, step int, tier prompt.Tier, call upstreamCall) (<-chan antigravity.Event, error) {
 	trace := requestdb.TraceFrom(ctx)
 	deadline := watch(ctx, s.live.Load().RequestTimeout)
 	tried := make(map[string]bool)
@@ -151,7 +151,7 @@ func (s *Service) dispatch(ctx context.Context, request antigravity.GenerateRequ
 			upstream, exchange, err = call(deadline, current, lease.Model)
 		}
 		if err == nil {
-			return s.relay(ctx, deadline, &upstreamStream{lease: lease, current: current, events: upstream, exchange: exchange, started: started}, nil, request, digests, session.Cascade, tier), nil
+			return s.relay(ctx, deadline, &upstreamStream{lease: lease, current: current, events: upstream, exchange: exchange, started: started}, nil, request, id, session.Cascade, tier), nil
 		}
 		trace.AddAttempt(attempt(lease.ID, exchange, started, err, antigravity.Event{}))
 		lease.Release()

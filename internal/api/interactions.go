@@ -212,7 +212,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 			writeGeminiRequestError(w, err)
 		}
 		if request.Background && shouldWriteRequestError(r, err) {
-			_ = writeSSE(request.stream, "error", officialOrder("interactions", map[string]any{"event_type": "error", "event_id": "1", "error": map[string]any{"code": geminiErrorStatus(err), "message": err.Error()}}))
+			_ = writeSSE(request.stream, "error", officialOrder("interactions", map[string]any{"event_type": "error", "event_id": "1", "error": map[string]any{"code": geminiErrorStatus(err), "message": publicReason(err)}}))
 		}
 		return
 	}
@@ -661,6 +661,17 @@ func interactionStep(event antigravity.Event) (map[string]any, map[string]any) {
 	return map[string]any{"type": "model_output", "content": []map[string]any{content}}, content
 }
 
+// interactionCallStream 返回函数调用步骤的 step.start 内容与 arguments_delta 增量，start 带空参数对象，增量以 JSON 字符串携带完整参数
+func interactionCallStream[V any](step map[string]V) (map[string]any, map[string]any) {
+	start := make(map[string]any, len(step))
+	for key, value := range step {
+		start[key] = value
+	}
+	start["arguments"] = map[string]any{}
+	arguments, _ := json.Marshal(step["arguments"])
+	return start, map[string]any{"type": "arguments_delta", "arguments": string(arguments)}
+}
+
 // interactionEvents 返回要输出的事件：正文、媒体与函数调用的签名先作为思考步骤，不要求思考摘要时思考只保留签名
 func interactionEvents(event antigravity.Event, summaries bool) []antigravity.Event {
 	if event.Kind == antigravity.EventReasoning && !summaries {
@@ -683,10 +694,10 @@ func interactionEvents(event antigravity.Event, summaries bool) []antigravity.Ev
 	return []antigravity.Event{event}
 }
 
-// interactionSteps 汇总完整步骤，相邻同类的模型输出与思考合并，搜索来源写入正文 text 内容的 annotations
+// interactionSteps 汇总最终采用的上游尝试的完整步骤，相邻同类的模型输出与思考合并，搜索来源写入正文 text 内容的 annotations
 func interactionSteps(result generationResult, summaries bool) []map[string]any {
 	steps := make([]map[string]any, 0)
-	for _, original := range mergedTextEvents(result.events) {
+	for _, original := range mergedTextEvents(currentAttempt(result.events)) {
 		for _, event := range interactionEvents(original, summaries) {
 			step, _ := interactionStep(event)
 			if step == nil {
@@ -785,7 +796,7 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 				case "thought":
 					start["summary"] = []any{}
 				case "function_call":
-					start = step
+					start, delta = interactionCallStream(step)
 				}
 				if err := send("step.start", map[string]any{"index": index, "step": start}); err != nil {
 					return err
@@ -815,6 +826,9 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 		case event.Kind == antigravity.EventThoughtSignature && text.Len() > 0:
 			held = append(held, event)
 			return nil
+		case event.Kind == antigravity.EventRestart:
+			held = nil
+			return closeStep()
 		}
 		for _, signature := range held {
 			if err := write(signature); err != nil {
@@ -826,7 +840,7 @@ func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, reque
 	})
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
-			send("error", map[string]any{"error": map[string]any{"code": geminiErrorStatus(err), "message": err.Error()}})
+			send("error", map[string]any{"error": map[string]any{"code": geminiErrorStatus(err), "message": publicReason(err)}})
 		}
 		return err
 	}
@@ -996,6 +1010,9 @@ func replayInteraction(w http.ResponseWriter, object json.RawMessage, lastEventI
 			if signature, ok := step["signature"]; ok {
 				events = append(events, replayEvent{"step.delta", map[string]any{"index": index, "delta": map[string]any{"type": "thought_signature", "signature": signature}}})
 			}
+		case "function_call":
+			start, delta := interactionCallStream(step)
+			events = append(events, replayEvent{"step.start", map[string]any{"index": index, "step": start}}, replayEvent{"step.delta", map[string]any{"index": index, "delta": delta}})
 		default:
 			events = append(events, replayEvent{"step.start", map[string]any{"index": index, "step": step}})
 		}

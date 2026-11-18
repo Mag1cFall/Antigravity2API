@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -39,6 +40,8 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("GET /api/proxies", s.listProxies)
 	mux.HandleFunc("POST /api/proxies/check", s.checkProxies)
 	mux.HandleFunc("GET /api/paths", s.listPaths)
+	mux.HandleFunc("GET /api/paths/places", s.listPlaces)
+	mux.HandleFunc("POST /api/paths/reveal", s.revealPath)
 	mux.HandleFunc("POST /api/update", s.postUpdate)
 	mux.HandleFunc("GET /api/accounts", s.listAccounts)
 	mux.HandleFunc("PATCH /api/accounts/{id}", s.updateAccount)
@@ -47,9 +50,12 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("POST /api/accounts/{id}/quota", s.refreshQuota)
 	mux.HandleFunc("DELETE /api/accounts/{id}/cooldowns/{scope}", s.clearCooldown)
 	mux.HandleFunc("POST /api/accounts/{id}/switch", s.switchAccount)
+	mux.HandleFunc("GET /api/accounts/{id}/models", s.listAccountModels)
 	mux.HandleFunc("POST /api/accounts/import", s.importAccounts)
 	mux.HandleFunc("POST /api/accounts/import/json", s.importAccountFile)
+	mux.HandleFunc("POST /api/accounts/import/discover", s.discoverAccounts)
 	mux.HandleFunc("GET /api/accounts/export", s.exportAccounts)
+	mux.HandleFunc("POST /api/accounts/export", s.saveAccounts)
 	mux.HandleFunc("POST /api/accounts/refresh", s.refreshAccounts)
 	mux.HandleFunc("GET /api/logins", s.listLogins)
 	mux.HandleFunc("POST /api/logins", s.createLogin)
@@ -64,12 +70,15 @@ func (s *server) admin() http.Handler {
 	mux.HandleFunc("GET /api/usage", s.getUsage)
 	mux.HandleFunc("GET /api/usage/records", s.listRecords)
 	mux.HandleFunc("GET /api/usage/records.csv", s.exportRecords)
+	mux.HandleFunc("POST /api/usage/records.csv", s.saveRecords)
 	mux.HandleFunc("GET /api/usage/records/{id}", s.getRecord)
 	mux.HandleFunc("GET /api/requests", s.listActive)
 	mux.HandleFunc("POST /api/requests/{id}/cancel", s.cancelRequest)
 	mux.HandleFunc("GET /api/logs", s.listLogs)
 	mux.HandleFunc("DELETE /api/logs", s.clearLogs)
 	mux.HandleFunc("GET /api/prompt/templates", s.getPromptTemplates)
+	mux.HandleFunc("GET /api/prompt/rejected", s.getRejected)
+	mux.HandleFunc("POST /api/prompt/rejected/check", s.checkRejected)
 	mux.HandleFunc("POST /api/prompt/preview", s.previewPrompt)
 	mux.HandleFunc("GET /api/first-event-latency", s.listFirstEventLatencies)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
@@ -268,6 +277,20 @@ func (s *server) switchAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"account": id})
 }
 
+// listAccountModels 返回账户最近一次读到的目录中的公开模型，尚未读到目录时为空
+func (s *server) listAccountModels(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := s.deps.Store.Account(id); !ok {
+		writeError(w, http.StatusNotFound, "account_not_found", "账户不存在: "+id)
+		return
+	}
+	models := s.deps.Service.AccountModels(id)
+	if models == nil {
+		models = []antigravity.Model{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
+}
+
 // importAccounts 从本机官方客户端导入账户并在后台刷新账户池
 func (s *server) importAccounts(w http.ResponseWriter, r *http.Request) {
 	imported, err := auth.ImportOfficial(r.Context(), s.deps.Store)
@@ -451,19 +474,43 @@ func (s *server) listRecords(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page)
 }
 
-// exportRecords 以 CSV 附件导出范围内全部符合筛选的请求记录
+// exportRecords 以 CSV 返回范围内全部符合筛选的请求记录供管理端复制
 func (s *server) exportRecords(w http.ResponseWriter, r *http.Request) {
 	query, err := recordQuery(r.URL.Query())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	name := fmt.Sprintf("antigravity2api-requests-%s-%s.csv", query.From.UTC().Format("20060102T150405Z"), query.To.UTC().Format("20060102T150405Z"))
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	if err := s.ledger.ExportRecords(r.Context(), query, w); err != nil {
 		slog.ErrorContext(r.Context(), "请求记录导出失败 | 错误="+err.Error(), "source", "service")
 	}
+}
+
+// saveRecords 把范围内全部符合筛选的请求记录以 CSV 写入服务所在电脑的文件夹（请求体的 dir），文件名带范围的起止时间，返回写入的文件
+func (s *server) saveRecords(w http.ResponseWriter, r *http.Request) {
+	query, err := recordQuery(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	var input struct {
+		Dir string `json:"dir"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	name := fmt.Sprintf("antigravity2api-requests-%s-%s.csv", query.From.Local().Format("20060102-1504"), query.To.Local().Format("20060102-1504"))
+	path, err := saveFile(input.Dir, name, 0o644, func(file io.Writer) error {
+		return s.ledger.ExportRecords(r.Context(), query, file)
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "export_failed", err.Error())
+		return
+	}
+	slog.InfoContext(r.Context(), "请求记录已导出 | 文件="+path, "source", "service")
+	writeJSON(w, http.StatusOK, map[string]any{"files": []string{path}})
 }
 
 // getRecord 返回请求记录、公开协议正文与上游尝试正文
@@ -542,11 +589,18 @@ func (s *server) clearLogs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// filters 读取各维度的逗号分隔筛选值
+// filters 读取各维度的逗号分隔筛选值：带了该参数才筛选，空字符串筛出该维度为空的记录，重复值被忽略
 func filters(values url.Values) map[string][]string {
 	result := map[string][]string{}
 	for _, dimension := range requestdb.Dimensions {
-		result[dimension] = config.SplitList(values.Get(dimension))
+		if !values.Has(dimension) {
+			continue
+		}
+		for _, item := range strings.Split(values.Get(dimension), ",") {
+			if item = strings.TrimSpace(item); !slices.Contains(result[dimension], item) {
+				result[dimension] = append(result[dimension], item)
+			}
+		}
 	}
 	return result
 }

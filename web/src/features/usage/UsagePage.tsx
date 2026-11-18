@@ -1,5 +1,4 @@
-import { BarChart3, ChevronDown, Download, X } from 'lucide-react'
-import { type RefObject, useEffect, useRef, useState } from 'react'
+import { BarChart3, ChevronDown, X } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 
 import { Button } from '@/components/ui/button'
@@ -16,7 +15,15 @@ import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { dots, StatCards } from '@/components/ui/stats'
 import { stackThird, stackTwoThirds, Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
+import {
+  customParams,
+  type CustomRange,
+  parseCustom,
+  RangePicker,
+} from '@/features/requests/RangePicker'
+import { RecordsExport } from '@/features/requests/RecordsExport'
 import { filterQuery, rangeQuery, useUsage } from '@/features/usage/queries'
+import { TrendChart } from '@/features/usage/TrendChart'
 import type { UsageReport, UsageStats } from '@/features/usage/types'
 import {
   dateFormat,
@@ -42,50 +49,10 @@ function cacheRate(stats: UsageStats) {
   return stats.input_tokens ? stats.cached_tokens / stats.input_tokens : 0
 }
 
-// barWidth 是趋势图每根柱子连同间隔的最小宽度
-const barWidth = 6
-
-// useWidth 返回元素的内容宽度并随尺寸变化更新，宽度来自尺寸观察的回调，挂载时不读布局
-function useWidth(ref: RefObject<HTMLElement | null>) {
-  const [width, setWidth] = useState(0)
-  useEffect(() => {
-    const element = ref.current
-    if (!element) return undefined
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry) setWidth(entry.contentRect.width)
-    })
-    observer.observe(element)
-    return () => {
-      observer.disconnect()
-    }
-  }, [ref])
-  return width
-}
-
-// TrendCard 是逐桶请求数的柱状图，下方标出起止时间，悬停柱子显示该段的起始时间、时长与请求数，宽度放不下每桶一根柱子时把相邻的桶合并
-function TrendCard({ data }: { data: UsageReport }) {
+// TrendCard 是请求趋势卡片：标题、最近几分钟的请求与 token，以及可悬停查看、拖动放大的逐段请求图
+function TrendCard({ data, onZoom }: { data: UsageReport; onZoom: (range: CustomRange) => void }) {
   const m = useMessages('usage')
   const { locale } = useI18n()
-  const chart = useRef<HTMLDivElement>(null)
-  const width = useWidth(chart)
-  const per = width ? Math.max(1, Math.ceil((data.buckets.length * barWidth) / width)) : 1
-  const bars: { at: string; requests: number }[] = []
-  for (let index = 0; index < data.buckets.length; index += per) {
-    const group = data.buckets.slice(index, index + per)
-    bars.push({
-      at: group[0]?.at ?? '',
-      requests: group.reduce((sum, bucket) => sum + bucket.requests, 0),
-    })
-  }
-  const peak = Math.max(1, ...bars.map((bar) => bar.requests))
-  const axisFormat = dateFormat(locale, {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-  const interval = formatDuration(data.bucket_seconds * 1000 * per, locale)
   return (
     <Card>
       <CardHeader
@@ -101,34 +68,7 @@ function TrendCard({ data }: { data: UsageReport }) {
         }
       />
       <CardBody>
-        <div
-          ref={chart}
-          role="img"
-          aria-label={fill(m.trendLabel, { peak: formatNumber(peak, locale) })}
-          className="flex h-chart items-end gap-px"
-        >
-          {bars.map((bar) => (
-            <Tooltip
-              key={bar.at}
-              label={fill(m.trendBar, {
-                time: axisFormat.format(new Date(bar.at)),
-                bucket: interval,
-                requests: formatNumber(bar.requests, locale),
-              })}
-            >
-              <div
-                className="min-w-px flex-1 rounded-t-sm bg-primary"
-                style={{
-                  height: `${String(Math.max(bar.requests ? 2 : 0, (bar.requests / peak) * 100))}%`,
-                }}
-              />
-            </Tooltip>
-          ))}
-        </div>
-        <div className="mt-2 flex justify-between text-xs text-foreground-muted">
-          <span>{axisFormat.format(new Date(data.from))}</span>
-          <span>{m.trendNow}</span>
-        </div>
+        <TrendChart data={data} onZoom={onZoom} />
       </CardBody>
     </Card>
   )
@@ -138,7 +78,7 @@ function TrendCard({ data }: { data: UsageReport }) {
 const filterDimensions = ['model', 'account', 'api_key'] as const
 type FilterDimension = (typeof filterDimensions)[number]
 
-// FilterMenu 是一个维度的多选筛选，候选来自报告中这段时间出现过的非空取值
+// FilterMenu 是一个维度的多选筛选，候选来自报告中这段时间出现过的取值，空值显示为“（无）”
 function FilterMenu({
   label,
   options,
@@ -151,7 +91,7 @@ function FilterMenu({
   onChange: (values: string[]) => void
 }) {
   const m = useMessages('usage')
-  const values = [...new Set([...selected, ...options.filter(Boolean)])]
+  const values = [...new Set([...selected, ...options])]
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -197,18 +137,23 @@ export function UsagePage() {
   const [params, setParams] = useSearchParams()
   const range =
     (Object.keys(ranges) as RangeKey[]).find((key) => key === params.get('range')) ?? '7d'
+  const custom = parseCustom(params)
   const grouping: Grouping = groupings.find((key) => key === params.get('by')) ?? 'model'
-  const filters: Record<FilterDimension, string[]> = {
-    model: (params.get('model') ?? '').split(',').filter(Boolean),
-    account: (params.get('account') ?? '').split(',').filter(Boolean),
-    api_key: (params.get('api_key') ?? '').split(',').filter(Boolean),
-  }
+  const filters = Object.fromEntries(
+    filterDimensions.map((dimension) => [
+      dimension,
+      params.has(dimension) ? (params.get(dimension) ?? '').split(',') : [],
+    ]),
+  ) as Record<FilterDimension, string[]>
   const filtered = filterDimensions.some((dimension) => filters[dimension].length > 0)
-  const usage = useUsage(ranges[range], grouping === 'day' ? '86400' : 'auto', filters)
+  const span = custom ?? ranges[range]
+  const usage = useUsage(span, grouping === 'day' ? '86400' : 'auto', filters)
   const update = (changes: Record<string, string>) => {
     changeParams(setParams, changes)
   }
-  const csv = '/api/usage/records.csv?' + filterQuery(rangeQuery(ranges[range]), filters).toString()
+  const zoom = (next: CustomRange) => {
+    update(customParams(next))
+  }
   const rangeLabels: Record<RangeKey, string> = {
     '24h': m.range24h,
     '7d': m.range7d,
@@ -217,16 +162,19 @@ export function UsagePage() {
   }
   const header = (
     <div className="flex flex-wrap items-center gap-2">
-      <Segmented
+      <RangePicker
         label={m.range}
-        value={range}
-        onValueChange={(value) => {
-          update({ range: value })
-        }}
-        options={(Object.keys(ranges) as RangeKey[]).map((value) => ({
+        presets={(Object.keys(ranges) as RangeKey[]).map((value) => ({
           value,
           label: rangeLabels[value],
         }))}
+        preset={custom ? undefined : range}
+        presetMs={ranges[range]}
+        custom={custom}
+        onPreset={(value) => {
+          update({ range: value, from: '', to: '' })
+        }}
+        onCustom={zoom}
       />
       <div role="group" aria-label={m.filters} className="flex flex-wrap items-center gap-2">
         {filterDimensions.map((dimension) => (
@@ -236,7 +184,15 @@ export function UsagePage() {
             options={usage.data?.options[dimension] ?? []}
             selected={filters[dimension]}
             onChange={(values) => {
-              update({ [dimension]: values.join(',') })
+              setParams(
+                (current) => {
+                  const next = new URLSearchParams(current)
+                  if (values.length > 0) next.set(dimension, values.join(','))
+                  else next.delete(dimension)
+                  return next
+                },
+                { replace: true },
+              )
             }}
           />
         ))}
@@ -254,25 +210,14 @@ export function UsagePage() {
         )}
       </div>
       <span className="flex-1" />
-      {usage.data && usage.data.totals.requests > 0 ? (
-        <Button size="sm" asChild>
-          <a href={csv} download>
-            <Download size={16} aria-hidden />
-            {m.export}
-          </a>
-        </Button>
-      ) : (
-        <Tooltip
-          disabledReason={
-            usage.isPending ? app.loading : usage.isError ? m.exportFailed : m.exportEmpty
-          }
-        >
-          <Button size="sm" disabled>
-            <Download size={16} aria-hidden />
-            {m.export}
-          </Button>
-        </Tooltip>
-      )}
+      <RecordsExport
+        label={m.export}
+        query={filterQuery(rangeQuery(span), filters)}
+        disabledReason={
+          !(usage.data && usage.data.totals.requests > 0) &&
+          (usage.isPending ? app.loading : usage.isError ? m.exportFailed : m.exportEmpty)
+        }
+      />
     </div>
   )
   if (usage.isPending) {
@@ -397,7 +342,7 @@ export function UsagePage() {
           },
         ]}
       />
-      {grouping !== 'day' && <TrendCard data={data} />}
+      {grouping !== 'day' && <TrendCard data={data} onZoom={zoom} />}
       <Card>
         <CardToolbar>
           <h2 className="text-md font-semibold">{m.breakdown}</h2>

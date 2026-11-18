@@ -74,8 +74,8 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 		}
 	}
 	public := http.NewServeMux()
-	public.HandleFunc("GET /v1/models", s.handleOpenAIModels)
-	public.HandleFunc("GET /v1/models/{model...}", s.handleOpenAIModel)
+	public.HandleFunc("GET /v1/models", geminiOr(s.handleGeminiModels, s.handleOpenAIModels))
+	public.HandleFunc("GET /v1/models/{model...}", geminiOr(s.handleGeminiModel, s.handleOpenAIModel))
 	public.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	public.HandleFunc("POST /v1/completions", s.handleCompletions)
 	public.HandleFunc("POST /v1/responses", s.handleResponses)
@@ -90,10 +90,10 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	public.HandleFunc("POST /v1/audio/transcriptions", s.handleOpenAITranscription)
 	public.HandleFunc("POST /v1/audio/translations", s.handleOpenAITranslation)
 	public.HandleFunc("POST /v1/files", s.handleFileUpload)
-	public.HandleFunc("GET /v1/files", s.handleFileList)
-	public.HandleFunc("GET /v1/files/{file}", s.handleFileGet)
+	public.HandleFunc("GET /v1/files", geminiOr(s.handleGeminiFileList, s.handleFileList))
+	public.HandleFunc("GET /v1/files/{file}", geminiOr(s.handleGeminiFileGet, s.handleFileGet))
 	public.HandleFunc("GET /v1/files/{file}/content", s.handleFileContent)
-	public.HandleFunc("DELETE /v1/files/{file}", s.handleFileDelete)
+	public.HandleFunc("DELETE /v1/files/{file}", geminiOr(s.handleGeminiFileDelete, s.handleFileDelete))
 	for _, prefix := range []string{"/v1", "/v1beta"} {
 		public.HandleFunc("POST "+prefix+"/interactions", s.handleInteraction)
 		public.HandleFunc("GET "+prefix+"/interactions/{id}", s.handleInteractionGet)
@@ -104,16 +104,21 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	public.HandleFunc("POST /v1/messages/count_tokens", s.handleAnthropicCountTokens)
 	public.HandleFunc("GET /v1beta/models", s.handleGeminiModels)
 	public.HandleFunc("GET /v1beta/models/{model...}", s.handleGeminiModel)
-	public.HandleFunc("POST /v1beta/models/{action}", s.handleGeminiAction)
-	public.HandleFunc("POST /v1beta/cachedContents", s.handleGeminiCacheCreate)
-	public.HandleFunc("GET /v1beta/cachedContents", s.handleGeminiCacheList)
-	public.HandleFunc("GET /v1beta/cachedContents/{cache}", s.handleGeminiCacheGet)
-	public.HandleFunc("PATCH /v1beta/cachedContents/{cache}", s.handleGeminiCacheUpdate)
-	public.HandleFunc("DELETE /v1beta/cachedContents/{cache}", s.handleGeminiCacheDelete)
-	public.HandleFunc("POST /upload/v1beta/files", s.handleGeminiFileUpload)
+	for _, prefix := range []string{"/v1", "/v1beta"} {
+		public.HandleFunc("POST "+prefix+"/models/{action}", s.handleGeminiAction)
+		public.HandleFunc("POST "+prefix+"/cachedContents", s.handleGeminiCacheCreate)
+		public.HandleFunc("GET "+prefix+"/cachedContents", s.handleGeminiCacheList)
+		public.HandleFunc("GET "+prefix+"/cachedContents/{cache}", s.handleGeminiCacheGet)
+		public.HandleFunc("PATCH "+prefix+"/cachedContents/{cache}", s.handleGeminiCacheUpdate)
+		public.HandleFunc("DELETE "+prefix+"/cachedContents/{cache}", s.handleGeminiCacheDelete)
+		public.HandleFunc("POST /upload"+prefix+"/files", s.handleGeminiFileUpload)
+	}
 	public.HandleFunc("GET /v1beta/files", s.handleGeminiFileList)
 	public.HandleFunc("GET /v1beta/files/{file}", s.handleGeminiFileGet)
 	public.HandleFunc("DELETE /v1beta/files/{file}", s.handleGeminiFileDelete)
+	for _, version := range liveVersions {
+		public.HandleFunc("GET "+livePath(version), s.handleGeminiLive)
+	}
 	public.HandleFunc("/", writeRouteNotFound)
 
 	keys := func() []string {
@@ -129,11 +134,23 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	root := http.NewServeMux()
 	root.Handle("/v1/", handler)
 	root.Handle("/v1beta/", handler)
+	root.Handle("/ws/", handler)
 	root.Handle("/upload/", corsMiddleware(s.geminiUploadHandler(handler)))
 	if options.MediaDir != "" {
 		root.Handle("GET /media/{file}", corsMiddleware(http.HandlerFunc(s.handleMedia)))
 	}
 	return root
+}
+
+// geminiOr 返回把以 Gemini API 方式鉴权的请求交给 gemini、其余交给 openai 的处理函数，供 /v1 下两个协议共用的路径
+func geminiOr(gemini, openai http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if geminiAuth(r) {
+			gemini(w, r)
+			return
+		}
+		openai(w, r)
+	}
 }
 
 // waitLaunchMiddleware 让请求在服务启动、还没有就绪账户期间等待后再处理，wait 为空时直接处理

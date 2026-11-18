@@ -9,8 +9,8 @@ const accountDependents: QueryKey[] = [['models'], ['quota-snapshots'], ['warmup
 // requestDependents 是请求结束后需要重新读取的查询：请求记录、最近请求与用量
 export const requestDependents: QueryKey[] = [['requests'], ['usage']]
 
-// settingsDependents 是保存设置后需要重新读取的查询：模型目录中的模型映射、PROXY 组成的代理池
-export const settingsDependents: QueryKey[] = [['models'], ['proxies']]
+// settingsDependents 是保存设置后需要重新读取的查询：模型目录中的模型映射、PROXY 组成的代理池、上游拒绝句的自定义规则条数
+export const settingsDependents: QueryKey[] = [['models'], ['proxies'], ['prompt', 'rejected']]
 
 // invalidate 让 keys 下的查询重新读取，正在读取的查询不打断，读完后再读一次
 export function invalidate(client: QueryClient, keys: QueryKey[]) {

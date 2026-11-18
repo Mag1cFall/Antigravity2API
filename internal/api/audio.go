@@ -34,6 +34,7 @@ func (s *server) handleOpenAITranscription(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if shouldWriteRequestError(r, err) {
+		recordFailure(r, err)
 		writeOpenAIRequestError(w, err)
 	}
 }
@@ -56,6 +57,7 @@ func (s *server) handleOpenAITranslation(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if shouldWriteRequestError(r, err) {
+		recordFailure(r, err)
 		writeOpenAIRequestError(w, err)
 	}
 }

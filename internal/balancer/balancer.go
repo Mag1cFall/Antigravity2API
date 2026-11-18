@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"maps"
 	"net/http"
 	"slices"
 	"sync"
@@ -80,9 +79,10 @@ type entry struct {
 	credits bool
 }
 
-// binding 表示会话到账户的粘连
+// binding 表示会话到账户的粘连：id 为该会话最近一次成功生成所用的账户，since 为那次尝试开始的时刻
 type binding struct {
 	id      string
+	since   time.Time
 	expires time.Time
 }
 
@@ -242,7 +242,7 @@ func (p *Pool) cooldown(id string) map[string]time.Time {
 	return p.cooldowns[id]
 }
 
-// Peers 返回与账户 id 共享该组额度池的其他账户：额度摘要中该组每个桶的窗口与重置时间都与 id 的相同，家庭方案的成员账户共享同一组桶
+// Peers 返回与账户 id 共用该组额度池的其他账户：id 在该组已开始计时的每周额度桶，对方都有同一个桶，重置时刻相差不超过 poolSkew 且最近一次读到的剩余比例相同；家庭方案的成员账户共用同一组桶，同一时刻开始计时的独立额度剩余比例不同
 func (p *Pool) Peers(id, group string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -250,26 +250,47 @@ func (p *Pool) Peers(id, group string) []string {
 	if self == nil {
 		return nil
 	}
-	own := resets(self.buckets(group))
+	own := weekly(self.buckets(group))
 	if len(own) == 0 {
 		return nil
 	}
 	var peers []string
 	for _, e := range p.entries {
-		if e != self && maps.Equal(resets(e.buckets(group)), own) {
+		if e != self && pooled(own, weekly(e.buckets(group))) {
 			peers = append(peers, e.id)
 		}
 	}
 	return peers
 }
 
-// resets 返回各窗口的重置时间
-func resets(buckets []antigravity.QuotaBucket) map[string]string {
-	windows := make(map[string]string, len(buckets))
+// poolSkew 为同一额度桶在不同账户上读到的重置时刻的最大差
+const poolSkew = 2 * time.Second
+
+// weekly 返回已开始计时的每周额度桶；尚未开始计时的桶剩余比例为 1，重置时刻随读取时间顺延
+func weekly(buckets []antigravity.QuotaBucket) map[string]antigravity.QuotaBucket {
+	started := make(map[string]antigravity.QuotaBucket)
 	for _, bucket := range buckets {
-		windows[bucket.Window] = bucket.ResetTime
+		if bucket.Window == "weekly" && bucket.RemainingFraction < 1 {
+			started[bucket.BucketID] = bucket
+		}
 	}
-	return windows
+	return started
+}
+
+// pooled 判断 other 是否有 own 中的每个桶，且重置时刻相差不超过 poolSkew、剩余比例相同
+func pooled(own, other map[string]antigravity.QuotaBucket) bool {
+	for id, bucket := range own {
+		peer, ok := other[id]
+		if !ok || peer.RemainingFraction != bucket.RemainingFraction {
+			return false
+		}
+		reset, err := time.Parse(time.RFC3339, bucket.ResetTime)
+		peerReset, peerErr := time.Parse(time.RFC3339, peer.ResetTime)
+		if err != nil || peerErr != nil || reset.Sub(peerReset).Abs() > poolSkew {
+			return false
+		}
+	}
+	return true
 }
 
 // Models 按账户顺序合并各账户目录并按 ID 去重
@@ -331,7 +352,7 @@ func (p *Pool) Status(id string) (Status, bool) {
 	return status, true
 }
 
-// Acquire 为模型选择账户并占用一个并发槽位，session 非空时优先沿用该会话上次的账户，skip 不为 nil 时每次选择都跳过它返回 true 的账户，lowerTier 时同优先级内先用套餐低的账户；候选账户并发已满时等待槽位
+// Acquire 为模型选择账户并占用一个并发槽位，session 非空时优先沿用该会话最近一次成功生成所用的账户，skip 不为 nil 时每次选择都跳过它返回 true 的账户，lowerTier 时同优先级内先用套餐低的账户；候选账户并发已满时等待槽位
 func (p *Pool) Acquire(ctx context.Context, model, session string, skip func(string) bool, lowerTier bool) (*Lease, error) {
 	for {
 		p.mu.Lock()
@@ -404,11 +425,25 @@ func (p *Pool) pick(id, session string, skip func(string) bool, lowerTier bool) 
 	chosen.active++
 	p.picks++
 	chosen.used = p.picks
-	if session != "" {
-		p.sessions[session] = binding{id: chosen.id, expires: now.Add(sessionTTL)}
+	if bound, ok := p.sessions[session]; ok && bound.id == chosen.id {
+		bound.expires = now.Add(sessionTTL)
+		p.sessions[session] = bound
 	}
 	model, _ := chosen.model(id)
 	return &Lease{ID: chosen.id, Model: model, Credits: chosen.credits, pool: p, entry: chosen}, nil
+}
+
+// Bind 把会话粘连到在 started 开始的一次尝试中成功生成的账户，会话已粘连到更晚开始的成功尝试时不改动
+func (p *Pool) Bind(session, id string, started time.Time) {
+	if session == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if bound, ok := p.sessions[session]; ok && bound.since.After(started) {
+		return
+	}
+	p.sessions[session] = binding{id: id, since: started, expires: p.now().Add(sessionTTL)}
 }
 
 // sticky 返回会话粘连且仍有空闲槽位的候选账户

@@ -15,32 +15,32 @@ func TestBeginKeepsConversationOfIdenticalRequest(t *testing.T) {
 	clock := time.Unix(1700000000, 0)
 	records.now = func() time.Time { return clock }
 	digests, answers := []string{"head", "first", "second", "third"}, []string{"", "reply", ""}
-	first, err := records.begin(digests, answers)
+	first, err := records.begin(identity{digests: digests, answers: answers})
 	if err != nil || !first.New {
 		t.Fatalf("首次请求返回 %v，New 为 %v，期望新建会话", err, first.New)
 	}
-	if err := records.record(first.Cascade, digests, "answer", "model", 1, 10, signatureRecord{}); err != nil {
+	if err := records.record(first.Cascade, identity{digests: digests}, "answer", "model", 1, 10, 0, signatureRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(4 * time.Minute)
-	again, err := records.begin(digests, answers)
+	again, err := records.begin(identity{digests: digests, answers: answers})
 	if err != nil || again.New || again.Cascade != first.Cascade || again.Trajectory != first.Trajectory || !slices.Equal(again.Times, first.Times) {
 		t.Fatalf("原样重发返回 %v，会话 %s 时间 %v，期望原会话 %s 时间 %v", err, again.Cascade, again.Times, first.Cascade, first.Times)
 	}
-	next, err := records.begin([]string{"head", "first", "second", "third", "fourth", "fifth"}, []string{"", "reply", "", "answer", ""})
+	next, err := records.begin(identity{digests: []string{"head", "first", "second", "third", "fourth", "fifth"}, answers: []string{"", "reply", "", "answer", ""}})
 	if err != nil || next.New || next.Cascade != first.Cascade || next.Times[0] != first.Times[0] {
 		t.Fatalf("续接请求返回 %v，会话 %s 时间 %v，期望原会话 %s 且首条时间不变", err, next.Cascade, next.Times, first.Cascade)
 	}
 	clock = clock.Add(time.Minute)
-	edited, err := records.begin([]string{"head", "first", "second", "third", "fourth", "changed", "sixth", "seventh"}, []string{"", "reply", "", "answer", "", "", ""})
+	edited, err := records.begin(identity{digests: []string{"head", "first", "second", "third", "fourth", "changed", "sixth", "seventh"}, answers: []string{"", "reply", "", "answer", "", "", ""}})
 	if err != nil || edited.New || edited.Cascade != first.Cascade || !slices.Equal(edited.Times[:4], next.Times[:4]) || edited.Times[4] != clock.Unix() {
 		t.Fatalf("改写已发消息的请求返回 %v，会话 %s 时间 %v，期望原会话 %s、前 4 条时间不变、其后为当前时间", err, edited.Cascade, edited.Times, first.Cascade)
 	}
-	back, err := records.begin([]string{"head", "first", "second"}, []string{"", "reply"})
+	back, err := records.begin(identity{digests: []string{"head", "first", "second"}, answers: []string{"", "reply"}})
 	if err != nil || back.New || back.Cascade != first.Cascade || !slices.Equal(back.Times, first.Times[:2]) {
 		t.Fatalf("回退的请求返回 %v，会话 %s 时间 %v，期望原会话 %s 与前 2 条的时间", err, back.Cascade, back.Times, first.Cascade)
 	}
-	other, err := records.begin([]string{"head", "another", "more"}, []string{"", ""})
+	other, err := records.begin(identity{digests: []string{"head", "another", "more"}, answers: []string{"", ""}})
 	if err != nil || !other.New {
 		t.Fatalf("第一条消息不同的请求返回 %v，New 为 %v，期望新建会话", err, other.New)
 	}
@@ -53,14 +53,14 @@ func TestBeginStartsConversationForRepeatedFirstMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	digests := []string{"head", "first"}
-	first, err := records.begin(digests, []string{""})
+	first, err := records.begin(identity{digests: digests, answers: []string{""}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := records.record(first.Cascade, digests, "answer", "model", 1, 10, signatureRecord{}); err != nil {
+	if err := records.record(first.Cascade, identity{digests: digests}, "answer", "model", 1, 10, 0, signatureRecord{}); err != nil {
 		t.Fatal(err)
 	}
-	again, err := records.begin(digests, []string{""})
+	again, err := records.begin(identity{digests: digests, answers: []string{""}})
 	if err != nil || !again.New || again.Cascade == first.Cascade {
 		t.Fatalf("原样重发返回 %v，会话 %s，New 为 %v，期望新建会话", err, again.Cascade, again.New)
 	}
@@ -91,11 +91,11 @@ func TestRewindToEarlierMessage(t *testing.T) {
 			}
 			return marked
 		}
-		first, err := records.begin(mark(base), make([]string, len(base)-1))
+		first, err := records.begin(identity{digests: mark(base), answers: make([]string, len(base)-1)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		next, err := records.begin(mark(test.request), make([]string, len(test.request)-1))
+		next, err := records.begin(identity{digests: mark(test.request), answers: make([]string, len(test.request)-1)})
 		if err != nil || (next.Cascade == first.Cascade) != test.same || next.New == test.same {
 			t.Fatalf("%s：返回 %v，会话 %s，New 为 %v，原会话 %s，期望沿用原会话为 %v", test.name, err, next.Cascade, next.New, first.Cascade, test.same)
 		}
@@ -117,20 +117,20 @@ func TestRewindPrefersLongerSharedConversation(t *testing.T) {
 		}
 		return digests
 	}
-	long, err := records.begin(chained("first", "reply", "second"), make([]string, 3))
+	long, err := records.begin(identity{digests: chained("first", "reply", "second"), answers: make([]string, 3)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := records.record(long.Cascade, chained("first", "reply", "second"), "answer", "model", 3, 10, signatureRecord{}); err != nil {
+	if err := records.record(long.Cascade, identity{digests: chained("first", "reply", "second")}, "answer", "model", 3, 10, 0, signatureRecord{}); err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(time.Minute)
-	short, err := records.begin(chained("first"), make([]string, 1))
+	short, err := records.begin(identity{digests: chained("first"), answers: make([]string, 1)})
 	if err != nil || !short.New {
 		t.Fatalf("以相同首条消息新开的请求返回 %v，New 为 %v，期望新建会话", err, short.New)
 	}
 	clock = clock.Add(time.Minute)
-	edited, err := records.begin(chained("first", "reply", "changed"), make([]string, 3))
+	edited, err := records.begin(identity{digests: chained("first", "reply", "changed"), answers: make([]string, 3)})
 	if err != nil || edited.Cascade != long.Cascade || !slices.Equal(edited.Times[:2], long.Times[:2]) || edited.Times[2] != clock.Unix() {
 		t.Fatalf("改写长会话最后一条的请求返回 %v，会话 %s 时间 %v，期望长会话 %s、前 2 条时间 %v、第 3 条为当前时间", err, edited.Cascade, edited.Times, long.Cascade, long.Times[:2])
 	}

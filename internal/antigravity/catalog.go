@@ -185,7 +185,7 @@ func BucketGroup(bucketID string) string {
 	return bucketID
 }
 
-// Public 返回公开目录中的模型条目，用途列表中的条目以用途标注能力，没有显示名时以 ID 为名称
+// Public 返回公开目录中的模型条目，用途列表中的条目以用途标注能力，没有显示名时以 ID 为名称；转写模型与 Agent 模型另有 Live 会话的 bidiGenerateContent
 func (m CatalogModel) Public() Model {
 	capabilities := map[string]bool{"thinking": m.SupportsThinking, "images": m.SupportsImages, "video": m.SupportsVideo}
 	switch m.Kind {
@@ -196,11 +196,15 @@ func (m CatalogModel) Public() Model {
 	case KindTab:
 		capabilities["completion"] = true
 	}
+	methods := []string{"generateContent", "countTokens", "createCachedContent"}
+	if m.Kind == KindTranscription || m.Agent {
+		methods = append(methods, "bidiGenerateContent")
+	}
 	return Model{
 		ID:               m.ID,
 		Name:             cmp.Or(m.DisplayName, m.ID),
 		Description:      m.TagDescription,
-		Methods:          []string{"generateContent", "countTokens", "createCachedContent"},
+		Methods:          methods,
 		InputTokenLimit:  m.MaxTokens,
 		OutputTokenLimit: m.MaxOutputTokens,
 		Capabilities:     capabilities,

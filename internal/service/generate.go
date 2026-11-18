@@ -3,7 +3,6 @@ package service
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -45,10 +44,11 @@ const (
 // tierSuffixes 为目录中同族模型 ID 的档位后缀
 var tierSuffixes = []string{"-low", "-medium", "-high", "-xhigh"}
 
-// Error 表示带 HTTP 状态语义的服务错误
+// Error 表示带 HTTP 状态语义的服务错误，States 是账户都不可调度时各账户的英文状态
 type Error struct {
 	Status  int
 	Message string
+	States  []string
 }
 
 // Error 返回错误说明
@@ -59,6 +59,24 @@ func (e *Error) Error() string {
 // HTTPStatus 返回公开协议使用的状态码
 func (e *Error) HTTPStatus() int {
 	return e.Status
+}
+
+// AccountStates 返回账户都不可调度时各账户的英文状态，公开错误按它给出账户数
+func (e *Error) AccountStates() []string {
+	return e.States
+}
+
+// accountState 返回不可调度账户在公开错误中的英文状态：已停用、待验证、初始化失败或初始化中
+func accountState(enabled bool, reason string, failed bool) string {
+	switch {
+	case !enabled:
+		return "disabled"
+	case strings.HasPrefix(reason, verifyReason(nil)):
+		return "verification required"
+	case failed:
+		return "unavailable"
+	}
+	return "initializing"
 }
 
 // watchdog 是一次生成的上游 context：首个上游事件前与相邻两个上游事件之间超过 REQUEST_TIMEOUT 时以 ErrRequestTimeout 取消
@@ -116,9 +134,10 @@ func (s *Service) model(request antigravity.GenerateRequest) (antigravity.Catalo
 	}
 	if s.pool.Len() == 0 {
 		s.mu.Lock()
-		reasons := []string{"没有就绪账户"}
+		reasons, states := []string{"没有就绪账户"}, []string(nil)
 		for _, record := range s.store.Accounts() {
 			reason, failed := s.failures[record.ID]
+			states = append(states, accountState(record.Enabled, reason, failed))
 			switch {
 			case failed:
 			case !record.Enabled:
@@ -129,13 +148,14 @@ func (s *Service) model(request antigravity.GenerateRequest) (antigravity.Catalo
 			reasons = append(reasons, record.ID+": "+reason)
 		}
 		s.mu.Unlock()
-		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: strings.Join(reasons, "\n")}
+		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: strings.Join(reasons, "\n"), States: states}
 	}
 	if request.AccountID != "" && s.account(request.AccountID) == nil {
 		s.mu.Lock()
-		reason := s.failures[request.AccountID]
+		reason, failed := s.failures[request.AccountID]
 		s.mu.Unlock()
-		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: strings.TrimSpace(fmt.Sprintf("账户 %s 未就绪 %s", request.AccountID, reason))}
+		record, _ := s.store.Account(request.AccountID)
+		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: strings.TrimSpace(fmt.Sprintf("账户 %s 未就绪 %s", request.AccountID, reason)), States: []string{accountState(record.Enabled, reason, failed)}}
 	}
 	return s.resolve(request.Model, request.Config)
 }
@@ -165,8 +185,8 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 	if model.Kind != "" || wantsImage(request.Config) {
 		return s.generateMedia(ctx, request, model, composer.Tier())
 	}
-	digests := chain(request)
-	session, err := s.conversations.begin(digests, replies(request))
+	id := identify(request)
+	session, err := s.conversations.begin(id)
 	if err != nil {
 		return nil, err
 	}
@@ -223,11 +243,11 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 			trace.SetUpstream(lease.Model.ID, lease.Model.QuotaGroup(), envelope.RequestType)
 			trace.SetConversation(session.Cascade, conversation.Step)
 		}
-		body, err := json.Marshal(envelope)
+		size, err := current.client.Encode(&envelope)
 		if err != nil {
 			return nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
 		}
-		return send(deadline, trace, &upstreamStream{lease: lease, current: current, out: out, turn: turn, hedge: hedge, bytes: len(body)}, envelope), nil
+		return send(deadline, trace, &upstreamStream{lease: lease, current: current, out: out, turn: turn, hedge: hedge, bytes: size}, envelope), nil
 	}
 	// settle 把失败的尝试写入账本、归还槽位并按失败原因处理账户，返回是否换账户重试
 	settle := func(stream *upstreamStream) bool {
@@ -330,10 +350,10 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 		deadline.stop()
 		return nil, err
 	}
-	return s.relay(ctx, deadline, stream, open, request, digests, session.Cascade, composer.Tier()), nil
+	return s.relay(ctx, deadline, stream, open, request, id, session.Cascade, composer.Tier()), nil
 }
 
-// upstreamStream 表示一次上游尝试：账户租约、上游事件、往返正文、开始时刻、本次尝试的输出处理与会话轮次；hedge 标记备用请求，begun 为发出时刻，first 与 firstAt 为首个上游事件及其到达时刻，err 为流开始前的错误，cancel 取消本次尝试，done 在流开始失败或收到首个事件后关闭
+// upstreamStream 表示一次上游尝试：账户租约、上游事件、往返正文、开始时刻、本次尝试的输出处理与会话轮次；hedge 标记备用请求，begun 为发出时刻，first 与 firstAt 为首个上游事件及其到达时刻，err 为流开始前的错误，cancel 取消本次尝试，done 在流开始失败或收到首个事件后关闭，standby 为首个事件落后、仍在进行的另一方
 type upstreamStream struct {
 	lease    *balancer.Lease
 	current  *account
@@ -350,6 +370,7 @@ type upstreamStream struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	bytes    int
+	standby  *upstreamStream
 }
 
 // record 返回本次尝试的账本记录，备用请求带 Hedge 标记
@@ -455,16 +476,23 @@ func attempt(account string, exchange *antigravity.Exchange, started time.Time, 
 	return record
 }
 
-// fail 按上游错误原因处理账户并写日志：内容策略结束（含过滤提示）、输入拒绝、异常结束用完重新生成与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型；返回是否换账户重试
+// fail 按上游错误原因处理账户并写日志：内容策略结束（含过滤提示）、输入拒绝、异常结束用完重新生成与本地错误不换账户，认证失败与需要验证的 403 移出调度，token 端点 5xx 与 429 按网络错误换账户，违反条款的 403 与账户受限通知停用，没有产品许可或订阅的 403 冷却该模型 licenseCooldown，QUOTA_EXHAUSTED 把该账户与同额度池账户的该模型、AI 积分不足把它们的额度组冷却到重置时间并在后台读取该账户的额度，图像模型只冷却该账户的该模型，没有 ErrorInfo 与 RetryInfo 的 429 由请求内容触发、直接返回，其他 429 短冷却该模型，连续 INTERNAL 500 递增冷却该模型，404 NOT_FOUND 短冷却该账户的该模型；返回是否换账户重试
 func (s *Service) fail(ctx context.Context, current *account, model antigravity.CatalogModel, err error, tier prompt.Tier) bool {
 	var policy *antigravity.ContentPolicyError
 	var feedback *antigravity.PromptFeedbackError
 	var abnormal *antigravity.AbnormalFinishError
 	var local *Error
-	if errors.As(err, &policy) || errors.As(err, &feedback) || errors.As(err, &abnormal) || errors.As(err, &local) {
+	var call *callError
+	if errors.As(err, &policy) || errors.As(err, &feedback) || errors.As(err, &abnormal) || errors.As(err, &local) || errors.As(err, &call) {
 		return false
 	}
 	var upstream *antigravity.UpstreamError
+	var restricted *antigravity.AccountRestrictedError
+	if errors.As(err, &restricted) {
+		slog.ErrorContext(ctx, "账户受限，已停用 | 通知="+restricted.Message, "source", current.id)
+		s.disable(current.id, "账户受限已停用："+restricted.Message)
+		return true
+	}
 	if unauthorized(err) {
 		slog.WarnContext(ctx, "账户认证失败，移出调度 | 错误="+err.Error(), "source", current.id)
 		s.mu.Lock()
@@ -487,14 +515,7 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 		slog.WarnContext(ctx, fmt.Sprintf("账户冷却 | 范围=%s | 时长=%s | 原因=%d %s %s | 系统提示档位=%s", scope, until.Sub(now).Round(time.Second), upstream.Status, state, reason, tier), "source", current.id)
 	}
 	switch {
-	case upstream.Status == http.StatusForbidden && (reason == "VALIDATION_REQUIRED" || strings.Contains(strings.ToLower(message), "verify your account")):
-		slog.WarnContext(ctx, "账户需要验证，停止请求", "source", current.id)
-		s.mu.Lock()
-		s.stop(current.id, verifyReason(upstream.Body))
-		s.mu.Unlock()
-	case upstream.Status == http.StatusForbidden && (reason == "TOS_VIOLATION" || strings.Contains(strings.ToLower(message), "terms of service")):
-		slog.ErrorContext(ctx, "账户违反服务条款，已停用", "source", current.id)
-		s.disable(current.id, "违反服务条款已停用："+string(upstream.Body))
+	case s.forbid(ctx, current.id, upstream):
 	case upstream.Status == http.StatusForbidden && (reason == "SUBSCRIPTION_REQUIRED" || strings.Contains(strings.ToLower(message), "license") || strings.Contains(strings.ToLower(message), "subscription")):
 		limit(model.ID, now.Add(licenseCooldown))
 	case quotaExhausted(reason):
@@ -539,6 +560,8 @@ func (s *Service) fail(ctx context.Context, current *account, model antigravity.
 		s.pool.Limit(current.id, model.ID, until)
 		s.mu.Unlock()
 		limit(model.ID, until)
+	case upstream.Status == http.StatusNotFound && state == "NOT_FOUND":
+		limit(model.ID, now.Add(shortCooldown))
 	default:
 		return false
 	}
@@ -589,8 +612,30 @@ func (s *Service) disable(id, reason string) {
 	s.mu.Unlock()
 }
 
+// forbid 处理账户级的 403：需要验证时移出调度并记为待验证，违反服务条款时停用账户，消息中的空白序列按一个空格匹配；返回 upstream 是否属于这两种
+func (s *Service) forbid(ctx context.Context, id string, upstream *antigravity.UpstreamError) bool {
+	if upstream.Status != http.StatusForbidden {
+		return false
+	}
+	_, message := upstream.Message()
+	message = strings.Join(strings.Fields(strings.ToLower(message)), " ")
+	switch reason := upstream.Reason(); {
+	case reason == "VALIDATION_REQUIRED" || strings.Contains(message, "verify your account"):
+		slog.WarnContext(ctx, "账户需要验证，停止请求", "source", id)
+		s.mu.Lock()
+		s.stop(id, verifyReason(upstream.Body))
+		s.mu.Unlock()
+	case reason == "TOS_VIOLATION" || strings.Contains(message, "terms of service"):
+		slog.ErrorContext(ctx, "账户违反服务条款，已停用", "source", id)
+		s.disable(id, "违反服务条款已停用："+string(upstream.Body))
+	default:
+		return false
+	}
+	return true
+}
+
 // CountTokens 以与生成相同的模型、会话与系统提示估算请求的 promptTokenCount，没有记录时间的消息取当前时间；Gemini 与 Claude 族在同一会话于该模型上一次成功生成的消息是本次的前缀时，取其上游用量并只估算该次上游 contents 之后新增的 contents，GPT-OSS 族计整个信封
-func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateRequest) (int64, error) {
+func (s *Service) CountTokens(ctx context.Context, request antigravity.GenerateRequest) (int64, error) {
 	request.System = dropBilling(request.System)
 	composer, err := s.composer(s.live.Load())
 	if err != nil {
@@ -600,8 +645,8 @@ func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateReq
 	if err != nil {
 		return 0, err
 	}
-	digests := chain(request)
-	session, ok := s.conversations.find(digests, replies(request))
+	id := identify(request)
+	session, ok := s.conversations.find(id)
 	if !ok {
 		session = conversation{Cascade: uuid.Nil.String(), Trajectory: uuid.Nil.String()}
 	}
@@ -613,7 +658,7 @@ func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateReq
 	for len(times) < len(request.Contents) {
 		times = append(times, time.Now().Unix())
 	}
-	device, plugins, experiments := s.countProfile(request.AccountID)
+	device, plugins, experiments := s.countProfile(ctx, request.AccountID)
 	composed, err := composer.Compose(request, model, session.Cascade, localTimes(times, device), device, plugins, experiments)
 	if err != nil {
 		return 0, &Error{Status: http.StatusInternalServerError, Message: "系统提示模板: " + err.Error()}
@@ -622,16 +667,18 @@ func (s *Service) CountTokens(_ context.Context, request antigravity.GenerateReq
 	if err != nil {
 		return 0, &Error{Status: http.StatusBadRequest, Message: err.Error()}
 	}
-	if usage, ok := s.conversations.usage(digests, model.ID); ok && model.ModelProvider != antigravity.ProviderOpenAI {
-		return usage.Tokens + tokencount.Prompt(model.ModelProvider, antigravity.WireRequest{Contents: envelope.Request.Contents[usage.Contents:]}), nil
+	if usage, ok := s.conversations.usage(id, model.ID); ok && model.ModelProvider != antigravity.ProviderOpenAI {
+		rest := envelope.Request.Contents[usage.Contents:]
+		return usage.Tokens + usage.replay(model.ModelProvider, rest) + tokencount.Prompt(model.ModelProvider, antigravity.WireRequest{Contents: rest}), nil
 	}
 	return tokencount.Prompt(model.ModelProvider, envelope.Request), nil
 }
 
-// countProfile 返回计数时组装系统提示所用的设备档案、推荐插件段的货架正文与布尔实验开关：取指定账户的，否则取最早添加的就绪账户的
-func (s *Service) countProfile(id string) (antigravity.Device, string, map[string]bool) {
+// countProfile 返回计数时组装系统提示所用的设备档案、推荐插件段的货架正文与布尔实验开关：取指定账户的，否则取最早添加的就绪账户的；账户还没有保存过插件市场目录时先等第一次目录读取结束
+func (s *Service) countProfile(ctx context.Context, id string) (antigravity.Device, string, map[string]bool) {
 	for _, record := range s.store.Accounts() {
 		if current := s.account(record.ID); current != nil && (id == "" || id == record.ID) {
+			current.client.AwaitCatalog(ctx)
 			return current.device, current.client.Plugins(), current.client.Experiments()
 		}
 	}
@@ -655,38 +702,75 @@ func skip(request antigravity.GenerateRequest, tried map[string]bool, enabled fu
 	}
 }
 
-// relay 转发一次上游尝试的事件：客户端尚未收到正文、函数调用与媒体时按失败原因经 open 在同一账户重新生成或换账户，正常结束时记下会话状态、归还槽位并关闭输出；request 为非流式时事件暂存到结束，没有要求保留异常结束时，重新生成用完仍以格式错误的函数调用、意外的工具调用或格式错误的回复结束、且没有正文、函数调用、媒体与可见思考的生成以 AbnormalFinishError 结束
-func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstreamStream, open func(error, string) (*upstreamStream, error), request antigravity.GenerateRequest, digests []string, cascade string, tier prompt.Tier) <-chan antigravity.Event {
+// relay 转发一次上游尝试的事件：客户端尚未收到正文、函数调用与媒体时按失败原因经 open 在同一账户重新生成或换账户，最后一次重新生成不核对非 strict 声明的必填参数，此前已向客户端写出事件时先发出 EventRestart，正常结束时记下会话状态、把会话粘连到该账户、归还槽位并关闭输出；request 为非流式时事件暂存到结束，没有要求保留异常结束时，重新生成用完仍以格式错误的函数调用、意外的工具调用或格式错误的回复结束、且没有正文、函数调用、媒体与可见思考的生成以 AbnormalFinishError 结束
+func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstreamStream, open func(error, string) (*upstreamStream, error), request antigravity.GenerateRequest, id identity, cascade string, tier prompt.Tier) <-chan antigravity.Event {
 	events := make(chan antigravity.Event)
+	// send 把事件交给客户端，首个正文、媒体或函数调用记入账本的首次输出时刻
+	send := func(event antigravity.Event) {
+		if content(event) || event.Kind == antigravity.EventToolCall {
+			requestdb.TraceFrom(ctx).Output()
+		}
+		deliver(ctx, events, event)
+	}
 	go func() {
 		defer deadline.stop()
 		regenerated := 0
 		for {
 			var held []antigravity.Event
-			delivered, committed, reasoned := false, false, false
+			delivered, committed, calling, reasoned := false, false, false, false
 			emit := func(event antigravity.Event) {
+				calling = calling || event.Kind == antigravity.EventToolCall
 				committed = committed || content(event)
 				reasoned = reasoned || event.Kind == antigravity.EventReasoning && event.Text != ""
-				if request.Unary || event.Kind == antigravity.EventError || !committed && (event.Kind == antigravity.EventUsage || event.Kind == antigravity.EventFinish) {
+				if stream.standby != nil && (committed || calling) {
+					supersede(ctx, stream.standby, "另一方已开始输出内容")
+					stream.standby = nil
+					s.hedges.Add(-1)
+				}
+				if request.Unary || calling || event.Kind == antigravity.EventError || !committed && (event.Kind == antigravity.EventUsage || event.Kind == antigravity.EventFinish) {
 					held = append(held, event)
 					return
 				}
 				for _, pending := range held {
-					deliver(ctx, events, pending)
+					send(pending)
 				}
 				held = nil
 				delivered = true
-				deliver(ctx, events, event)
+				send(event)
 			}
-			reported, final, err := forward(stream.events, emit, stream.out, deadline)
-			retry := regenerable(ctx, err, final, committed)
+			reported, final, err := forward(stream.events, emit, stream.out, deadline, stream.cancel)
+			sent := committed && !request.Unary
+			retry := regenerable(ctx, err, final, sent, committed || calling)
 			regenerate := retry != nil && open != nil && regenerated < regenerations
-			if retry != nil && open != nil && !regenerate && err == nil && !request.KeepAbnormalFinish && (request.Config.HideThinking || !reasoned) && abnormalFinish(final.FinishReason) {
+			if retry != nil && open != nil && !regenerate && err == nil && !calling && !request.KeepAbnormalFinish && (request.Config.HideThinking || !reasoned) && abnormalFinish(final.FinishReason) {
 				err = &antigravity.AbnormalFinishError{Reason: final.FinishReason, Message: final.FinishMessage, Usage: reported}
 				for index, event := range held {
 					if event.Kind == antigravity.EventFinish {
 						held[index] = antigravity.Event{Kind: antigravity.EventError, Err: err}
 					}
+				}
+			}
+			if standby := stream.standby; standby != nil {
+				stream.standby = nil
+				s.hedges.Add(-1)
+				if retry != nil && s.takeover(ctx, standby, tier) {
+					record := stream.record(err, final)
+					record.Usage = reported
+					requestdb.TraceFrom(ctx).AddAttempt(record)
+					if err != nil && status(err) == 0 {
+						s.fail(ctx, stream.current, stream.lease.Model, err, tier)
+					}
+					stream.lease.Release()
+					requestdb.TraceFrom(ctx).SetAccount(standby.lease.ID)
+					slog.WarnContext(ctx, "先返回首个事件的一方在给出内容前失败，改用另一方 | 原因="+retry.Error(), "source", standby.lease.ID)
+					if delivered {
+						deliver(ctx, events, antigravity.Event{Kind: antigravity.EventRestart})
+					}
+					stream = standby
+					continue
+				}
+				if retry == nil {
+					supersede(ctx, standby, "另一方已结束")
 				}
 			}
 			record := stream.record(err, final)
@@ -695,7 +779,7 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 				record.Usage = reported
 			}
 			requestdb.TraceFrom(ctx).AddAttempt(record)
-			if final.Kind == antigravity.EventFinish && final.Err != nil {
+			if final.Kind == antigravity.EventFinish && final.Err != nil && !regenerate {
 				slog.WarnContext(ctx, "上游在函数调用之后异常结束，按 STOP 结束 | 错误="+final.Err.Error(), "source", stream.current.id)
 			}
 			if regenerate {
@@ -710,7 +794,13 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 					close(events)
 					return
 				}
+				if regenerated == regenerations && next.out.tools != nil {
+					next.out.tools.arguments = nil
+				}
 				slog.WarnContext(ctx, fmt.Sprintf("客户端尚未收到内容，重新生成 | 第 %d 次 | 原因=%v", regenerated, retry), "source", next.lease.ID)
+				if delivered {
+					deliver(ctx, events, antigravity.Event{Kind: antigravity.EventRestart})
+				}
 				stream = next
 				continue
 			}
@@ -727,11 +817,14 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 				continue
 			}
 			for _, event := range held {
-				deliver(ctx, events, event)
+				send(event)
 			}
 			succeeded := err == nil && reported != nil
+			if succeeded {
+				s.pool.Bind(cascade, stream.lease.ID, stream.started)
+			}
 			if succeeded && stream.out != nil {
-				if err := s.conversations.record(cascade, digests, stream.out.reply(), stream.lease.Model.ID, len(stream.out.prompt.Contents), stream.out.prefixTokens(*reported), stream.out.signatures()); err != nil {
+				if err := s.conversations.record(cascade, id, stream.out.reply(), stream.lease.Model.ID, len(stream.out.prompt.Contents), stream.out.prefixTokens(*reported), reported.ReasoningTokens, stream.out.signatures()); err != nil {
 					slog.WarnContext(ctx, "写入会话记录失败 | 错误="+err.Error(), "source", stream.lease.ID)
 				}
 			}
@@ -758,49 +851,64 @@ func abnormalFinish(reason string) bool {
 	return false
 }
 
-// content 判断事件是否为客户端收到后不能随重新生成丢弃的正文、函数调用或媒体
+// content 判断事件是否为客户端收到后不能随重新生成丢弃的正文或媒体；函数调用暂存到流结束，不在此列
 func content(event antigravity.Event) bool {
 	switch event.Kind {
 	case antigravity.EventText:
 		return event.Text != ""
-	case antigravity.EventToolCall, antigravity.EventMedia:
+	case antigravity.EventMedia:
 		return true
 	}
 	return false
 }
 
-// regenerable 返回尝试可在客户端尚未收到内容时重新生成的原因：流中断（提前结束、连接重置、HTTP/2 流重置、TLS 记录错误等读取错误）、流尾 5xx，或以函数调用格式错误、意外的工具调用、格式错误的回复或没有内容的 STOP 结束；上游 4xx、内容策略结束、输入拒绝、本地错误与超时返回 nil
-func regenerable(ctx context.Context, err error, final antigravity.Event, committed bool) error {
-	if committed || ctx.Err() != nil {
+// regenerable 返回客户端尚未收到正文与媒体时可从头重新生成的原因：可重试的流错误（见 retryable）、已发出函数调用后流中断或没有结束原因，或以函数调用格式错误、意外的工具调用、格式错误的回复结束，本次尝试没有正文、媒体与函数调用（produced 为假）时另含以 STOP 结束；sent 为真或客户端已取消时返回 nil
+func regenerable(ctx context.Context, err error, final antigravity.Event, sent, produced bool) error {
+	if sent || ctx.Err() != nil {
 		return nil
 	}
 	if err != nil {
-		var upstream *antigravity.UpstreamError
-		var policy *antigravity.ContentPolicyError
-		var feedback *antigravity.PromptFeedbackError
-		var local *Error
-		switch {
-		case errors.As(err, &upstream):
-			if upstream.Status >= http.StatusInternalServerError {
-				return err
-			}
-			return nil
-		case errors.As(err, &policy), errors.As(err, &feedback), errors.As(err, &local), errors.Is(err, requestdb.ErrRequestTimeout), errors.Is(err, context.Canceled):
-			return nil
-		}
-		return err
+		return retryable(err)
 	}
 	if final.Kind == antigravity.EventFinish {
+		if final.Err != nil {
+			return retryable(final.Err)
+		}
 		switch strings.ToUpper(final.FinishReason) {
-		case "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE", "STOP":
-			return fmt.Errorf("上游以 %s 结束且没有内容", final.FinishReason)
+		case "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE":
+			return fmt.Errorf("上游以 %s 结束", final.FinishReason)
+		case "STOP":
+			if !produced {
+				return fmt.Errorf("上游以 STOP 结束且没有内容")
+			}
 		}
 	}
 	return nil
 }
 
-// forward 把上游事件经 out 处理后交给 emit，返回最后一次转发的用量、上游最后一个事件与流中的错误；正文、思考、签名或函数调用事件使累计输出超过 out 的上限时丢弃它及其后的上游事件，以已转发部分的用量和 MAX_TOKENS 结束，Claude 与 GPT-OSS 的块不带逐块累计的输出用量，累计输出按已转发正文、思考与函数调用的本地计数，输入取块上的上游用量，没有时按信封的本地计数；out 发出结束事件或核对失败后关闭上游并丢弃其后的事件；首个事件为下线提示且其后流未完成时改发 404 错误事件，首个事件为最低客户端版本提示时不论流如何结束都改发带提示原文的 502 错误事件；每个上游事件为 deadline 重新计时，上游因超时中断时错误改为 REQUEST_TIMEOUT；客户端取消后 emit 丢弃事件，上游照常排空
-func forward(upstream <-chan antigravity.Event, emit func(antigravity.Event), out *output, deadline *watchdog) (*antigravity.Usage, antigravity.Event, error) {
+// retryable 返回流错误中可再请求一次的原因：流中断（提前结束、连接重置、HTTP/2 流重置、TLS 记录错误等读取错误）、流尾 5xx 与不符合工具约定的函数调用；上游 4xx、内容策略结束、输入拒绝、其他本地错误与超时返回 nil
+func retryable(err error) error {
+	var upstream *antigravity.UpstreamError
+	var policy *antigravity.ContentPolicyError
+	var feedback *antigravity.PromptFeedbackError
+	var local *Error
+	var call *callError
+	switch {
+	case errors.As(err, &call):
+		return err
+	case errors.As(err, &upstream):
+		if upstream.Status >= http.StatusInternalServerError {
+			return err
+		}
+		return nil
+	case errors.As(err, &policy), errors.As(err, &feedback), errors.As(err, &local), errors.Is(err, requestdb.ErrRequestTimeout), errors.Is(err, context.Canceled):
+		return nil
+	}
+	return err
+}
+
+// forward 把上游事件经 out 处理后交给 emit，返回最后一次转发的用量、上游最后一个事件与流中的错误；正文、思考、签名或函数调用事件使累计输出超过 out 的上限时丢弃它及其后的上游事件，以已转发部分的用量和 MAX_TOKENS 结束，Claude 与 GPT-OSS 的块不带逐块累计的输出用量，累计输出按已转发正文、思考与函数调用的本地计数，输入取块上的上游用量，没有时按信封的本地计数；out 发出结束事件或核对失败后以 cancel 关闭本次尝试的上游并丢弃其后的事件；首个事件为下线提示且其后流未完成时改发 404 错误事件，首个事件为最低客户端版本提示时不论流如何结束都改发带提示原文的 502 错误事件；每个上游事件为 deadline 重新计时，上游因超时中断时错误改为 REQUEST_TIMEOUT；客户端取消后 emit 丢弃事件，上游照常排空
+func forward(upstream <-chan antigravity.Event, emit func(antigravity.Event), out *output, deadline *watchdog, cancel context.CancelFunc) (*antigravity.Usage, antigravity.Event, error) {
 	var failure error
 	var usage *antigravity.Usage
 	var final antigravity.Event
@@ -893,7 +1001,7 @@ func forward(upstream <-chan antigravity.Event, emit func(antigravity.Event), ou
 		send(event)
 		if out != nil && out.done && event.Kind != antigravity.EventFinish {
 			truncated = true
-			deadline.stop()
+			cancel()
 		}
 	}
 	for _, previous := range held {

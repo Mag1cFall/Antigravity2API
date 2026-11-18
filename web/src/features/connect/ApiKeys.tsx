@@ -199,6 +199,7 @@ function KeyDialog({
               <legend className="text-sm font-medium">{m.keyAccounts}</legend>
               <p className="text-sm text-foreground-muted">{m.keyAccountsHint}</p>
               <SearchInput
+                clearLabel={app.clearSearch}
                 aria-label={m.keyAccountsSearch}
                 placeholder={m.keyAccountsSearch}
                 value={query}

@@ -24,7 +24,7 @@ func collect(upstream <-chan antigravity.Event) ([]antigravity.Event, error) {
 	events := make(chan antigravity.Event)
 	result := make(chan error, 1)
 	go func() {
-		_, _, err := forward(upstream, func(event antigravity.Event) { events <- event }, nil, watch(context.Background(), time.Minute))
+		_, _, err := forward(upstream, func(event antigravity.Event) { events <- event }, nil, watch(context.Background(), time.Minute), nil)
 		result <- err
 		close(events)
 	}()
@@ -49,7 +49,7 @@ func TestForwardDrainsUpstreamAfterCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	upstream := stream(antigravity.Event{Kind: antigravity.EventText, Text: "a"}, antigravity.Event{Kind: antigravity.EventFinish})
-	if _, _, err := forward(upstream, func(event antigravity.Event) { deliver(ctx, make(chan antigravity.Event), event) }, nil, watch(ctx, time.Minute)); err != nil {
+	if _, _, err := forward(upstream, func(event antigravity.Event) { deliver(ctx, make(chan antigravity.Event), event) }, nil, watch(ctx, time.Minute), nil); err != nil {
 		t.Fatalf("forward 返回 %v", err)
 	}
 	if _, open := <-upstream; open {

@@ -17,7 +17,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
+	"github.com/Mag1cFall/Antigravity2API/internal/tokencount"
 )
+
+// geminiSignatureReplay 为 Gemini 族上游把上一次回答的思考签名计入输入时在该次 thoughtsTokenCount 之外另计的 token 数
+const geminiSignatureReplay = 2
 
 // conversationTTL 为会话记录在最后一次使用后的保留时长
 const conversationTTL = 24 * time.Hour
@@ -25,10 +30,11 @@ const conversationTTL = 24 * time.Hour
 // conversationTemp 为写入会话文件时同目录临时文件的名称前缀
 const conversationTemp = ".conversation-"
 
-// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、最近一次请求在摘要链中的位置与该处的链摘要、该次请求成功生成的回答指纹、该位置之前供回退匹配的链摘要、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 与各回答指纹的思考签名、各签名摘要对应的模型族
+// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、会话分区的摘要、最近一次请求在摘要链中的位置与该处的链摘要、该次请求成功生成的回答指纹、该位置之前供回退匹配的链摘要、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 与各回答指纹的思考签名、各签名摘要对应的模型族
 type conversation struct {
 	Cascade    string            `json:"cascade"`
 	Trajectory string            `json:"trajectory"`
+	Head       string            `json:"head"`
 	Length     int               `json:"length"`
 	Digest     string            `json:"digest"`
 	Chain      []string          `json:"chain,omitempty"`
@@ -41,13 +47,28 @@ type conversation struct {
 	New        bool              `json:"-"`
 }
 
-// promptUsage 表示一次成功生成的模型、规范消息条数、该处的链摘要、上游 contents 条数与上游 promptTokenCount
+// promptUsage 表示一次成功生成的模型、规范消息条数、该处的链摘要、客户端系统提示、工具声明与拒绝句规则的摘要、上游 contents 条数、上游 promptTokenCount 与 thoughtsTokenCount
 type promptUsage struct {
 	Model    string `json:"model"`
 	Length   int    `json:"length"`
 	Digest   string `json:"digest"`
+	Frame    string `json:"frame"`
 	Contents int    `json:"contents"`
 	Tokens   int64  `json:"tokens"`
+	Thoughts int64  `json:"thoughts,omitempty"`
+}
+
+// replay 返回接续的 contents 中该次回答的思考签名按 thoughtsTokenCount 计入输入比按签名长度估算多出的 token 数，只用于 Gemini 族，占位签名不计入
+func (p promptUsage) replay(provider string, contents []antigravity.WireContent) int64 {
+	if provider != antigravity.ProviderGoogle || p.Thoughts == 0 || len(contents) == 0 || contents[0].Role != "model" {
+		return 0
+	}
+	for _, part := range contents[0].Parts {
+		if part.ThoughtSignature != "" && !sentinelSignatures[part.ThoughtSignature] {
+			return p.Thoughts + geminiSignatureReplay - tokencount.Signature(provider, part.ThoughtSignature)
+		}
+	}
+	return 0
 }
 
 // conversations 在内存与 dir 下每个会话一个 JSON 文件中保存会话记录
@@ -89,30 +110,42 @@ func openConversations(dir string) (*conversations, error) {
 	return c, nil
 }
 
-// chain 返回请求的摘要链：第 0 项为会话标识、客户端系统提示与工具声明的摘要，第 i 项由第 i-1 项与第 i 条消息算出
-func chain(request antigravity.GenerateRequest) []string {
-	head, _ := json.Marshal(struct {
-		Session string
-		System  string
-		Tools   antigravity.Tools
-	}{request.Session, request.System, request.Tools})
-	digests := []string{digest("", head)}
-	for _, content := range request.Contents {
-		encoded, _ := json.Marshal(content)
-		digests = append(digests, digest(digests[len(digests)-1], encoded))
-	}
-	return digests
+// identity 表示请求在会话记录中的指纹：digests 为摘要链，第 0 项为会话分区的摘要，第 i 项由第 i-1 项与第 i 条消息算出；answers 为各条消息的回答指纹，非 assistant 消息为空；anchors 为 assistant 消息中的思考签名；frame 为客户端系统提示、工具声明与当前拒绝句规则的摘要
+type identity struct {
+	digests []string
+	answers []string
+	anchors []string
+	frame   string
 }
 
-// replies 返回请求中每条消息的回答指纹，非 assistant 消息为空
-func replies(request antigravity.GenerateRequest) []string {
-	keys := make([]string, len(request.Contents))
+// identify 返回请求的会话指纹
+func identify(request antigravity.GenerateRequest) identity {
+	frame, _ := json.Marshal(struct {
+		System   string
+		Tools    antigravity.Tools
+		Rejected string
+	}{request.System, request.Tools, prompt.RejectedDigest()})
+	id := identity{digests: []string{digest("", []byte(request.Session))}, answers: make([]string, len(request.Contents)), frame: digest("", frame)}
 	for index, content := range request.Contents {
-		if content.Role == antigravity.RoleAssistant {
-			keys[index] = answerKey(content.Parts)
+		encoded, _ := json.Marshal(content)
+		id.digests = append(id.digests, digest(id.digests[index], encoded))
+		if content.Role != antigravity.RoleAssistant {
+			continue
+		}
+		id.answers[index] = answerKey(content.Parts)
+		for _, part := range content.Parts {
+			signatures := []string{part.ThoughtSignature}
+			if part.FunctionCall != nil {
+				signatures = append(signatures, part.FunctionCall.ThoughtSignature)
+			}
+			for _, signature := range signatures {
+				if signature != "" && !sentinelSignatures[signature] {
+					id.anchors = append(id.anchors, signature)
+				}
+			}
 		}
 	}
-	return keys
+	return id
 }
 
 // answerKey 返回一条回答的指纹：非思考正文按空白归一后相连，函数调用取名称与按键排序的参数
@@ -146,13 +179,14 @@ func digest(previous string, data []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// begin 为生成请求取得会话：找最近一次请求是本次前缀或与本次相同的会话，本次不多于一条消息时不取已成功生成过的会话；本次多于一条消息时另由 rewind 取回退的会话，相同部分更长时改用它；都没有时新建；记下本次的摘要链与新消息的时间并落盘，返回会话副本，新建时副本的 New 为真
-func (c *conversations) begin(digests, answers []string) (conversation, error) {
+// begin 为生成请求取得会话：找最近一次请求是本次前缀或与本次相同的会话，本次不多于一条消息时不取已成功生成过的会话；本次多于一条消息时另由 rewind 取回退的会话，相同部分更长时改用它；都没有时由 anchor 取同一分区中保存过本次某个思考签名的会话；仍没有时新建；记下本次的摘要链与新消息的时间并落盘，返回会话副本，新建时副本的 New 为真
+func (c *conversations) begin(id identity) (conversation, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now()
+	digests := id.digests
 	length := len(digests) - 1
-	item := c.match(digests, answers, func(item *conversation) bool {
+	item := c.match(id, func(item *conversation) bool {
 		return length > 1 || item.Length < length || item.Prompt == nil || item.Prompt.Length < item.Length
 	})
 	shared := 0
@@ -164,6 +198,9 @@ func (c *conversations) begin(digests, answers []string) (conversation, error) {
 			item, shared = back, kept
 		}
 	}
+	if item == nil {
+		item = c.anchor(id)
+	}
 	created := item == nil
 	if created {
 		item = &conversation{Cascade: uuid.NewString(), Trajectory: uuid.NewString()}
@@ -173,7 +210,7 @@ func (c *conversations) begin(digests, answers []string) (conversation, error) {
 	for len(times) < length {
 		times = append(times, now.Unix())
 	}
-	item.Length, item.Digest, item.Chain, item.Answer, item.Times, item.Used = length, digests[length], history(digests), "", times, now
+	item.Head, item.Length, item.Digest, item.Chain, item.Answer, item.Times, item.Used = digests[0], length, digests[length], history(digests), "", times, now
 	c.sweep()
 	snapshot := c.snapshot(item)
 	snapshot.New = created
@@ -201,11 +238,32 @@ func (c *conversations) rewind(digests []string) (*conversation, int) {
 	return best, kept
 }
 
+// anchor 返回同一分区中签名表含有本次某个思考签名的会话，多个时取最近使用者，都没有时返回 nil
+func (c *conversations) anchor(id identity) *conversation {
+	if len(id.anchors) == 0 {
+		return nil
+	}
+	var best *conversation
+	for _, item := range c.items {
+		if item.Head != id.digests[0] || len(item.Signatures) == 0 || best != nil && !item.Used.After(best.Used) {
+			continue
+		}
+		saved := make(map[string]bool, len(item.Signatures))
+		for _, signature := range item.Signatures {
+			saved[signature] = true
+		}
+		if slices.ContainsFunc(id.anchors, func(signature string) bool { return saved[signature] }) {
+			best = item
+		}
+	}
+	return best
+}
+
 // find 返回链位置是本次前缀的会话副本，供计数使用且不改动记录
-func (c *conversations) find(digests, answers []string) (conversation, bool) {
+func (c *conversations) find(id identity) (conversation, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	item := c.match(digests, answers, func(*conversation) bool { return true })
+	item := c.match(id, func(*conversation) bool { return true })
 	if item == nil {
 		return conversation{}, false
 	}
@@ -213,7 +271,8 @@ func (c *conversations) find(digests, answers []string) (conversation, bool) {
 }
 
 // match 在满足 accept 的会话中取链位置是本次前缀者，链位置最长者优先；并列时先取回答指纹与本次该位置消息一致者，再取最近使用者
-func (c *conversations) match(digests, answers []string, accept func(*conversation) bool) *conversation {
+func (c *conversations) match(id identity, accept func(*conversation) bool) *conversation {
+	digests, answers := id.digests, id.answers
 	answered := func(item *conversation) bool {
 		return item.Answer != "" && item.Length < len(answers) && answers[item.Length] == item.Answer
 	}
@@ -229,16 +288,17 @@ func (c *conversations) match(digests, answers []string, accept func(*conversati
 	return best
 }
 
-// record 记下会话一次成功生成的模型、消息条数、上游 contents 条数、上游 promptTokenCount 与输出中的思考签名，回答正文的签名以回答指纹为键，会话仍停在本次请求时记下回答指纹
-func (c *conversations) record(cascade string, digests []string, answer, model string, contents int, tokens int64, signed signatureRecord) error {
+// record 记下会话一次成功生成的模型、消息条数、系统提示与工具声明的摘要、上游 contents 条数、上游 promptTokenCount 与 thoughtsTokenCount、输出中的思考签名，回答正文的签名以回答指纹为键，会话仍停在本次请求时记下回答指纹
+func (c *conversations) record(cascade string, id identity, answer, model string, contents int, tokens, thoughts int64, signed signatureRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	item := c.items[cascade]
 	if item == nil {
 		return nil
 	}
+	digests := id.digests
 	length := len(digests) - 1
-	item.Prompt = &promptUsage{Model: model, Length: length, Digest: digests[length], Contents: contents, Tokens: tokens}
+	item.Prompt = &promptUsage{Model: model, Length: length, Digest: digests[length], Frame: id.frame, Contents: contents, Tokens: tokens, Thoughts: thoughts}
 	if item.Length == length && item.Digest == digests[length] {
 		item.Answer = answer
 	}
@@ -256,14 +316,15 @@ func (c *conversations) record(cascade string, digests []string, answer, model s
 	return c.save(item)
 }
 
-// usage 返回与本次请求前缀一致、模型相同且消息最多的一次成功生成的输入用量
-func (c *conversations) usage(digests []string, model string) (promptUsage, bool) {
+// usage 返回与本次请求前缀一致、系统提示、工具声明与拒绝句规则相同、模型相同且消息最多的一次成功生成的输入用量
+func (c *conversations) usage(id identity, model string) (promptUsage, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	digests := id.digests
 	var best *promptUsage
 	for _, item := range c.items {
 		prompt := item.Prompt
-		if prompt == nil || prompt.Model != model || prompt.Length >= len(digests) || digests[prompt.Length] != prompt.Digest {
+		if prompt == nil || prompt.Model != model || prompt.Frame != id.frame || prompt.Length >= len(digests) || digests[prompt.Length] != prompt.Digest {
 			continue
 		}
 		if best == nil || prompt.Length > best.Length {

@@ -173,8 +173,9 @@ func (c *Composer) Tier() Tier {
 // Compose 以会话 ID、账户设备档案、推荐插件段的货架正文与账户实时的布尔实验开关渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示与 user 轮中上游拒绝的整句删去，工具声明保持不变；模板执行出错时返回该错误
 func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string, experiments map[string]bool) (antigravity.GenerateRequest, error) {
 	data := deviceData(model, conversation, device, plugins, experiments)
-	data.Client = dropRejected(request.System, systemRejected)
-	request.Contents = dropUserRejected(request.Contents)
+	current := rejected.Load()
+	data.Client = dropRejected(request.System, current.system)
+	request.Contents = dropUserRejected(request.Contents, current.user)
 	var err error
 	if request.System, err = execute(c.system, data); err != nil {
 		return request, err

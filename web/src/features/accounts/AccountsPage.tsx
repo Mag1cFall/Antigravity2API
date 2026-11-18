@@ -30,7 +30,7 @@ import { ProxyDialog } from '@/features/accounts/ProxyDialog'
 import { useAccounts } from '@/features/accounts/queries'
 import { RefreshAllButton } from '@/features/accounts/RefreshAllButton'
 import { type Status, statuses, statusOf } from '@/features/accounts/status'
-import { exportURL } from '@/features/accounts/TransferDialog'
+import { AccountExportDialog } from '@/features/accounts/TransferDialog'
 import type { Account } from '@/features/accounts/types'
 import { WarmupDialog } from '@/features/warmup/WarmupDialog'
 import { fill, useMessages } from '@/lib/i18n'
@@ -105,6 +105,7 @@ export function AccountsPage() {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set())
   const detailId = params.get('account')
   const [proxyFor, setProxyFor] = useState<{ id: string; trigger: HTMLElement }>()
+  const [exporting, setExporting] = useState<string[]>()
 
   const setParam = useCallback(
     (changes: Record<string, string>) => {
@@ -137,8 +138,19 @@ export function AccountsPage() {
       onRemove: (account) => {
         remove([account])
       },
+      onExport: (account) => {
+        setExporting([account.id])
+      },
     }),
-    [setParam, setProxyFor, toggle.mutate, verify.mutate, refreshQuota.mutate, remove],
+    [
+      setParam,
+      setProxyFor,
+      setExporting,
+      toggle.mutate,
+      verify.mutate,
+      refreshQuota.mutate,
+      remove,
+    ],
   )
 
   const list = (accounts.data?.accounts ?? []).filter((account) => !hidden.has(account.id))
@@ -174,11 +186,13 @@ export function AccountsPage() {
             <RefreshAllButton accounts={list} />
             <WarmupDialog accounts={list} selected={picked.map((account) => account.id)} />
             {list.length > 0 && (
-              <Button asChild>
-                <a href={exportURL([])} download>
-                  <Download size={16} aria-hidden />
-                  {transfer.export}
-                </a>
+              <Button
+                onClick={() => {
+                  setExporting([])
+                }}
+              >
+                <Download size={16} aria-hidden />
+                {transfer.export}
               </Button>
             )}
             <AddAccountButton />
@@ -234,6 +248,7 @@ export function AccountsPage() {
                 className="w-auto"
               />
               <SearchInput
+                clearLabel={app.clearSearch}
                 aria-label={m.search}
                 placeholder={m.search}
                 value={query}
@@ -313,11 +328,15 @@ export function AccountsPage() {
                       <Trash2 size={16} aria-hidden />
                       {m.batchDelete}
                     </Button>
-                    <Button size="sm" variant="ghost" asChild>
-                      <a href={exportURL(picked.map((account) => account.id))} download>
-                        <Download size={16} aria-hidden />
-                        {fill(transfer.exportSelected, { count: picked.length })}
-                      </a>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setExporting(picked.map((account) => account.id))
+                      }}
+                    >
+                      <Download size={16} aria-hidden />
+                      {fill(transfer.exportSelected, { count: picked.length })}
                     </Button>
                     <Button
                       size="sm"
@@ -369,8 +388,18 @@ export function AccountsPage() {
         verifying={detail !== undefined && verifying.has(detail.id)}
         refreshing={detail !== undefined && refreshing.has(detail.id)}
         actions={actions}
+        onOpen={(id) => {
+          setParam({ account: id })
+        }}
         onClose={() => {
           setParam({ account: '' })
+        }}
+      />
+      <AccountExportDialog
+        ids={exporting}
+        total={list.length}
+        onClose={() => {
+          setExporting(undefined)
         }}
       />
       {proxyAccount && proxyFor && (

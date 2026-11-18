@@ -1,5 +1,6 @@
 import {
   Clock,
+  Download,
   Hourglass,
   Info,
   ListOrdered,
@@ -48,6 +49,7 @@ export interface RowActions {
   onRefreshQuota: (account: Account) => void
   onProxy: (account: Account, trigger: HTMLElement) => void
   onRemove: (account: Account) => void
+  onExport: (account: Account) => void
 }
 
 // QuotaCell 显示账户一个额度组的 5 小时与每周额度，compact 时窄屏两个窗口排成一行、只显示百分比
@@ -194,7 +196,7 @@ function RefreshQuotaItem({ onSelect }: { onSelect: () => void }) {
   )
 }
 
-// MoreActions 是行尾的更多操作菜单：设置代理与删除，窗口宽度不足 1280px 时另含刷新额度
+// MoreActions 是行尾的更多操作菜单：详情、设置代理、导出 JSON 与删除，窗口宽度不足 1280px 时另含刷新额度
 function MoreActions({ account, actions }: { account: Account; actions: RowActions }) {
   const m = useMessages('accounts')
   const trigger = useRef<HTMLButtonElement>(null)
@@ -234,6 +236,14 @@ function MoreActions({ account, actions }: { account: Account; actions: RowActio
         >
           <Network size={16} aria-hidden className="text-foreground-muted" />
           {m.proxyMenu}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => {
+            actions.onExport(account)
+          }}
+        >
+          <Download size={16} aria-hidden className="text-foreground-muted" />
+          {m.exportJson}
         </DropdownMenuItem>
         <DropdownMenuItem
           danger

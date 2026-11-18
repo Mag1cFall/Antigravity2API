@@ -13,29 +13,23 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// pragmas 是每个新连接执行的设置，驱动先执行 busy_timeout，其余按名称顺序执行，增量收缩因此先于 WAL 生效
-var pragmas = url.Values{"_pragma": {"auto_vacuum(INCREMENTAL)", "busy_timeout(10000)", "journal_mode(WAL)", "journal_size_limit(524288)", "synchronous(NORMAL)"}}
+// pragmas 是每个新连接执行的设置，驱动先执行 busy_timeout，其余按名称顺序执行
+var pragmas = url.Values{"_pragma": {"busy_timeout(10000)", "journal_mode(WAL)", "journal_size_limit(524288)", "synchronous(NORMAL)"}}
 
 // incrementalVacuum 是 PRAGMA auto_vacuum 表示增量收缩的值
 const incrementalVacuum = 2
 
-// Open 打开或创建数据库，执行 schema 并删除 schema 没有定义的对象，非增量收缩的已有库整理为增量收缩，最后交还空闲页
+// Open 打开或创建数据库，新库与非增量收缩的已有库先整理为增量收缩，再执行 schema 并删除 schema 没有定义的对象，最后交还空闲页
 func Open(path string, schema string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?"+pragmas.Encode())
 	if err != nil {
 		return nil, err
 	}
+	if err := useIncrementalVacuum(db); err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
 	if err := applySchema(db, schema); err != nil {
 		return nil, errors.Join(fmt.Errorf("同步表结构: %w", err), db.Close())
-	}
-	var mode int
-	if err := db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
-		return nil, errors.Join(fmt.Errorf("读取收缩模式: %w", err), db.Close())
-	}
-	if mode != incrementalVacuum {
-		if _, err := db.Exec(`VACUUM`); err != nil {
-			return nil, errors.Join(fmt.Errorf("整理数据库: %w", err), db.Close())
-		}
 	}
 	if err := Reclaim(context.Background(), db); err != nil {
 		return nil, errors.Join(err, db.Close())
@@ -43,7 +37,31 @@ func Open(path string, schema string) (*sql.DB, error) {
 	return db, nil
 }
 
-// applySchema 执行 schema，再删除 schema 没有定义的表、索引、视图与触发器
+// useIncrementalVacuum 在同一连接上把不是增量收缩的库设为增量收缩并整理一次
+func useIncrementalVacuum(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	var mode int
+	if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return fmt.Errorf("读取收缩模式: %w", err)
+	}
+	if mode == incrementalVacuum {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum = INCREMENTAL`); err != nil {
+		return fmt.Errorf("设置收缩模式: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
+		return fmt.Errorf("整理数据库: %w", err)
+	}
+	return nil
+}
+
+// applySchema 为已有表补上 schema 定义而缺少的列，执行 schema，再删除 schema 没有定义的表、索引、视图与触发器
 func applySchema(db *sql.DB, schema string) error {
 	defined, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -61,6 +79,13 @@ func applySchema(db *sql.DB, schema string) error {
 	have, err := schemaObjects(db)
 	if err != nil {
 		return err
+	}
+	for name, kind := range want {
+		if kind == "table" && have[name] == "table" {
+			if err := addMissingColumns(defined, db, name); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := db.Exec(schema); err != nil {
 		return err
@@ -91,6 +116,58 @@ func schemaObjects(db *sql.DB) (map[string]string, error) {
 		objects[name] = kind
 	}
 	return objects, rows.Err()
+}
+
+// addMissingColumns 按 defined 中同名表的列定义为 db 中的表追加缺少的列
+func addMissingColumns(defined *sql.DB, db *sql.DB, table string) error {
+	existing := make(map[string]bool)
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+		existing[name] = true
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	rows, err = defined.Query(`SELECT name, type, "notnull", dflt_value FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	var additions []string
+	for rows.Next() {
+		var name, kind string
+		var notNull bool
+		var fallback sql.NullString
+		if err := rows.Scan(&name, &kind, &notNull, &fallback); err != nil {
+			return errors.Join(err, rows.Close())
+		}
+		if existing[name] {
+			continue
+		}
+		column := quoteIdentifier(name) + " " + kind
+		if notNull {
+			column += " NOT NULL"
+		}
+		if fallback.Valid {
+			column += " DEFAULT " + fallback.String
+		}
+		additions = append(additions, `ALTER TABLE `+quoteIdentifier(table)+` ADD COLUMN `+column)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, addition := range additions {
+		if _, err := db.Exec(addition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // quoteIdentifier 返回双引号括起的 SQL 标识符

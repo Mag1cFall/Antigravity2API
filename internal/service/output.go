@@ -125,7 +125,7 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 		if event.ThoughtSignature == "" {
 			return out
 		}
-		return append(out, antigravity.Event{Kind: antigravity.EventThoughtSignature, Usage: event.Usage, ProviderModel: event.ProviderModel, ThoughtSignature: event.ThoughtSignature})
+		return append(out, antigravity.Event{Kind: antigravity.EventThoughtSignature, Usage: event.Usage, ProviderModel: event.ProviderModel, Final: event.Final, ThoughtSignature: event.ThoughtSignature})
 	case antigravity.EventToolCall:
 		if o.noFunctions {
 			o.unexpected = true
@@ -366,12 +366,26 @@ func unquoteEnum(schema map[string]any, text string) (string, bool) {
 	return value, true
 }
 
-// toolContract 表示需要在输出中核对的工具约定：必须调用、可调用的函数、单次调用与参数 Schema
+// toolContract 表示需要在输出中核对的工具约定：必须调用、可调用的函数、单次调用、各函数的必填参数与参数 Schema
 type toolContract struct {
-	required bool
-	single   bool
-	names    map[string]bool
-	schemas  map[string]*schemaValidator
+	required  bool
+	single    bool
+	names     map[string]bool
+	arguments map[string][]string
+	schemas   map[string]*schemaValidator
+}
+
+// callError 表示上游函数调用不符合请求的工具约定，客户端尚未收到内容时重新生成，公开协议按 502 返回
+type callError struct{ message string }
+
+// Error 返回错误说明
+func (e *callError) Error() string {
+	return e.message
+}
+
+// HTTPStatus 返回公开协议使用的状态码
+func (e *callError) HTTPStatus() int {
+	return http.StatusBadGateway
 }
 
 // check 核对第 count 个函数调用
@@ -379,15 +393,27 @@ func (contract *toolContract) check(call antigravity.FunctionCall, count int) er
 	if contract == nil {
 		return nil
 	}
+	fail := func(format string, args ...any) error {
+		return &callError{fmt.Sprintf(format, args...)}
+	}
 	switch {
 	case !contract.names[call.Name]:
-		return &Error{Status: http.StatusBadGateway, Message: fmt.Sprintf("upstream called function %q outside the tool choice", call.Name)}
+		return fail("upstream called function %q outside the tool choice", call.Name)
 	case contract.single && count > 1:
-		return &Error{Status: http.StatusBadGateway, Message: "upstream returned more than one function call with parallel tool calls disabled"}
+		return fail("upstream returned more than one function call with parallel tool calls disabled")
+	}
+	if required := contract.arguments[call.Name]; len(required) > 0 {
+		var arguments map[string]json.RawMessage
+		json.Unmarshal(call.Arguments, &arguments)
+		for _, key := range required {
+			if _, ok := arguments[key]; !ok {
+				return fail("upstream call of function %q is missing required argument %q", call.Name, key)
+			}
+		}
 	}
 	if schema := contract.schemas[call.Name]; schema != nil {
 		if err := schema.validate(call.Arguments); err != nil {
-			return &Error{Status: http.StatusBadGateway, Message: fmt.Sprintf("upstream arguments for function %q violate its strict schema: %v", call.Name, err)}
+			return fail("upstream arguments for function %q violate its strict schema: %v", call.Name, err)
 		}
 	}
 	return nil

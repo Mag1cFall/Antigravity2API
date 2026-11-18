@@ -30,6 +30,7 @@ func (s *server) handleResponsesInputTokens(w http.ResponseWriter, r *http.Reque
 	}
 	tokens, err := s.service.CountTokens(r.Context(), prepared.generate)
 	if err != nil {
+		recordFailure(r, err)
 		writeOpenAIRequestError(w, err)
 		return
 	}

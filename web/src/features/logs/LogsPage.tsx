@@ -157,6 +157,7 @@ function savedQuery(
 // SavedLogs 检索写入账本的 WARN 以上日志，按时间范围、级别、请求 ID 与关键词筛选，条件保存在 URL；toolbar 是视图切换等通用控件
 function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
   const m = useMessages('logs')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const [params, setParams] = useSearchParams()
   const range =
@@ -222,6 +223,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
           </Button>
         )}
         <SearchInput
+          clearLabel={app.clearSearch}
           aria-label={m.searchSaved}
           placeholder={m.searchSaved}
           value={q}
@@ -273,6 +275,7 @@ function SavedLogs({ toolbar }: { toolbar: ReactNode }) {
 // LogsPage 是服务日志：实时尾随与已保存日志检索，视图与筛选条件保存在 URL；实时日志区占满页面剩余高度，上方列出进行中的请求，重新打开跟随时平滑滚到最新
 export function LogsPage() {
   const m = useMessages('logs')
+  const app = useMessages('app')
   const { locale } = useI18n()
   const connection = useConnection()
   const client = useQueryClient()
@@ -433,6 +436,7 @@ export function LogsPage() {
             }))}
           />
           <SearchInput
+            clearLabel={app.clearSearch}
             aria-label={m.search}
             placeholder={m.search}
             value={filter.q}

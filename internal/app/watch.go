@@ -1,14 +1,18 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
 
@@ -47,6 +51,8 @@ type account struct {
 	QuotaAt *time.Time `json:"quota_at,omitempty"`
 	// Shared 按额度组（gemini、3p）列出与该账户共享额度池的其他就绪账户
 	Shared map[string][]string `json:"shared,omitempty"`
+	// Family 是与该账户共用同一组每周额度桶（同一 Google One 家庭群组）的其他账户，含停用与出错的账户
+	Family []string `json:"family,omitempty"`
 	// AICredits 为真时额度用尽后以 AI 积分继续生成
 	AICredits bool `json:"ai_credits"`
 	// CreditBalance 为 Google One AI 积分余额，CreditMinimum 为以积分生成所需的最低余额，付费套餐没有该积分时都省略
@@ -123,7 +129,107 @@ func (s *server) accounts() []account {
 	for _, status := range statuses {
 		accounts = append(accounts, s.account(status, now))
 	}
+	family := s.family.members(s.ledger, statuses)
+	for index := range accounts {
+		accounts[index].Family = family[accounts[index].ID]
+	}
 	return accounts
+}
+
+const (
+	// familySkew 是同一额度桶在不同账户上读到的重置时刻的最大差
+	familySkew = 2 * time.Second
+	// familyKeep 是每个每周额度桶本次计时内保留的剩余比例个数
+	familyKeep = 256
+)
+
+// weeklyRun 是一个每周额度桶本次计时的重置时刻与计时内读到过的剩余比例
+type weeklyRun struct {
+	reset     time.Time
+	fractions []float64
+}
+
+// familyBook 记录各账户每周额度桶的计时与读到过的剩余比例，用来找出共用同一组额度桶的家庭群组成员；首次使用时从账本补入最近 8 天的额度快照
+type familyBook struct {
+	mu     sync.Mutex
+	seeded bool
+	seen   map[string]map[string]*weeklyRun
+}
+
+// observe 记下一次读到的每周额度桶：重置时刻与本次计时相差超过 familySkew 时开始新的计时，剩余比例在 0 与 99.9% 之间（已开始消耗且未耗尽）时记入；尚未开始计时的窗口重置时刻随读取时间顺延，剩余 100%，不记比例
+func (book *familyBook) observe(id, bucket string, reset time.Time, fraction float64) {
+	buckets := book.seen[id]
+	if buckets == nil {
+		buckets = map[string]*weeklyRun{}
+		book.seen[id] = buckets
+	}
+	run := buckets[bucket]
+	if run == nil || run.reset.Sub(reset).Abs() > familySkew {
+		run = &weeklyRun{reset: reset}
+		buckets[bucket] = run
+	}
+	if fraction > 0 && fraction < 0.999 && !slices.Contains(run.fractions, fraction) {
+		run.fractions = append(run.fractions, fraction)
+		if len(run.fractions) > familyKeep {
+			run.fractions = run.fractions[1:]
+		}
+	}
+}
+
+// members 记下各账户最近一次读到的每周额度桶，返回每个账户同一家庭群组的其他账户：两个账户都已消耗的每周额度桶重置时刻相差都不超过 familySkew，且其中至少一个桶在两个账户上读到过相同的剩余比例（同一个额度桶）
+func (book *familyBook) members(ledger *requestdb.Store, statuses []service.AccountStatus) map[string][]string {
+	book.mu.Lock()
+	defer book.mu.Unlock()
+	if book.seen == nil {
+		book.seen = map[string]map[string]*weeklyRun{}
+	}
+	if !book.seeded {
+		book.seeded = true
+		now := time.Now()
+		snapshots, err := ledger.QuotaSnapshots(context.Background(), now.Add(-8*24*time.Hour), now, "")
+		if err != nil {
+			slog.Warn("读取额度快照失败 | 错误="+err.Error(), "source", "service")
+		}
+		for _, snapshot := range snapshots {
+			if snapshot.Window == "weekly" && snapshot.ResetTime != nil {
+				book.observe(snapshot.Account, snapshot.BucketID, *snapshot.ResetTime, snapshot.RemainingFraction)
+			}
+		}
+	}
+	for _, status := range statuses {
+		for _, group := range status.Quota {
+			for _, bucket := range group.Buckets {
+				if reset, err := time.Parse(time.RFC3339, bucket.ResetTime); bucket.Window == "weekly" && err == nil {
+					book.observe(status.ID, bucket.BucketID, reset, bucket.RemainingFraction)
+				}
+			}
+		}
+	}
+	family := map[string][]string{}
+	for _, a := range statuses {
+		for _, b := range statuses {
+			if a.ID != b.ID && sharesBuckets(book.seen[a.ID], book.seen[b.ID]) {
+				family[a.ID] = append(family[a.ID], b.ID)
+			}
+		}
+	}
+	return family
+}
+
+// sharesBuckets 判断两个账户共用同一组每周额度桶
+func sharesBuckets(a, b map[string]*weeklyRun) bool {
+	matched := false
+	for bucket, x := range a {
+		y := b[bucket]
+		if y == nil || len(x.fractions) == 0 || len(y.fractions) == 0 {
+			continue
+		}
+		if x.reset.Sub(y.reset).Abs() > familySkew {
+			return false
+		}
+		matched = matched || slices.ContainsFunc(x.fractions, func(fraction float64) bool { return slices.Contains(y.fractions, fraction) })
+	}
+	return matched
 }
 
 // account 投影一个账户，只保留未到期的冷却

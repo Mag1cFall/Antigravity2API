@@ -3,7 +3,7 @@ import type { QuotaBucket } from '@/features/quota/types'
 // AccountState 对应 internal/app 的账户状态
 type AccountState = 'ready' | 'cooling' | 'pending' | 'error' | 'disabled'
 
-// Account 对应 internal/app 的 account，id 即账户邮箱，label 是备注名，proxy 中的密码显示为 xxxxx，priority 是调度优先级，verify_url 是上游要求验证时给出的验证链接，quota_at 是额度的读取时间，shared 按额度组列出共用同一额度池的其他就绪账户，ai_credits 为是否开启 AI 积分超额使用，credit_balance 与 credit_minimum 是 Google One AI 积分余额与以积分生成所需的最低余额（付费套餐没有积分时省略），device 是设备档案及由它决定的主机名与 User-Agent
+// Account 对应 internal/app 的 account，id 即账户邮箱，label 是备注名，proxy 中的密码显示为 xxxxx，priority 是调度优先级，verify_url 是上游要求验证时给出的验证链接，quota_at 是额度的读取时间，shared 按额度组列出共用同一额度池的其他就绪账户，family 是共用同一组每周额度（同一 Google One 家庭群组）的其他账户，ai_credits 为是否开启 AI 积分超额使用，credit_balance 与 credit_minimum 是 Google One AI 积分余额与以积分生成所需的最低余额（付费套餐没有积分时省略），device 是设备档案及由它决定的主机名与 User-Agent
 export interface Account {
   id: string
   label?: string
@@ -21,6 +21,7 @@ export interface Account {
   quota: QuotaBucket[]
   quota_at?: string
   shared?: Partial<Record<'gemini' | '3p', string[]>>
+  family?: string[]
   ai_credits: boolean
   credit_balance?: number
   credit_minimum?: number

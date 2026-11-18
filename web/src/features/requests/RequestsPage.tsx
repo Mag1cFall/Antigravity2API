@@ -1,12 +1,11 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { Download, History } from 'lucide-react'
+import { History } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 
 import { useConnection } from '@/app/events'
 import { Button } from '@/components/ui/button'
 import { Card, CardToolbar } from '@/components/ui/card'
 import { SearchInput } from '@/components/ui/search-input'
-import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { Table, Td, Th } from '@/components/ui/table'
@@ -22,6 +21,8 @@ import {
   ranges,
   states,
 } from '@/features/requests/filters'
+import { customParams, RangePicker } from '@/features/requests/RangePicker'
+import { RecordsExport } from '@/features/requests/RecordsExport'
 import { RequestDetailDialog } from '@/features/requests/RequestDetailDialog'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import { RunningRequests } from '@/features/requests/RunningRequests'
@@ -51,6 +52,7 @@ export function RequestsPage() {
   const connection = useConnection()
   const filtered =
     filter.range !== '24h' ||
+    filter.custom !== undefined ||
     Boolean(filter.state || filter.protocol || filter.model || filter.account || filter.q)
 
   // update 修改筛选条件，changes 不含 cursor 时回到第一页
@@ -68,7 +70,6 @@ export function RequestsPage() {
   const pageUnpriced = items.filter((record) => record.cost_usd === null).length
   const csvQuery = apiQuery(filter, now)
   csvQuery.delete('cursor')
-  const csv = '/api/usage/records.csv?' + csvQuery.toString()
   const base = window.location.origin + '/v1'
 
   if (connection === 'connecting') return <Loading label={app.loading} />
@@ -78,16 +79,21 @@ export function RequestsPage() {
       <Card>
         <CardToolbar className="items-start">
           <div className="flex min-w-0 flex-[1_1_480px] flex-wrap items-center gap-3">
-            <Segmented
+            <RangePicker
               label={m.range}
-              value={filter.range}
-              onValueChange={(value) => {
-                update({ range: value === '24h' ? '' : value })
-              }}
-              options={(Object.keys(ranges) as RangeKey[]).map((value) => ({
+              presets={(Object.keys(ranges) as RangeKey[]).map((value) => ({
                 value,
                 label: rangeLabels[value],
               }))}
+              preset={filter.custom ? undefined : filter.range}
+              presetMs={ranges[filter.range]}
+              custom={filter.custom}
+              onPreset={(value) => {
+                update({ range: value === '24h' ? '' : value, from: '', to: '' })
+              }}
+              onCustom={(range) => {
+                update(customParams(range))
+              }}
             />
             <Select
               label={m.state}
@@ -149,6 +155,7 @@ export function RequestsPage() {
               ]}
             />
             <SearchInput
+              clearLabel={app.clearSearch}
               aria-label={m.search}
               placeholder={m.search}
               value={filter.q}
@@ -158,25 +165,14 @@ export function RequestsPage() {
               className="min-w-[200px] flex-[1_1_240px]"
             />
           </div>
-          {items.length > 0 ? (
-            <Button size="sm" asChild>
-              <a href={csv} download>
-                <Download size={16} aria-hidden />
-                {m.export}
-              </a>
-            </Button>
-          ) : (
-            <Tooltip
-              disabledReason={
-                page.isPending ? app.loading : page.isError ? m.exportFailed : m.exportEmpty
-              }
-            >
-              <Button size="sm" disabled>
-                <Download size={16} aria-hidden />
-                {m.export}
-              </Button>
-            </Tooltip>
-          )}
+          <RecordsExport
+            label={m.export}
+            query={csvQuery}
+            disabledReason={
+              items.length === 0 &&
+              (page.isPending ? app.loading : page.isError ? m.exportFailed : m.exportEmpty)
+            }
+          />
         </CardToolbar>
         {page.isPending ? (
           <Loading label={app.loading} />

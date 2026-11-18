@@ -8,7 +8,7 @@ import { Header } from '@/app/Header'
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
 import { Field } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
+import { Input, PasswordInput } from '@/components/ui/input'
 import { Loading } from '@/components/ui/states'
 import { sessionKey, useSession } from '@/features/service/queries'
 import type { Session } from '@/features/service/types'
@@ -87,9 +87,10 @@ export function LoginPage() {
                 />
               </Field>
               <Field id="password" label={m.password} error={errors.password?.message}>
-                <Input
+                <PasswordInput
                   id="password"
-                  type="password"
+                  showLabel={m.showPassword}
+                  hideLabel={m.hidePassword}
                   autoComplete="current-password"
                   aria-invalid={errors.password ? true : undefined}
                   aria-describedby={errors.password ? 'password-error' : undefined}

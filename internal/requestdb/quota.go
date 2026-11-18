@@ -15,7 +15,18 @@ func (store *Store) QuotaSnapshots(ctx context.Context, from, to time.Time, acco
 		query += ` AND account = ?`
 		args = append(args, account)
 	}
-	rows, err := store.db.QueryContext(ctx, query+` ORDER BY time, rowid`, args...)
+	return store.quotaSnapshots(ctx, query+` ORDER BY time, rowid`, args...)
+}
+
+// LatestQuotaSnapshots 返回账户在 since 之后最近一次额度读取的全部快照
+func (store *Store) LatestQuotaSnapshots(ctx context.Context, account string, since time.Time) ([]QuotaSnapshot, error) {
+	return store.quotaSnapshots(ctx, `SELECT time, account, bucket_id, window, remaining_fraction, reset_time FROM quota_snapshots
+WHERE account = ? AND time = (SELECT MAX(time) FROM quota_snapshots WHERE account = ? AND time >= ?) ORDER BY rowid`, account, account, since.UnixMilli())
+}
+
+// quotaSnapshots 执行额度快照查询并读出各行
+func (store *Store) quotaSnapshots(ctx context.Context, query string, args ...any) ([]QuotaSnapshot, error) {
+	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

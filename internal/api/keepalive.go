@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// 流式响应的心跳帧：OpenAI 与 Interactions 为 SSE 注释，Responses 写出开场事件后改由写出器以新序号写出状态事件，Anthropic 为官方 ping 事件，Gemini 为不触发事件的空行
+// 流式响应的心跳帧：OpenAI 与 Interactions 为 SSE 注释，Responses 写出开场事件后改由写出器以新序号写出状态事件，Anthropic 为官方 ping 事件，Gemini 为官方 SDK 按 \n\n 切帧后跳过的空帧
 const (
 	sseHeartbeat       = ": ping\n\n"
 	anthropicHeartbeat = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
-	geminiHeartbeat    = "\n"
+	geminiHeartbeat    = "\n\n"
 )
 
 // streamKeepalive 是流式响应的 ResponseWriter，距最近一次写出满心跳间隔时写出心跳帧或调用 pulse，响应头由 open 或首个心跳写出

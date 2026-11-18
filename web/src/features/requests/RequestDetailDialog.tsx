@@ -13,6 +13,7 @@ import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { DotList } from '@/components/ui/stats'
 import { Table, Td, Th } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip } from '@/components/ui/tooltip'
 import { nameOf } from '@/features/quota/quota'
 import { protocolName } from '@/features/requests/filters'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
@@ -200,6 +201,15 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
             items={[
               m.queue + ' ' + formatDuration(record.queue_ms, locale),
               m.firstEvent + ' ' + formatDuration(record.first_event_ms, locale),
+              <Tooltip key="output" label={m.firstOutputHint}>
+                <span>
+                  {m.firstOutput +
+                    ' ' +
+                    (record.first_output_ms > 0
+                      ? formatDuration(record.first_output_ms, locale)
+                      : m.none)}
+                </span>
+              </Tooltip>,
               m.totalDuration + ' ' + formatDuration(record.duration_ms, locale),
             ]}
           />

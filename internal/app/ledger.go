@@ -6,15 +6,18 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/api"
 	"github.com/Mag1cFall/Antigravity2API/internal/logging"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
@@ -35,6 +38,25 @@ type activeKey struct{}
 type recordingService struct {
 	antigravity.Service
 	server *server
+}
+
+// OpenLive 以请求 API key 绑定的账户与指定账户打开 Live 会话并记录会话开始
+func (service recordingService) OpenLive(ctx context.Context, request antigravity.LiveRequest) (*antigravity.LiveSession, error) {
+	live, ok := service.Service.(antigravity.LiveService)
+	if !ok {
+		return nil, errors.New("Live sessions are not available")
+	}
+	active := ctx.Value(activeKey{}).(*activeRequest)
+	request.Accounts, request.AccountID = active.accounts, active.account
+	trace := requestdb.TraceFrom(ctx)
+	if trace.Begin("", request.Model) {
+		row := trace.Snapshot()
+		service.server.events.begin(row)
+		slog.InfoContext(ctx, fmt.Sprintf("Live 会话开始 | 模型=%s | 协议=%s", row.Model, row.Protocol), "event", "request.started", "source", "request", "request", row)
+	}
+	session, err := live.OpenLive(ctx, request)
+	trace.Fail(err)
+	return session, err
 }
 
 // Generate 记录首次生成，等待生成开始期间写进度日志，记下本次生成未能开始的错误或清除先前的错误，并经 relay 转发事件
@@ -105,6 +127,8 @@ func relay(ctx context.Context, trace *requestdb.Trace, model string, events <-c
 	defer timer.Stop()
 	first, forward, stalled, last := true, true, false, "-"
 	lastAt := started
+	// produced 是已交给客户端的内容种类，内容策略结束的公开错误写明它们
+	var produced []string
 	for {
 		select {
 		case event, ok := <-events:
@@ -112,6 +136,13 @@ func relay(ctx context.Context, trace *requestdb.Trace, model string, events <-c
 				return
 			}
 			trace.Observe(event)
+			if kind := producedKind(event); kind != "" && !slices.Contains(produced, kind) {
+				produced = append(produced, kind)
+			}
+			var policy *antigravity.ContentPolicyError
+			if event.Kind == antigravity.EventError && errors.As(event.Err, &policy) {
+				event.Err = &api.FilteredError{Err: event.Err, After: time.Duration(trace.Snapshot().DurationMS) * time.Millisecond, Produced: produced}
+			}
 			now := time.Now()
 			if stalled {
 				progress(ctx, trace, slog.LevelInfo, fmt.Sprintf("事件流恢复 | 模型=%s | 停顿=%s | 当前事件=%s", model, now.Sub(lastAt).Round(time.Millisecond), event.Kind))
@@ -144,6 +175,21 @@ func relay(ctx context.Context, trace *requestdb.Trace, model string, events <-c
 	}
 }
 
+// producedKind 返回事件在内容策略结束的公开错误中的内容种类，不是正文、思考、函数调用或媒体时返回空
+func producedKind(event antigravity.Event) string {
+	switch {
+	case event.Kind == antigravity.EventReasoning && event.Text != "":
+		return "thinking"
+	case event.Kind == antigravity.EventText && event.Text != "":
+		return "text"
+	case event.Kind == antigravity.EventToolCall:
+		return "function calls"
+	case event.Kind == antigravity.EventMedia:
+		return "media"
+	}
+	return ""
+}
+
 // progress 写一条以请求账户为来源的 request.progress 日志
 func progress(ctx context.Context, trace *requestdb.Trace, level slog.Level, message string) {
 	slog.Log(ctx, level, message, "event", "request.progress", "source", cmp.Or(trace.Snapshot().Account, "request"))
@@ -172,7 +218,7 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.live.Load()
 		key, authorized := apiKey(r, cfg.APIKeys)
-		if r.Method != http.MethodPost || !authorized {
+		if r.Method != http.MethodPost && !strings.HasPrefix(r.URL.Path, "/ws/") || !authorized {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -271,7 +317,7 @@ func protocolOf(path string) string {
 		return "openai-responses"
 	case strings.HasPrefix(path, "/v1/messages"):
 		return "anthropic"
-	case strings.HasPrefix(path, "/v1beta/"):
+	case strings.HasPrefix(path, "/v1beta/"), strings.HasPrefix(path, "/ws/"), strings.HasPrefix(path, "/v1/models/"), strings.HasPrefix(path, "/v1/cachedContents"), strings.HasPrefix(path, "/v1/interactions"):
 		return "gemini"
 	}
 	return "other"
@@ -279,9 +325,11 @@ func protocolOf(path string) string {
 
 // probe 从路径或请求体读取客户端是否请求流式、请求的模型与是否为 Responses 或 Interactions 后台请求，后台请求的生成不随客户端断开而取消
 func probe(path string, body []byte) (stream bool, model string, background bool) {
-	if rest, ok := strings.CutPrefix(path, "/v1beta/models/"); ok {
-		model, action, _ := strings.Cut(rest, ":")
-		return action == "streamGenerateContent", model, false
+	for _, prefix := range []string{"/v1beta/models/", "/v1/models/"} {
+		if rest, ok := strings.CutPrefix(path, prefix); ok {
+			model, action, _ := strings.Cut(rest, ":")
+			return action == "streamGenerateContent", model, false
+		}
 	}
 	var request struct {
 		Stream     bool   `json:"stream"`

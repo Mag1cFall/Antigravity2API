@@ -5,6 +5,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router'
 
+import { DesktopContextMenu } from '@/app/DesktopContextMenu'
 import { logsKey } from '@/app/events'
 import { router } from '@/app/router'
 import { syncQueries } from '@/app/sync'
@@ -13,6 +14,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { loginFailuresKey } from '@/features/accounts/queries'
 import { sessionKey } from '@/features/service/queries'
 import { ApiError } from '@/lib/api'
+import { isDesktop } from '@/lib/desktop'
 import { I18nProvider, loadInitialLocale, useMessages } from '@/lib/i18n'
 import { applyTheme, initialTheme, watchSystemTheme } from '@/lib/theme'
 
@@ -56,6 +58,7 @@ if (root) {
           <TooltipProvider>
             <RouterProvider router={router} />
             <AppToaster />
+            {isDesktop && <DesktopContextMenu />}
           </TooltipProvider>
         </I18nProvider>
       </QueryClientProvider>

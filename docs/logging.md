@@ -266,6 +266,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 | `upstream_status`、`error_code` | 最后一次上游尝试的状态码与错误码 |
 | `duration_ms` | 请求进入到结束的耗时 |
 | `first_event_ms` | 请求进入到首个正文、思考或工具调用事件，管理端显示为“首字” |
+| `first_output_ms` | 请求进入到首个正文、媒体或函数调用交给公开协议写出，没有时为 0；函数调用在该次上游尝试结束时交出，非流式请求在生成结束时交出 |
 | `queue_ms` | 请求进入到取得首个账户 |
 | `input_tokens`、`cached_tokens` | 输入 token、其中命中缓存的部分 |
 | `reasoning_tokens`、`reply_tokens` | 思考 token、回复 token |
@@ -430,7 +431,8 @@ CREATE TABLE IF NOT EXISTS requests (
  error_phase TEXT NOT NULL, upstream_status INTEGER NOT NULL, error_code TEXT NOT NULL,
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
- tool_calls INTEGER NOT NULL, cost_usd REAL, error TEXT NOT NULL, attempts TEXT NOT NULL);
+ tool_calls INTEGER NOT NULL, cost_usd REAL, error TEXT NOT NULL, attempts TEXT NOT NULL,
+ first_output_ms INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS requests_time ON requests(time);
 CREATE INDEX IF NOT EXISTS requests_model_time ON requests(model, time);
 CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
@@ -464,7 +466,7 @@ CREATE INDEX IF NOT EXISTS logs_request_id ON logs(request_id);
 
 账本经 `modernc.org/sqlite` 打开，连接参数为 `auto_vacuum(INCREMENTAL)`、`busy_timeout(10000)`、`journal_mode(WAL)`、`journal_size_limit(524288)`、`synchronous(NORMAL)`，最多 4 个连接。写入协程把连续到达的条目合并为一个事务，每个事务最多 256 条。
 
-打开账本时（`internal/sqlitedb` 的 `Open`，`states.db` 相同）依次：执行建表语句；删除建表语句中没有的表、索引、视图与触发器；库不是增量收缩时执行一次 `VACUUM` 转为增量收缩；交还空闲页并截短 WAL 文件。库文件自身的状态决定后两步是否有事可做，同一个库再次打开时不重复整理。
+打开账本时（`internal/sqlitedb` 的 `Open`，`states.db` 相同）依次：库不是增量收缩时在同一连接上设为增量收缩并执行一次 `VACUUM`；为已有的表补上建表语句中有而缺少的列；执行建表语句；删除建表语句中没有的表、索引、视图与触发器；交还空闲页并截短 WAL 文件。库文件自身的状态决定整理、补列与交还是否有事可做，同一个库再次打开时不重复整理。
 
 | 表 | 一行内容 | 主要列 | 键与索引 |
 | --- | --- | --- | --- |
@@ -507,7 +509,7 @@ CREATE INDEX IF NOT EXISTS logs_request_id ON logs(request_id);
 
 `GET /api/usage/records.csv` 使用与记录页相同的范围、筛选与排序，导出全部符合条件的记录，`limit` 与 `cursor` 不参与导出：
 
-- 文件名 `antigravity2api-requests-<from>-<to>.csv`，时间为 UTC 的 `YYYYMMDDTHHMMSSZ`；`Content-Type: text/csv; charset=utf-8`，以附件下载
+- `GET` 返回 `Content-Type: text/csv; charset=utf-8` 的正文；`POST` 写入请求体 `dir` 指定的文件夹，文件名见管理 API 文档
 - 开头为 UTF-8 BOM，首行为列名，列与顺序同 `requests` 表（`id` 到 `attempts` 共 35 列）
 - 由 Go `encoding/csv` 写出：逗号分隔，含逗号、双引号、换行或以空白开头的值加双引号，值内的双引号写两次，行尾为 LF
 - `time` 为 UTC 的 RFC 3339 文本，精确到毫秒；`stream` 为 `true` 或 `false`；`cost_usd` 为 `null` 时留空，否则为不带指数的最短十进制表示；`attempts` 为 JSON 数组

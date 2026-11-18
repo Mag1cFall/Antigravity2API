@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -180,7 +181,7 @@ func Run(options Options) error {
 			BackgroundColour: application.NewRGB(0xe6, 0xe7, 0xed),
 			Linux:            application.LinuxWindow{WebviewGpuPolicy: application.WebviewGpuPolicyNever},
 		}
-		if bounds.Width > 0 {
+		if bounds.Width > 0 && reachable(app, bounds) {
 			windowOptions.InitialPosition = application.WindowXY
 			windowOptions.X, windowOptions.Y, windowOptions.Width, windowOptions.Height = bounds.X, bounds.Y, bounds.Width, bounds.Height
 		}
@@ -264,6 +265,12 @@ func serve(app *application.App, options Options, ready func(address string)) er
 // origin 返回管理端地址的协议与主机部分
 func origin(page *url.URL) string {
 	return page.Scheme + "://" + page.Host
+}
+
+// reachable 判断窗口顶栏的中点落在某个显示器的工作区内；沿用的位置所在的显示器已断开时为 false，窗口改为居中打开
+func reachable(app *application.App, bounds application.Rect) bool {
+	header := application.Point{X: bounds.X + bounds.Width/2, Y: bounds.Y + 16}
+	return slices.ContainsFunc(app.Screen.GetAll(), func(screen *application.Screen) bool { return screen.WorkArea.Contains(header) })
 }
 
 // pageAt 返回管理端在 route（路径与查询）上的地址，查询带桌面宿主参数；route 为空或无法解析时为首页

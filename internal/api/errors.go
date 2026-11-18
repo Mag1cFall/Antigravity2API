@@ -8,12 +8,15 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/i18n"
+	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
 // httpStatusError 为自带 HTTP 状态码的错误
@@ -190,13 +193,30 @@ func writeRouteNotFound(w http.ResponseWriter, r *http.Request) {
 // protocolForRequest 按路径与 Anthropic-Version 请求头返回请求所属协议：gemini、anthropic 或 openai
 func protocolForRequest(r *http.Request) string {
 	switch {
-	case strings.HasPrefix(r.URL.Path, "/v1beta/"), strings.HasPrefix(r.URL.Path, "/upload/"), strings.HasPrefix(r.URL.Path, "/v1/interactions"):
+	case strings.HasPrefix(r.URL.Path, "/v1beta/"), strings.HasPrefix(r.URL.Path, "/upload/"), strings.HasPrefix(r.URL.Path, "/v1/interactions"), geminiV1Path(r):
 		return "gemini"
 	case strings.HasPrefix(r.URL.Path, "/v1/messages"), r.Header.Get("Anthropic-Version") != "":
 		return "anthropic"
 	default:
 		return "openai"
 	}
+}
+
+// geminiV1Path 表示 /v1 下的 Gemini API 请求：模型方法调用与上下文缓存，以及以 Gemini API 方式鉴权的模型与文件请求
+func geminiV1Path(r *http.Request) bool {
+	path := r.URL.Path
+	switch {
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/v1/models/"), strings.HasPrefix(path, "/v1/cachedContents"):
+		return true
+	case path == "/v1/models", strings.HasPrefix(path, "/v1/models/"), path == "/v1/files", strings.HasPrefix(path, "/v1/files/"):
+		return geminiAuth(r)
+	}
+	return false
+}
+
+// geminiAuth 表示请求以 Gemini API 的方式鉴权：带 x-goog-api-key 请求头或 key 查询参数，不带 Authorization
+func geminiAuth(r *http.Request) bool {
+	return r.Header.Get("Authorization") == "" && (r.Header.Get("X-Goog-Api-Key") != "" || r.URL.Query().Has("key"))
 }
 
 // serverErrorPrefix 返回 5xx 状态对应的官方英文错误开头，其余状态返回空
@@ -214,6 +234,78 @@ func serverErrorPrefix(status int) string {
 	return ""
 }
 
+// emailPattern 匹配错误文案中的邮箱地址
+var emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+
+// publicText 返回写给 API 客户端的错误文案：中文按英文翻译表译为英文，邮箱地址换成 [account]
+func publicText(message string) string {
+	return emailPattern.ReplaceAllString(i18n.Translate("en", message), "[account]")
+}
+
+// accountStates 是账户都不可调度的错误，AccountStates 返回各账户的英文状态
+type accountStates interface {
+	AccountStates() []string
+}
+
+// publicReason 返回请求失败写给 API 客户端的英文原因：账户都不可调度时按状态给出账户数，内容策略结束时另写拦截时间与已输出的内容，其余错误取完整原因
+func publicReason(err error) string {
+	var states accountStates
+	var filtered *FilteredError
+	switch {
+	case errors.As(err, &states) && len(states.AccountStates()) > 0:
+		return notReadyReason(states.AccountStates())
+	case errors.As(err, &filtered):
+		return filteredReason(filtered)
+	}
+	return publicText(err.Error())
+}
+
+// FilteredError 是上游以内容策略结束的生成，After 为请求开始到被拦截的时长，Produced 为此前已交给客户端的内容种类，隐藏的思考不计
+type FilteredError struct {
+	Err      error
+	After    time.Duration
+	Produced []string
+}
+
+func (e *FilteredError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *FilteredError) Unwrap() error {
+	return e.Err
+}
+
+// filteredReason 返回内容策略结束的公开原因：上游原因之后写明请求开始多久后被拦截与此前已输出的内容
+func filteredReason(filtered *FilteredError) string {
+	produced := "none"
+	if len(filtered.Produced) > 0 {
+		produced = strings.Join(filtered.Produced, ", ")
+	}
+	return fmt.Sprintf("%s. Blocked %s after the request started; output before the block: %s", strings.TrimSuffix(publicText(filtered.Err.Error()), "."), filtered.After.Round(time.Second), produced)
+}
+
+// notReadyReason 返回账户都不可调度时的公开原因，按状态首次出现的顺序给出账户数
+func notReadyReason(states []string) string {
+	counts := map[string]int{}
+	var order []string
+	for _, state := range states {
+		if counts[state] == 0 {
+			order = append(order, state)
+		}
+		counts[state]++
+	}
+	parts := make([]string, len(order))
+	for index, state := range order {
+		parts[index] = fmt.Sprintf("%s: %d", state, counts[state])
+	}
+	return "No account can serve this request (accounts " + strings.Join(parts, ", ") + ")"
+}
+
+// recordFailure 把请求失败的完整原因记入请求账本，公开错误只给出英文原因
+func recordFailure(r *http.Request, err error) {
+	requestdb.TraceFrom(r.Context()).Fail(err)
+}
+
 // publicErrorMessage 在 5xx 错误原因前加官方英文开头
 func publicErrorMessage(status int, message string) string {
 	if prefix := serverErrorPrefix(status); prefix != "" && !strings.HasPrefix(message, prefix) {
@@ -227,10 +319,10 @@ func writeOpenAIError(w http.ResponseWriter, status int, code string, message st
 	writeJSON(w, status, openAIErrorBody(status, code, message))
 }
 
-// openAIErrorBody 返回 OpenAI 错误体
+// openAIErrorBody 返回 OpenAI 错误体，message 按 publicText 写成英文
 func openAIErrorBody(status int, code string, message string) map[string]any {
 	return map[string]any{"error": openAIError{
-		Message: publicErrorMessage(status, message),
+		Message: publicErrorMessage(status, publicText(message)),
 		Type:    openAIErrorType(status, code),
 		Code:    code,
 	}}
@@ -247,7 +339,7 @@ type openAIError struct {
 // writeOpenAIStreamError 在流已开始后把请求错误以 OpenAI 错误体写为一个 SSE 事件，可重试时在消息末尾写明重试时间，客户端已断开时不写
 func writeOpenAIStreamError(w http.ResponseWriter, r *http.Request, err error) {
 	if shouldWriteRequestError(r, err) {
-		_ = writeSSE(w, "", openAIErrorBody(statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), retryAfterSeconds(err))))
+		_ = writeSSE(w, "", openAIErrorBody(statusFromError(err), openAIErrorCode(err), retryMessage(publicReason(err), retryAfterSeconds(err))))
 	}
 }
 
@@ -265,7 +357,7 @@ func openAIErrorType(status int, code string) string {
 // writeOpenAIRequestError 以 OpenAI 错误体写出请求失败，可重试时带 Retry-After 并在消息末尾写明重试时间
 func writeOpenAIRequestError(w http.ResponseWriter, err error) {
 	seconds := setRetryAfter(w, err)
-	writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), retryMessage(err.Error(), seconds))
+	writeOpenAIError(w, statusFromError(err), openAIErrorCode(err), retryMessage(publicReason(err), seconds))
 }
 
 // writeAnthropicRequestError 以 Anthropic 错误体写出请求失败，可重试时带 Retry-After 并在消息末尾写明重试时间
@@ -292,7 +384,7 @@ func writeGeminiRequestError(w http.ResponseWriter, err error) {
 
 // geminiErrorPayload 返回 Gemini 错误对象，seconds 大于 0 时 details 带该时长的 RetryInfo
 func geminiErrorPayload(err error, seconds int64) map[string]any {
-	payload := map[string]any{"code": statusFromError(err), "message": err.Error(), "status": geminiErrorStatus(err)}
+	payload := map[string]any{"code": statusFromError(err), "message": publicReason(err), "status": geminiErrorStatus(err)}
 	if seconds > 0 {
 		payload["details"] = []any{map[string]any{"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": strconv.FormatInt(seconds, 10) + "s"}}
 	}
@@ -322,9 +414,9 @@ func retryAfterSeconds(err error) int64 {
 	return int64(math.Ceil(at.Sub(now).Seconds()))
 }
 
-// writeAnthropicError 写出 Anthropic 错误响应
+// writeAnthropicError 写出 Anthropic 错误响应，message 按 publicText 写成英文
 func writeAnthropicError(w http.ResponseWriter, status int, errorType string, message string) {
-	message = publicErrorMessage(status, message)
+	message = publicErrorMessage(status, publicText(message))
 	writeJSON(w, status, anthropicErrorResponse{Type: "error", Error: anthropicErrorBody{Type: errorType, Message: message}})
 }
 
@@ -340,11 +432,11 @@ type anthropicErrorBody struct {
 	Message string `json:"message"`
 }
 
-// writeGeminiError 写出 Gemini 错误响应
+// writeGeminiError 写出 Gemini 错误响应，message 按 publicText 写成英文
 func writeGeminiError(w http.ResponseWriter, status int, statusName string, message string) {
 	writeJSON(w, status, officialOrder("gemini", map[string]any{"error": map[string]any{
 		"code":    status,
-		"message": message,
+		"message": publicText(message),
 		"status":  statusName,
 	}}))
 }
@@ -389,7 +481,7 @@ func anthropicErrorType(err error) string {
 	return anthropicStatusErrorType(statusFromError(err))
 }
 
-// anthropicErrorMessage 返回 Anthropic 错误消息，上下文超限为 prompt is too long 开头的上游原因
+// anthropicErrorMessage 返回 Anthropic 错误消息，上下文超限为 prompt is too long 开头的上游原因，其余按 publicReason
 func anthropicErrorMessage(err error) string {
 	var upstream *antigravity.UpstreamError
 	if errors.As(err, &upstream) && contextOverflow(err) {
@@ -397,9 +489,9 @@ func anthropicErrorMessage(err error) string {
 		if !strings.HasPrefix(text, "prompt is too long") {
 			text = "prompt is too long: " + text
 		}
-		return text
+		return publicText(text)
 	}
-	return err.Error()
+	return publicReason(err)
 }
 
 // anthropicStatusErrorType 返回 HTTP 状态对应的 Anthropic 错误类型

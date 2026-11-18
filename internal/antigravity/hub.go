@@ -40,7 +40,7 @@ type HubState struct {
 	Marketplaces  map[string]MarketplaceCache `json:"marketplaces,omitempty"`
 }
 
-// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动、最早一个带实验开关的 Hub 事件的时刻、启动耗时与启动耗时事件的记录时刻、冷启动 userinfo 的发出时刻、最近一次 fetchUserInfo 的结束时刻、是否已加载过会话、各会话的进度、待上报的 clearcut 事件、本虚拟进程第一次生成前是否已读取插件市场目录、待记录的目录读取事件、下一个新会话是否列出远程插件、是否轮询远程列表、改写栈指针的偏移与最近一次解析会话配置的 goroutine 编号
+// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动、最早一个带实验开关的 Hub 事件的时刻、启动耗时与启动耗时事件的记录时刻、冷启动 userinfo 的发出时刻、最近一次 fetchUserInfo 的结束时刻、是否已加载过会话、各会话的进度、待上报的 clearcut 事件、本虚拟进程第一次生成前的插件市场目录读取（没有发起时为 nil，结束时关闭）、本虚拟进程第一次目录读取结束时关闭的通道、最近一次发送消息的时刻与唤醒侧栏定时统计的通道、待记录的目录读取事件、下一个新会话是否列出远程插件与是否轮询远程列表
 type hub struct {
 	state     HubState
 	save      func(HubState) error
@@ -55,12 +55,13 @@ type hub struct {
 	loaded    bool
 	sessions  map[string]*sessionTrack
 	queue     [][]byte
-	fetched   bool
+	reading   chan struct{}
+	catalog   chan struct{}
+	touched   time.Time
+	wake      chan struct{}
 	market    []marketplaceEvent
 	plugins   bool
 	remote    bool
-	shift     stackShift
-	goroutine int
 }
 
 // eventShape 表示 clearcut 事件的外层形态：blank 为真时公共参数留空，flags 为真时附实验开关，empty 为真时附空的开关字段，ui 为真时带界面会话与事件时刻，env 为真时载荷带客户端环境，compared 为真时开关取对照用的 listExperiments 开关
@@ -75,13 +76,12 @@ func (c *Client) SetHub(state HubState, save func(HubState) error) {
 	c.hub.state, c.hub.save = state, save
 }
 
-// launch 记下虚拟进程启动：started 为 language_server 的启动时刻，界面会话标识随机生成，第一次生成前重新读取插件市场目录，新会话列出远程插件，栈指针偏移按 newStackShift 取，界面渲染时解析会话配置的 goroutine 编号为 1007–1244（官方 2.31.x 冷启动）
+// launch 记下虚拟进程启动：started 为 language_server 的启动时刻，界面会话标识随机生成，第一次生成前重新读取插件市场目录，重新等待第一次目录读取，新会话列出远程插件
 func (c *Client) launch(started time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.hub.launched, c.hub.browser, c.hub.fetched, c.hub.plugins = started, uuid.NewString(), false, true
-	c.hub.shift = newStackShift(c.device)
-	c.hub.goroutine = between(1007, 1244)
+	c.hub.launched, c.hub.browser, c.hub.reading, c.hub.catalog, c.hub.plugins = started, uuid.NewString(), nil, make(chan struct{}), true
+	c.hub.wake = make(chan struct{}, 1)
 }
 
 // conversations 返回虚拟 Hub 的会话数
@@ -234,7 +234,7 @@ var startupRegions = []string{
 	"SetUpTelemetryErrorReporter", "SetUpWorkspaceManager",
 }
 
-// hubStartup 在冷启动第一次 fetchUserInfo 之后同一时刻记录安装状态、用户配置与 Hub 存储加载、会话摘要核对、language_server 启动耗时与摘要订阅事件，并记下启动耗时与记录时刻：client_event_time_ms 为各事件在 language_server 启动后实际发生的时刻，三个存储加载在 34–111 ms 内相隔 0–2 ms，会话摘要核对在第一个存储加载之后 0–313 ms，启动耗时事件在各阶段耗时之和再加 18–35 ms 处，摘要订阅在 1127–2769 ms，事件按实际时刻排列
+// hubStartup 在冷启动第一次 fetchUserInfo 之后同一时刻记录安装状态、用户配置与 Hub 存储加载、会话摘要核对、language_server 启动耗时与摘要订阅事件，并记下启动耗时与记录时刻：client_event_time_ms 为各事件在 language_server 启动后实际发生的时刻，三个存储加载在 34–111 ms 内相隔 0–2 ms，会话摘要核对在第一个存储加载之后 0–313 ms，启动耗时事件在各阶段耗时之和再加 18–35 ms 处，摘要订阅在 1127–2769 ms，摘要存储写入批次的锁等待事件在第一个存储加载之后 3992–4996 ms（官方 2.32.2 与 2.33.0 冷启动），事件按实际时刻排列
 func (c *Client) hubStartup() time.Time {
 	conversations := c.conversations()
 	c.mu.Lock()
@@ -253,7 +253,7 @@ func (c *Client) hubStartup() time.Time {
 	loaded := between(34, 111)
 	offsets := []int{loaded, loaded + between(0, 2)}
 	offsets = append(offsets, offsets[1]+between(0, 2))
-	stores := []map[string]any{{"file_type": "app_state"}, {"file_type": "user_config", "auto_execution_policy": "CASCADE_COMMANDS_AUTO_EXECUTION_OFF"}, {}}
+	stores := []map[string]any{{"file_type": "app_state"}, {"file_type": "user_config", "auto_execution_policy": autoExecution[c.device.OS == "linux"].setting}, {}}
 	reconcile := map[string]any{"duration_ms": between(5, 317), "outcome": "success", "rows": conversations, "trigger": "startup", "pruned": 0}
 	if conversations == 0 {
 		reconcile = map[string]any{"duration_ms": 0, "outcome": "empty", "rows": 0, "trigger": "empty_on_open", "pruned": 0}
@@ -283,6 +283,7 @@ func (c *Client) hubStartup() time.Time {
 	params["durationMs"] = duration
 	c.hubEventAt(at, "LS_BINARY_STARTUP", eventShape{}, with(moment(duration), params))
 	c.hubEventAt(at, "summaries_store_subscribe_called", eventShape{}, moment(between(1127, 2769)))
+	c.hubEventAt(at, "summaries_store_lock_slow_acquisition", eventShape{}, with(moment(loaded+between(3992, 4996)), map[string]any{"operation": "flushBatch"}))
 	c.mu.Lock()
 	c.hub.duration, c.hub.booted = duration, at
 	c.mu.Unlock()
@@ -334,7 +335,7 @@ func (c *Client) searchIndex(conversations int) map[string]any {
 	return map[string]any{"convo_count": conversations, "duration_ms": 0, "extracted_count": 0, "db_size_bytes": 4096 * max(searchIndexPages, between(conversations+4, 2*conversations+8))}
 }
 
-// hubLogin 记录登录序列的迁移、摘要订阅、sidecar 启动、搜索索引预热与权限迁移事件，前五个的开关字段留空，后两个带实验开关
+// hubLogin 记录登录序列的迁移、摘要订阅、搜索索引预热、sidecar 启动与权限迁移事件（官方 2.33.0 的先后），迁移、摘要订阅与 sidecar 启动的开关字段留空，搜索索引与权限迁移带实验开关
 func (c *Client) hubLogin() {
 	c.hubEvent("retroactive_migration_attempted", eventShape{blank: true, empty: true}, nil)
 	c.hubEvent("retroactive_migration_skipped_already_completed", eventShape{blank: true, empty: true}, map[string]any{"status": "RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY"})
@@ -343,19 +344,24 @@ func (c *Client) hubLogin() {
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
-	c.log(state.structuredEvent(time.Now(), c.device, eventShape{empty: true}, 25, 26, sidecarPayload("sidecar_execution", "sidecar_id", "sidecar_path", "sidecar_file_path", "command")))
 	c.hubEvent("conversation_search_index_warm", eventShape{flags: true}, c.searchIndex(c.conversations()))
+	c.log(state.structuredEvent(time.Now(), c.device, eventShape{empty: true}, 25, 26, sidecarPayload("sidecar_execution", "sidecar_id", "sidecar_path", "sidecar_file_path", "command")))
 	c.hubEvent("app_migration_permission_grants_v2_completed", eventShape{blank: true, flags: true}, map[string]any{
 		"projects_total": 1, "projects_migrated": 0, "projects_failed": 0, "global_failed": "false", "deduped": 0, "dropped_allow": 0, "invalid": 0,
 		"rewritten_allow": 0, "rewritten_deny": 0, "rewritten_ask": 0,
 	})
 }
 
-// hubOnboarded 记录登录引导结束后界面渲染的分组方式、分组会话数与只带 iframeLocalTtirMs 的输入区渲染事件，返回输入区渲染的时刻
-func (c *Client) hubOnboarded() time.Time {
+// hubOnboarded 记录登录引导结束后界面渲染的会话列表加载完成、分组方式、分组会话数与输入区渲染事件（iframeLocalTtirMs 与官方 2.33.0 登录现场的 boot* 耗时）
+func (c *Client) hubOnboarded() {
+	c.hubEvent("sidebar_conversation_list_loaded", eventShape{flags: true, ui: true}, map[string]any{"conversationCount": c.conversations(), "latencyMs": c.sinceLaunch()})
 	c.hubEvent("sidebar_group_by_state", eventShape{flags: true, ui: true, env: true}, map[string]any{"groupBy": "project", "mode": "agentManager", "project_4k_mode": "default"})
 	c.sidebarGrouped(c.conversations())
-	return c.hubEvent("input_area_rendered", eventShape{flags: true, ui: true}, map[string]any{"iframeLocalTtirMs": c.sinceLaunch()})
+	render, mendel := between(22, 26), between(2, 4)
+	c.hubEvent("input_area_rendered", eventShape{flags: true, ui: true}, map[string]any{
+		"iframeLocalTtirMs": c.sinceLaunch(), "bootRunMainMs": -between(30, 40), "bootMendelReadyMs": mendel, "bootAppVariantMs": mendel + 2, "bootUserInfoMs": mendel + 2,
+		"bootExtensibilityMs": render - 5, "bootRenderMs": render, "bootAuthResolvedMs": render + between(140, 152),
+	})
 }
 
 // coldStarted 返回虚拟进程是否以冷启动序列初始化
@@ -371,7 +377,7 @@ var loadOrders = []byte("aaaaabccc")
 // clusterOrders 为界面加载末尾会话列表加载完成、分组方式与分组会话数统计三个事件的先后：l 列表加载完成、g 分组方式、c 分组会话数，取官方 2.30.0 冷启动中出现过的四种
 var clusterOrders = []string{"lgc", "lcg", "cgl", "clg"}
 
-// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件：启动事件之后 376–457 ms 起按 loadOrders 取一种先后记录界面加载，1.24–1.65 s 记录 clusterOrders 的三个事件，再过 12–40 ms 记录输入区渲染并按 slashErrors 记录 GetSlashCommands 的查询失败，渲染后 13–139 ms 读取 cascadeNuxes 并此后每 120 s 读取一次，第一次读取的时刻之后 −4–320 ms 列出远程插件，再过 145–469 ms 读取插件市场目录；首次会话数统计 60 s 后再统计一次，此后每过 statusRefresh 按 refreshSettings 读取账户设置，第一次同时记录分组方式与分组会话数；ctx 结束时返回
+// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件：启动事件之后 376–457 ms 起按 loadOrders 取一种先后记录界面加载（不分组的会话数统计为 0，侧栏此时还没有载入会话，官方 2.32.2 与 2.33.0 冷启动），项目列表加载后 2–16 ms 记录登录状态，1.24–1.65 s 记录 clusterOrders 的三个事件，再过 12–40 ms 记录输入区渲染（启动各阶段耗时取官方 2.33.0 冷启动的关系），渲染后 170–253 ms 再记录一次分组方式，渲染后 13–139 ms 读取 cascadeNuxes 并此后每 120 s 读取一次，第一次读取的时刻之后 −4–320 ms 列出远程插件，列出结束 4–12 ms 后读取远程会话列表，其后 200–448 ms 读取远程项目列表、269–352 ms 再列出一次远程插件，再过 164–356 ms 读取插件市场目录；按 sidebarTicks 定时统计侧栏会话数，首次会话数统计 60 s 后重新读取账户资料，此后每过 statusRefresh 按 refreshSettings 读取账户设置，第一次同时记录分组方式与分组会话数；ctx 结束时返回
 func (c *Client) hubInterface(ctx context.Context) {
 	conversations := c.conversations()
 	shift := between(83, 143)
@@ -386,7 +392,7 @@ func (c *Client) hubInterface(ctx context.Context) {
 	if until(ctx, booted.Add(time.Duration(between(376, 457))*time.Millisecond)) != nil {
 		return
 	}
-	var counted time.Time
+	var counted, grouped time.Time
 	listed := func(flags bool) func() {
 		return func() {
 			c.hubEvent("projects_listed", eventShape{blank: true, flags: flags}, map[string]any{"num_projects": 1})
@@ -396,13 +402,17 @@ func (c *Client) hubInterface(ctx context.Context) {
 		c.hubEvent("projects_listed", eventShape{blank: true, flags: true}, map[string]any{"num_projects": 1, "project_ids": "outside-of-project"})
 	}
 	count := func() {
-		counted = interfaceEvent("sidebar_conversations", false, map[string]any{"conversationCount": conversations})
+		counted = interfaceEvent("sidebar_conversations", false, map[string]any{"conversationCount": 0})
 		c.sessionEvent(time.Now(), 25, 26, sidecarPayload("sidecar_execution", "sidecar_id", "sidecar_path", "sidecar_file_path", "command"))
 	}
 	summaries := func(duration int) func() {
 		return func() { interfaceEvent("trajectory_summary_load", false, map[string]any{"durationMs": duration}) }
 	}
 	projects := func() { interfaceEvent("project_list_load", false, map[string]any{"durationMs": between(174, 282)}) }
+	auth := between(1153, 1578)
+	authenticated := func() {
+		interfaceEvent("auth_startup_result", false, map[string]any{"has_token": "yes", "durationMs": auth, "outcome": "signed_in", "attempts": 1, "last_error_code": "none"})
+	}
 	sidebar := func(duration int) func() {
 		return func() { interfaceEvent("sidebar_load", false, map[string]any{"durationMs": duration}) }
 	}
@@ -419,7 +429,7 @@ func (c *Client) hubInterface(ctx context.Context) {
 	default:
 		steps = []step{{0, 0, summaries(between(860, 1598))}, {1, 6, count}, {0, 2, listed(true)}, {6, 11, identified}}
 	}
-	steps = append(steps, step{119, 253, sidebar(between(97, 213))}, step{31, 68, projects})
+	steps = append(steps, step{119, 253, sidebar(between(97, 213))}, step{31, 68, projects}, step{2, 16, authenticated})
 	for _, step := range steps {
 		if !wait(step.low, step.high) {
 			return
@@ -436,7 +446,10 @@ func (c *Client) hubInterface(ctx context.Context) {
 		'g': func() {
 			interfaceEvent("sidebar_group_by_state", true, map[string]any{"groupBy": "project", "mode": "agentManager", "project_4k_mode": "default"})
 		},
-		'c': func() { c.sidebarGrouped(conversations) },
+		'c': func() {
+			grouped = time.Now()
+			c.sidebarGrouped(conversations)
+		},
 	}
 	for _, event := range clusterOrders[between(0, len(clusterOrders)-1)] {
 		cluster[byte(event)]()
@@ -447,11 +460,19 @@ func (c *Client) hubInterface(ctx context.Context) {
 	rendered := since()
 	electron, process, serving, index, html := between(369, 610), between(214, 382), between(5, 21), between(2, 4), between(883, 1270)
 	total := rendered + electron + process + between(84, 145)
+	render := rendered - between(2174, 2871)
+	mendel := render - between(8, 17)
 	renderedAt := interfaceEvent("input_area_rendered", false, map[string]any{
 		"iframeLocalTtirMs": rendered, "endToEndTtirMs": total, "startupColdLaunch": "true", "phaseElectronToLsMs": electron, "phaseLsProcessToInitMs": process, "phaseLsInitMs": duration,
 		"phaseLsServingToIndexMs": serving, "phaseIndexToHtmlMs": index, "phaseHtmlToDomReadyMs": html, "phaseDomReadyToInputMs": total - electron - process - duration - serving - index - html,
+		"bootRunMainMs": -between(30, 40), "bootMendelReadyMs": mendel, "bootAppVariantMs": mendel + between(-3, 1), "bootUserInfoMs": mendel + between(1, 3),
+		"bootExtensibilityMs": render - between(3, 4), "bootRenderMs": render, "bootAuthResolvedMs": render + auth - between(4, 6),
 	})
-	go c.slashErrors(ctx, renderedAt)
+	go func() {
+		if until(ctx, renderedAt.Add(time.Duration(between(170, 253))*time.Millisecond)) == nil {
+			cluster['g']()
+		}
+	}()
 	nuxed := renderedAt.Add(time.Duration(between(13, 139)) * time.Millisecond)
 	go func() {
 		for next := nuxed; until(ctx, next) == nil; next = next.Add(nuxPeriod) {
@@ -461,15 +482,29 @@ func (c *Client) hubInterface(ctx context.Context) {
 	if until(ctx, nuxed.Add(time.Duration(between(-4, 320))*time.Millisecond)) != nil {
 		return
 	}
+	c.listPlugins(ctx)
+	if !wait(4, 12) {
+		return
+	}
+	go c.get(ctx, endpointAICode+"/v1alpha/"+remoteConversations, nil)
+	remoted := time.Now()
+	go func() {
+		if until(ctx, remoted.Add(time.Duration(between(200, 448))*time.Millisecond)) == nil {
+			c.get(ctx, endpointAICode+"/v1alpha/"+remoteProjects, nil)
+		}
+	}()
+	if until(ctx, remoted.Add(time.Duration(between(269, 352))*time.Millisecond)) != nil {
+		return
+	}
 	go c.listPlugins(ctx)
-	if wait(145, 469) {
+	if wait(164, 356) {
 		c.readMarketplaces(ctx)
 		c.logMarketplace()
 	}
+	go c.sidebarTicks(ctx, counted, grouped)
 	if until(ctx, counted.Add(sidebarRefresh+time.Duration(between(9, 34))*time.Millisecond)) != nil {
 		return
 	}
-	interfaceEvent("sidebar_conversations", false, map[string]any{"conversationCount": c.conversations()})
 	go c.refreshProfile(ctx)
 	tick := counted.Add(statusRefresh + time.Duration(between(24, 34))*time.Millisecond)
 	if until(ctx, tick) != nil {
@@ -486,10 +521,68 @@ func (c *Client) hubInterface(ctx context.Context) {
 	}
 }
 
-// sidebarGrouped 记录按项目分组的侧栏会话数统计
+// sidebarTicks 按官方 2.33.0 记录侧栏的定时会话数统计：不分组统计（有会话时随后记录无项目会话统计）在首条统计之后 58.6–59.9 s、分组统计在界面加载的分组统计之后 60.0 s 各记一次，此后各自每 60 s 一次；上一周期内没有发送消息时这一周期不记录并停止，下一次发送时立即记录不分组统计、39–55 ms 后记录分组统计并重新计时（v2330-families 与 v2330-session 的侧栏事件）
+func (c *Client) sidebarTicks(ctx context.Context, counted, grouped time.Time) {
+	plain := counted.Add(time.Duration(between(58604, 59860)) * time.Millisecond)
+	group := grouped.Add(time.Duration(between(59999, 60015)) * time.Millisecond)
+	last := counted
+	for {
+		if until(ctx, plain) != nil {
+			return
+		}
+		c.mu.Lock()
+		touched, wake := c.hub.touched, c.hub.wake
+		c.mu.Unlock()
+		if !touched.After(last) && last != counted {
+			select {
+			case <-wake:
+			default:
+			}
+			select {
+			case <-wake:
+			case <-ctx.Done():
+				return
+			}
+			plain = time.Now()
+			group = plain.Add(time.Duration(between(39, 55)) * time.Millisecond)
+		}
+		last = plain
+		conversations := c.conversations()
+		c.hubEvent("sidebar_conversations", eventShape{flags: true, ui: true}, map[string]any{"conversationCount": conversations})
+		if conversations > 0 {
+			c.hubEvent("orphaned_project_conversations", eventShape{flags: true, ui: true}, map[string]any{"orphanedConversationCount": 0, "projectlessConversationCount": 0})
+		}
+		if until(ctx, group) != nil {
+			return
+		}
+		c.sidebarGrouped(c.conversations())
+		plain = plain.Add(sidebarRefresh + time.Duration(between(-5, 17))*time.Millisecond)
+		group = group.Add(sidebarRefresh + time.Duration(between(1, 16))*time.Millisecond)
+	}
+}
+
+// touchSidebar 记下一次发送消息，侧栏定时统计停止时唤醒它
+func (c *Client) touchSidebar() {
+	c.mu.Lock()
+	c.hub.touched = time.Now()
+	wake := c.hub.wake
+	c.mu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+}
+
+// sidebarGrouped 记录按项目分组的侧栏会话数统计，有会话时随后记录无项目会话统计（官方 2.33.0 没有会话时不记录，v2330-vm）
 func (c *Client) sidebarGrouped(conversations int) {
 	c.hubEvent("sidebar_conversations", eventShape{flags: true, ui: true, env: true}, map[string]any{
 		"conversationCount": conversations, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "pinnedConversationCount": 0, "loadedProjectCount": 1, "knownProjectCount": 1, "mode": "agentManager", "project_4k_mode": "default",
+	})
+	if conversations == 0 {
+		return
+	}
+	c.hubEvent("orphaned_project_conversations", eventShape{flags: true, ui: true, env: true}, map[string]any{
+		"orphanedConversationCount": 0, "projectlessConversationCount": 0, "loadedProjectCount": 1, "knownProjectCount": 1, "mode": "agentManager", "project_4k_mode": "default",
 	})
 }
 

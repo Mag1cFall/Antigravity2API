@@ -800,6 +800,16 @@ func responsesInputItems(raw json.RawMessage, responseID string) []storedItem {
 	return stored
 }
 
+// currentAttempt 返回最后一个 EventRestart 之后、即最终采用的上游尝试的事件
+func currentAttempt(events []antigravity.Event) []antigravity.Event {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind == antigravity.EventRestart {
+			return events[index+1:]
+		}
+	}
+	return events
+}
+
 // responseHistoryOutput 把一次生成写成续接用的 assistant 消息：相邻的正文与思考增量各合并为一个 part，签名留在所在 part 或单独成 part
 func responseHistoryOutput(result generationResult) antigravity.Content {
 	output := antigravity.Content{Role: antigravity.RoleAssistant}
@@ -811,7 +821,7 @@ func responseHistoryOutput(result generationResult) antigravity.Content {
 		}
 		output.Parts = append(output.Parts, antigravity.Part{Text: text, Thought: thought, ThoughtSignature: signature})
 	}
-	for _, event := range mergedTextEvents(result.events) {
+	for _, event := range mergedTextEvents(currentAttempt(result.events)) {
 		switch event.Kind {
 		case antigravity.EventText:
 			if event.Text != "" {
@@ -1322,6 +1332,8 @@ type responsesOutput struct {
 	message   map[string]any
 	images    int
 	grounding *antigravity.Grounding
+	// abandoned 为被重新生成丢弃的上游尝试写出的输出项数
+	abandoned int
 }
 
 // newResponsesOutput 返回响应 id 的输出累积器
@@ -1345,7 +1357,7 @@ func (o *responsesOutput) itemID(prefix string) string {
 	return fmt.Sprintf("%s%s_%d", prefix, o.id, len(o.items))
 }
 
-// add 处理一个事件，返回新增的输出项；reasoning 与正文接在同类项之后时并入该项，否则开始新项；搜索来源作为 web_search_call 排在已有输出项之后
+// add 处理一个事件，返回新增的输出项；reasoning 与正文接在同类项之后时并入该项，否则开始新项；搜索来源作为 web_search_call 排在已有输出项之后；重新生成后的思考开始新项
 func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) {
 	encrypted := o.request.includesEncrypted()
 	last := func() map[string]any {
@@ -1361,7 +1373,7 @@ func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) 
 		if signature == "" || !encrypted {
 			return
 		}
-		if item := last(); item != nil && item["type"] == "reasoning" && item["encrypted_content"] == nil {
+		if item := last(); len(o.items) > o.abandoned && item["type"] == "reasoning" && item["encrypted_content"] == nil {
 			item["encrypted_content"] = signature
 			return
 		}
@@ -1380,6 +1392,9 @@ func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) 
 		signed(fmt.Sprintf("rs_%s_%d", o.id, len(o.items)), event.ThoughtSignature)
 	case antigravity.EventThoughtSignature:
 		signed(fmt.Sprintf("rs_%s_%d", o.id, len(o.items)), event.ThoughtSignature)
+	case antigravity.EventRestart:
+		o.reasoning = nil
+		o.abandoned = len(o.items)
 	case antigravity.EventText:
 		if o.message == nil || !isLast(o.message) {
 			o.message = map[string]any{"id": o.itemID("msg_"), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": &outputText{}, "annotations": []any{}}}}
@@ -1440,16 +1455,17 @@ func buildResponsesObject(id string, created int64, request responsesRequest, re
 	for _, event := range result.events {
 		_ = add(event)
 	}
-	for _, item := range collected.items {
+	items := collected.items[collected.abandoned:]
+	for _, item := range items {
 		if item["type"] == "message" {
 			collected.annotate(item)
 		}
 	}
-	output := make([]any, 0, 1+len(collected.items))
+	output := make([]any, 0, 1+len(items))
 	if compaction != nil {
 		output = append(output, compaction)
 	}
-	for _, item := range collected.items {
+	for _, item := range items {
 		output = append(output, item)
 	}
 	status := "completed"
@@ -1723,7 +1739,7 @@ func (writer *responsesStreamWriter) index(item map[string]any) int {
 	return base + slices.IndexFunc(writer.output.items, func(candidate map[string]any) bool { return candidate["id"] == item["id"] })
 }
 
-// live 写出一个事件：新输出项开始前先完成仍打开的项，带摘要的 reasoning 与 message 项保持打开到下一个输出项或结束，函数调用项与只带签名的 reasoning 项立即完成
+// live 写出一个事件：新输出项开始前或重新生成时先完成仍打开的项，带摘要的 reasoning 与 message 项保持打开到下一个输出项或结束，函数调用项与只带签名的 reasoning 项立即完成
 func (writer *responsesStreamWriter) live(event antigravity.Event) error {
 	for _, item := range writer.output.add(event) {
 		if err := writer.added(item); err != nil {
@@ -1739,6 +1755,8 @@ func (writer *responsesStreamWriter) live(event antigravity.Event) error {
 		return writer.emit("response.output_text.delta", map[string]any{
 			"item_id": writer.output.message["id"], "output_index": writer.index(writer.output.message), "content_index": 0, "delta": event.Text, "logprobs": []any{},
 		})
+	case antigravity.EventRestart:
+		return writer.complete()
 	}
 	return nil
 }
@@ -1918,7 +1936,7 @@ func (writer *responsesStreamWriter) failed(err error) error {
 
 // responsesError 返回 Responses 失败对象的 error 字段，消息末尾带重试时间
 func responsesError(err error) map[string]any {
-	return map[string]any{"code": responsesErrorCode(err), "message": retryMessage(publicErrorMessage(statusFromError(err), err.Error()), retryAfterSeconds(err))}
+	return map[string]any{"code": responsesErrorCode(err), "message": retryMessage(publicErrorMessage(statusFromError(err), publicReason(err)), retryAfterSeconds(err))}
 }
 
 // responsesErrorCode 返回 Responses 失败响应 error.code 的枚举值：限流为 rate_limit_exceeded，请求内容被拒为 invalid_prompt，其余为 server_error

@@ -1,0 +1,43 @@
+! Title: Antigravity2API 上游拒绝句
+! Version: 2026111903
+! 上游对系统提示中含下列文字的请求返回不带原因的 429 RESOURCE_EXHAUSTED，服务在发送前删去含这些文字的整句
+! 语法：! 开头为注释；[system] 与 [user] 分别匹配客户端系统提示与 user 轮；/…/ 为 Go 正则；其余每行为一条短语，不区分大小写，空格可对应任意空白
+
+[system]
+! omp
+RFC 2119 keywords
+Read xd://<tool> for full docs + JSON schema before first use
+Write JSON args as `content` to xd://<tool> via `write`.
+selects only the lines you and your subagents wrote and never touches
+Touch displayed changed lines only; `…`, `..`, collapsed `N-M:`
+You are omp's trusted coding assistant
+! Claude Code
+You are Claude Code,
+was pasted into the message by the user from somewhere else and may contain instructions the user did not write
+! Claude Code、Mimo
+Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context
+! Codex
+You are a coding agent running in the Codex CLI
+! OpenCode
+You are OpenCode
+The user will primarily request you perform software engineering tasks
+! pi
+You are a coding assistant running inside pi
+inside pi, a coding agent harness
+! OpenClaw
+You are a personal assistant running inside OpenClaw
+! Hermes
+You are Hermes Agent
+Be direct: match the length of your reply to the weight of the ask
+the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference
+Hermes delivers their message as a standalone user message right after the latest tool results
+<!-- End Hermes runtime environment -->
+! DeepSeek Harness
+The browser provides no implicit DOM, route, or screenshot context
+! 行首带归属声明的身份句：You are 加以 agent、assistant 或 AI 结尾的身份短语，8 个字符内接 created by、built on、based on 等归属声明
+/(?im)^[ \t]*(?:you are|you're)\s+(?:an?\s+)?(?:[\w'-]+[\s,]+){0,8}(?:agent|assistant|ai)\b[^.!?\n<>]{0,8}?\b(?:(?:created|built|made|developed|designed|trained|powered|maintained|published|released|provided)\s+(?:by|on|upon)|based\s+on)\s+[^\n<>]{1,80}?\.(?:[ \t]|$)/
+
+[user]
+! Codex
+You are Codex, a coding agent based on GPT-5
+You are Codex, an agent based on GPT-5

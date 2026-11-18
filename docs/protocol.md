@@ -1,17 +1,18 @@
 # Antigravity Cloud Code 协议参考
 
-Antigravity2API 以 Antigravity 官方客户端（`language_server` 2.31.2）的身份访问 Google Cloud Code `v1internal` 接口，把上游 SSE 解码为规范事件后投影到 OpenAI、Anthropic 和 Gemini API。上游实现位于 `internal/antigravity/`。
+Antigravity2API 以 Antigravity 官方客户端（`language_server` 2.33.0）的身份访问 Google Cloud Code `v1internal` 接口，把上游 SSE 解码为规范事件后投影到 OpenAI、Anthropic 和 Gemini API。上游实现位于 `internal/antigravity/`。
 
 | 项目 | 值 |
 | --- | --- |
-| 模拟客户端 | Antigravity 2.31.2 `language_server`，构建号各平台均为 `1019359392` |
+| 模拟客户端 | Antigravity 2.33.0 `language_server`，构建号各平台均为 `1023160026` |
 | 认证 | Google OAuth 2.0 个人账户 client，PKCE S256 |
 | 上游主机 | `daily-cloudcode-pa.googleapis.com` |
 | 模型目录 | `v1internal:fetchAvailableModels` |
 | 额度 | `v1internal:retrieveUserQuotaSummary` |
 | 生成接口 | `v1internal:streamGenerateContent?alt=sse`；图像生成为 `v1internal:generateContent` |
 | 语音转写 | `aicode.googleapis.com` gRPC 双向流 `BidiGenerateContent` |
-| 传输 | Go 标准库 `net/http`：全部主机经 HTTP/2，ALPN 为 `h2`、`http/1.1`，见「请求身份」 |
+| 语音模式 | `aicode.googleapis.com` gRPC 双向流 `StreamVoice`，用户语音由 `BidiGenerateContent` 识别 |
+| 传输 | Go 标准库 `net/http`：cloudcode、aicode、googleapis、头像与 token 经 HTTP/1.1（ALPN 只有 `http/1.1`），clearcut 与插件市场目录经 HTTP/2（ALPN 为 `h2`、`http/1.1`），见「请求身份」 |
 | 公开协议 | 四个：OpenAI Chat、OpenAI Responses、Anthropic Messages、Gemini GenerateContent |
 
 ## 1. 架构
@@ -23,7 +24,7 @@ Antigravity2API 以 Antigravity 官方客户端（`language_server` 2.31.2）的
 oauth2.googleapis.com/token ──► access token、refresh token
         │
         ▼
-Client（HTTP/2 + oauth2.Transport）
+Client（HTTP/1.1 + oauth2.Transport）
         ├─► 账户初始化 ──► project
         ├─► fetchAvailableModels ──► Catalog
         └─► retrieveUserQuotaSummary ──► 额度桶
@@ -197,27 +198,24 @@ clearcut 批次以内嵌的官方新安装登录前现场为模板：
 | --- | --- |
 | `internal/antigravity/prelogin_<系统>_<序号>.bin.gz` | 该系统官方客户端登录前各 clearcut 批次的 `LogRequest` protobuf 原始字节，gzip 压缩，序号为现场中的发出顺序 |
 
-日志源 327 的批次是结构化帧，2747 的批次是 Hub 存储、迁移、界面事件与码 14 `LS_ERROR`。载入时解压，取每个批次顶层字段 4（`request_time_ms`）为模板发送时刻 T，并从日志源 327 批次最后一个事件（顶层字段 3）中取扩展 6 → 字段 18 → 字段 2 → 字段 5 的字符串为模板 `installation_id`。发送时每个批次以 `pbWalk` 深度优先遍历全部字段，对每个字段按下表改写后重新编码；长度前缀字段在能无损解析并重新编码为同一串字节时视为子消息并递归：
+日志源 327 的批次是结构化帧，2747 的批次是 Hub 存储、迁移、界面事件与码 14 `LS_ERROR`；`LS_ERROR` 的栈为函数、源文件与行号组成的帧，原样发送。载入时解压，取每个批次顶层字段 4（`request_time_ms`）为模板发送时刻 T，并从日志源 327 批次最后一个事件（顶层字段 3）中取扩展 6 → 字段 18 → 字段 2 → 字段 5 的字符串为模板 `installation_id`。发送时每个批次以 `pbWalk` 深度优先遍历全部字段，对每个字段按下表改写后重新编码；长度前缀字段在能无损解析并重新编码为同一串字节时视为子消息并递归：
 
 | 字段 | 改写 |
 | --- | --- |
 | varint，值在 [10¹², 10¹³) | 毫秒时刻，加 Δ = 当前 Unix 毫秒 − T |
 | varint，值在 [10¹⁵, 10¹⁶) | 微秒时刻，加 Δ × 1000 |
 | 字符串，等于模板 `installation_id` | 换成设备 `installation_id` |
-| 字符串，以 `goroutine ` 开头 | 栈地址平移，见表下 |
 | 全为 ASCII 数字的字符串 | 按十进制解析，落在上两行的时刻区间时同样平移 |
 | 32 个小写十六进制字符、不是子消息 | 错误追踪标识，每处换成独立生成的值 |
 | `8-4-4-4-12` 小写 UUID 文本、不是子消息 | 界面会话标识，换成本次随机生成的 UUIDv4（两个批次相同） |
 
 - 改写按表中行序取第一条成立的规则；varint 只按前两行处理，长度前缀字段按其余各行处理
-- 栈地址：`goroutine ` 文本中不小于 2³² 的 `0x<十六进制>` 数为指针，按下列三类加本虚拟进程的偏移，以小写十六进制写回：不小于 `0x400000000000` 的为映像地址，加映像偏移后取低 48 位；其余指针中高 32 位与该文本最常见的高 32 位相差不超过 1 的为 Go 堆地址，加堆偏移后对 3 × 2⁴⁴ 取模再加 2⁴⁴，落在 [2⁴⁴, 2⁴⁶)；其他为 Go 堆之外的系统分配，加系统分配偏移后取低 48 位。`+0x` 开头的代码偏移与小于 2³² 的值（长度、计数等参数）在官方各进程间相同，不改写
-- 映像偏移为 [0, 0x1000) 中的整数乘 `0x10000`：Windows 的映像基址在同一次开机内各进程相同，该整数由 `installation_id` 的 SHA-256 前 8 字节（小端）模 0x1000 得到，其余系统随机；Go 运行时把堆基址随机放在低 46 位地址空间，堆偏移为 [0, 3 × 2⁴⁴) 中按 `0x2000` 对齐的随机值，Go 堆地址都为 12 位十六进制；系统分配偏移为 [0, 0x40) 中的随机整数乘 `0x4000000`；同一虚拟进程的各批次共用
 - 错误追踪标识：每次出现各换成 16 个随机字节的小写十六进制，同一原值在两个批次中或同一批次中多次出现时各自取不同的随机值
 - Δ 按各批次自己的 T 计算，`当前 Unix 毫秒` 取发送第一个批次前的同一时刻
 
 ### 换取 token
 
-`config.Exchange(ctx, code, VerifierOption(verifier))` 经克隆的 `http.DefaultTransport` 以 HTTP/2 发出（ctx 带 `oauth2.HTTPClient`），代理取 `PROXY` 的第一项，为空时跟随系统代理（连接身份见「请求身份」）：
+`config.Exchange(ctx, code, VerifierOption(verifier))` 经 `http1Transport` 以 HTTP/1.1 发出（ctx 带 `oauth2.HTTPClient`），代理取 `PROXY` 的第一项，为空时跟随系统代理（连接身份见「请求身份」）：
 
 ```text
 :authority oauth2.googleapis.com
@@ -305,7 +303,7 @@ prod loadCodeAssist
   └─ daily loadCodeAssist → 等待 42–51 ms
      ├─ listExperiments → 等待 113–175 ms → fetchConfig
      └─ fetchUserInfo、retrieveUserQuotaSummary、fetchAvailableModels、fetchAdminControls（并发，全部结束后）→ cascadeNuxes
-        └─ fetchAvailableModels → 等待 32–112 ms → remote:listProjects、remote:listConversations（并发）
+        └─ fetchAvailableModels → 等待 32–112 ms → remote:listProjects、remote:listConversations、两个插件市场目录（并发）
 ```
 
 `account.json` 的 `project` 为空（刚 `login` 或 `import`）或 refresh token 已变的账户走上表的登录序列；其余账户在服务启动时走 `ColdStart`，与官方客户端以已保存账户启动时相同，请求依赖如下，tokeninfo 为 `GET https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=<ACCESS_TOKEN>`（不带 `Authorization`，HTTP/2），`cascadeNuxes` 在之后的 Hub 界面加载中发出（见「伴随请求」）：
@@ -317,7 +315,7 @@ access token 就绪
 │  ├─ userinfo → 等待 47–73 ms → 头像
 │  └─ daily loadCodeAssist ③ → 等待 52–64 ms → fetchUserInfo
 └─ daily loadCodeAssist ① → 等待 50–74 ms（② 已结束时 7–10 ms）
-   ├─ fetchAvailableModels → 等待 32–112 ms → remote:listTriggerOptions、remote:listConversations、remote:listProjects、remote:listTriggers（并发）
+   ├─ fetchAvailableModels
    ├─ fetchUserInfo
    └─ listExperiments → 等待 113–175 ms → fetchConfig
 ```
@@ -397,9 +395,9 @@ userinfo 与 `fetchUserInfo` 响应：
 | `writeTrajectoryAcls` | 新会话的首个生成请求之前 | `{"trajectoryId":"<TRAJECTORY_ID>"}` |
 | `streamGenerateContent`，`requestType: checkpoint` | 新会话，见下方新会话表 | 以目录 `mqueryModelIds` 的模型生成标题，见「标题请求」 |
 | 插件市场目录 `GET` | 冷启动与登录序列的界面加载中各一次，虚拟进程第一次生成之前一次 | 见「插件市场目录」 |
-| `GET https://aicode.googleapis.com/v1alpha/remote:listConversations?pageSize=20` | 初始化读取之后每 300 s | 失败后改为从 5 s 起每次翻倍、最多 60 s 的间隔，成功后恢复；每次等待上下浮动 20% |
+| `GET https://aicode.googleapis.com/v1alpha/remote:listConversations?pageSize=20` | 冷启动在界面加载中、登录序列在读完目录后各读一次，之后每 300 s | 失败后改为从 5 s 起每次翻倍、最多 60 s 的间隔，成功后恢复；每次等待上下浮动 20% |
 | `GET https://aicode.googleapis.com/v1alpha/remote:listProjects` | 初始化读取之后每 600 s | 同上 |
-| `GET https://aicode.googleapis.com/v1alpha/remote:listPlugins?returnToApp=antigravity` | 冷启动与登录序列的界面加载中各一次，此后除第一个之外的每个新会话的首个生成请求之前 | — |
+| `GET https://aicode.googleapis.com/v1alpha/remote:listPlugins?returnToApp=antigravity` | 冷启动界面加载中两次、登录序列界面渲染后一次，此后除第一个之外的每个新会话的首个生成请求之前 | — |
 
 - `cascadeNuxes` 的起点：冷启动序列为 Hub 界面加载中 `input_area_rendered` 后 13–38 ms（见下方界面加载表），登录序列为初始化中的那次
 - 远程列表与远程插件以 `aicode.googleapis.com` 的请求头发出，与 `fetchConfig` 相同
@@ -414,11 +412,12 @@ userinfo 与 `fetchUserInfo` 响应：
 | --- | --- | --- |
 | `writeTrajectoryAcls` | t0 | 否 |
 | 标题请求 | t0 + 50–230 ms | 否 |
-| 插件市场目录 | 本虚拟进程尚未读取过时，标题请求写出后 25–85 ms | 是 |
-| 生成请求 | 标题请求写出后 40–440 ms；读取了插件市场目录时为读到目录后 28–48 ms | — |
+| 插件市场目录 | 本虚拟进程尚未读取过时，t0 | 只在还没有保存过目录时等 |
+| 生成请求 | t0，不等 ACL 与标题请求 | — |
 | 虚拟 Hub 会话数加一 | ACL 请求结束后 | — |
 
-- 没有标题请求（账户的虚拟进程没有读到过非空的 `mqueryModelIds`，或首条 user 消息没有非思考文本与内联媒体）时，生成请求在 t0 + 40–440 ms 发出；标题请求在写出前失败时，在失败时刻之后 40–440 ms 发出
+- 没有标题请求（账户的虚拟进程没有读到过非空的 `mqueryModelIds`，或首条 user 消息没有非思考文本与内联媒体）时只发 ACL 与生成请求
+- ACL、标题请求与目录读取都在后台进行，与生成请求并发
 - ACL 请求失败时会话数同样加一
 - 新会话在每个账户上的第一次上游尝试（含换账户重试与流中断后换账户重开）之前按上表发 ACL 与标题请求；限速等待后在同一账户重试与 401 后的重发只发生成请求
 - 图像生成请求的新会话：首次上游尝试前同步发 ACL，读完 ACL 响应后立即发 `generateContent`，没有标题请求，会话数不变；ACL 只在首次尝试前发
@@ -446,7 +445,7 @@ userinfo 与 `fetchUserInfo` 响应：
 | `LogRequest` | 1 `client_info`、2 `log_source` 2747（`JETSKI`）、3 `log_event`（每个事件一条）、4 `request_time_ms` 发送时刻 |
 | `ClientInfo` | 1 `client_type` 16（`GO`） |
 | `LogEvent` | 1 `event_time_ms` 入队时刻、6 `source_extension`（`JetskiTelemetryExtension` 的字节）、11 `event_code`（名称事件为 5） |
-| `JetskiTelemetryExtension` | 16 `ide_name` `antigravity`、17 `ide_version` `2.31.2`、18 `os`、19 `arch`、22 `user_tier_id`、24 `is_redacted`、25 `region_code`、27 `product_name` `hub`、36 `experiment_config`、6 `analytics_event_metadata` |
+| `JetskiTelemetryExtension` | 16 `ide_name` `antigravity`、17 `ide_version` `2.33.0`、18 `os`、19 `arch`、22 `user_tier_id`、24 `is_redacted`、25 `region_code`、27 `product_name` `hub`、36 `experiment_config`、6 `analytics_event_metadata` |
 | `ExperimentConfig` | 6 `experiments`，每个开关一条 `ExperimentWithVariant` |
 | `ExperimentWithVariant` | 5 `key_string` 开关名、6 `disabled`、7 `source` 2、2 `string`、3 `json` |
 | `AnalyticsEventMetadata` | 1 `event_type` 事件名、2 `extra`（每个参数一条）、4 `runtime_environment` |
@@ -457,7 +456,7 @@ userinfo 与 `fetchUserInfo` 响应：
 - 36 为最近一次 `listExperiments.flags` 的全部开关（含名称带 `__` 的）；`use-aicode-mendel` 开启的账户在第一次实验轮询的 `fetchConfig` 成功后改为最近一次 `fetchConfig` 的开关，之后 `fetchConfig` 失败、改发 `listExperiments` 时改回；对照的 `fetchConfig` 失败时 `mendel_aicode_shadow_diff` 取该次 `fetchConfig` 的开关（为空）；开关先按名称去重（同名取最后一条），再按 Go map 遍历顺序每个开关写一条 6：5 开关名；值为 false 的布尔开关写 6 = 1；7 = 2；值按下方“实验开关”表写入 2 或 3，布尔开关不写值
 - `extra` 按 Go map 遍历顺序写出；参数值为整数或字符串：下文取值为数字的参数（计数、毫秒数、字节数、`num_projects`、`client_event_time_ms` 等）为整数，同时写十进制文本 `value` 与 `int_value`；其余参数为字符串，只写 `value`，`cancelled`、`store_read_error`、`blocking`、`is_new_conversation` 的 `true`、`false` 也是字符串
 - 下表的形态：“默认”为 22、25 写账户的套餐与地区，带公共参数，不写 36、界面参数与 `runtime_environment`，其余形态在此基础上改动；“空套餐”为 22、25 写空字符串；“空公共参数”为公共参数全部为空字符串；“开关”为写 36，“空开关”为写长度为 0 的 36；“界面”为另加参数 `browserSessionId`（虚拟进程启动时随机生成的 UUID）与 `client_event_time_ms`（事件时刻减 1–4 ms）；“环境”为写 `runtime_environment`
-- 公共参数为 `machineId` 空、`subclientType` `hub`、`environmentType` 空、`ideVersion` `2.31.2`、`ideName` `antigravity`、`os` 档案系统名；安装标识为 `installation_id` 与 `antigravity_ide_installation_id`，都取设备档案的 `installation_id`
+- 公共参数为 `machineId` 空、`subclientType` `hub`、`environmentType` 空、`ideVersion` `2.33.0`、`ideName` `antigravity`、`os` 档案系统名；安装标识为 `installation_id` 与 `antigravity_ide_installation_id`，都取设备档案的 `installation_id`
 
 **实验开关：** `listExperiments` 与 `fetchConfig` 的响应（`<开关>` 见下表）：
 
@@ -488,8 +487,9 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | --- | --- |
 | 登录序列初始化中 `fetchConfig` 结束 3–15 ms 后，此后每轮先 `listExperiments` 的实验轮询的 `fetchConfig` 之后 | `mendel_aicode_shadow_diff` |
 | 冷启动对照的 `fetchConfig` 结束 3–15 ms 后，不早于 G 之后 1–2 ms | `mendel_aicode_shadow_diff` |
-| 登录序列初始化完成时 | 三个迁移事件、`summaries_store_subscribe_called`、码 25 `sidecar_execution`（空开关），`conversation_search_index_warm` 与 `app_migration_permission_grants_v2_completed`（开关） |
-| 登录序列初始化完成 0.87–1.07 s 后 | `sidebar_group_by_state`、带分组的 `sidebar_conversations` 与只带 `iframeLocalTtirMs` 的 `input_area_rendered`；`input_area_rendered` 之后 85–92 ms 列出远程插件，17–21 ms 或 178–184 ms（各一半）后读取两个插件市场目录，读完时各一个 `marketplace_catalog_fetch`；117–479 ms 后码 14 `LS_ERROR`，见「码 14 `LS_ERROR`」 |
+| 登录序列初始化完成时 | 三个迁移事件、`summaries_store_subscribe_called`、`conversation_search_index_warm`（开关）、码 25 `sidecar_execution`（空开关）与 `app_migration_permission_grants_v2_completed`（开关） |
+| 登录序列读完目录后 32–112 ms | 远程项目、会话列表与两个插件市场目录同时读取，目录读完时各一个 `marketplace_catalog_fetch` |
+| 登录序列初始化完成 0.87–1.07 s 后 | `sidebar_conversation_list_loaded`、`sidebar_group_by_state`、带分组的 `sidebar_conversations` 与带 `iframeLocalTtirMs` 和 boot* 耗时的 `input_area_rendered`；`input_area_rendered` 之后 23–29 ms 列出远程插件 |
 | 冷启动第一次 `fetchUserInfo` 结束 23–63 ms 后，同一时刻 | 启动事件：`hub_store_load_succeeded`（`app_state`）、`hub_store_load_succeeded`（`user_config`）、不带 `file_type` 的 `hub_store_load_succeeded` 依次记录，`summary_store_reconcile` 按实际时刻插在其间或之后，最后是 `LS_BINARY_STARTUP` 与 `summaries_store_subscribe_called` |
 | 冷启动 `fetchAvailableModels` 结束 35–295 ms 后，不早于 G | 迁移组（带开关）：`retroactive_migration_attempted`、`retroactive_migration_skipped_already_completed`、`projects_migration_skipped_already_completed`，之后 `summaries_store_subscribe_called`、`summaries_reconciled`、`summary_store_json_vs_sqlite`、`conversation_search_index_warm` 四个事件的先后按官方 11 次冷启动取 s-w-r-j、s-r-w-j、s-r-j-w 之一，比例 8:2:1 |
 | 启动事件之后 376–457 ms | 界面加载，间隔见下表 |
@@ -505,7 +505,7 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | `mendel_aicode_shadow_diff` | 已记录过带开关的 Hub 事件时带开关，否则冷启动无开关字段、登录序列为空开关；冷启动在启动事件之前记录时带比记录时刻早 12–20 ms 的 `client_event_time_ms` | 见下方说明 |
 | `summary_store_reconcile` | 默认 | 公共参数、`client_event_time_ms`、`duration_ms`、`outcome`、`rows`、`trigger`、`pruned` 0 |
 | `hub_store_load_succeeded`（`app_state`） | 空公共参数 | 安装标识、`client_event_time_ms`、`file_type` `app_state` |
-| `hub_store_load_succeeded`（`user_config`） | 空公共参数 | 安装标识、`client_event_time_ms`、`file_type` `user_config`、`auto_execution_policy` `CASCADE_COMMANDS_AUTO_EXECUTION_OFF` |
+| `hub_store_load_succeeded`（`user_config`） | 空公共参数 | 安装标识、`client_event_time_ms`、`file_type` `user_config`、`auto_execution_policy`（Linux 设备为 `CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX`，其余为 `CASCADE_COMMANDS_AUTO_EXECUTION_OFF`） |
 | `hub_store_load_succeeded` | 空公共参数 | 安装标识、`client_event_time_ms` |
 | `retroactive_migration_attempted` | 空公共参数；冷启动带开关 | — |
 | `retroactive_migration_skipped_already_completed` | 空公共参数；冷启动带开关 | `status` `RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY` |
@@ -574,40 +574,14 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | 12–40 | `input_area_rendered`，记为 r |
 | r 之后 13–139 | `cascadeNuxes`，此后每 120 s 一次 |
 | 第一次 `cascadeNuxes` 的时刻之后 −4–320 | `remote:listPlugins` |
-| 145–469 | 两个插件市场目录同时读取，各自读完时记 `marketplace_catalog_fetch` |
-| r 之后 117–479 | 码 14 `LS_ERROR`：界面 `GetSlashCommands` 的两次会话配置解析，见「码 14 `LS_ERROR`」 |
+| 它结束后 4–12 | `remote:listConversations`，记为 c |
+| c 之后 200–448 | `remote:listProjects` |
+| c 之后 269–352 | 第二次 `remote:listPlugins` |
+| 164–356 | 两个插件市场目录同时读取，各自读完时记 `marketplace_catalog_fetch` |
+| r 之后 170–253 | `sidebar_group_by_state` |
 
 - 第二种前四行为不带开关的 `projects_listed`（0）、`sidebar_conversations`（0–1）、带 `project_ids` 的 `projects_listed`（6–9）、`trajectory_summary_load`（5–7）
 - 第三种前四行为 `trajectory_summary_load`（0）、`sidebar_conversations`（1–6）、带开关的 `projects_listed`（0–2）、带 `project_ids` 的 `projects_listed`（6–11）
-
-**码 14 `LS_ERROR`：** 官方 language_server 解析会话配置（`defaultConversationalCascadeConfig`）时先查默认通用模型（`config.defaultGeneralModelInfo`），再查规划模型（`config.GetModelInfoFromPlannerConfig`），两次查询在官方 2.30.0–2.31.2 的全部现场中都失败，每次失败经 `errorreport.ReportError` 上报一次 `LS_ERROR`。上报按 `ShouldSampleError` 抽样：实验开关 `record-error-sampling-rates` 的 `error_match_to_sample_rate` 只列出 `LS_CRASH` 与 `ui_client_jetski_chat_setup_failed`，`LS_ERROR` 取默认抽样率 0.1，每次失败独立抽样，抽中才记录事件。各账户、模型与设备状态下条件相同，事件是否出现只取决于抽样。服务按下表的解析次数逐次抽样：
-
-| 解析 | 时机 | 每次的解析数 | goroutine 编号 |
-| --- | --- | --- | --- |
-| 界面 `GetSlashCommands`（启动） | 冷启动与登录序列的 `input_area_rendered` 之后 117–479 ms 查默认通用模型，再过 8–10 ms 查规划模型 | 2 | 冷启动 1007–1244，登录序列 1244–2040，两次解析相同 |
-| 界面 `GetSlashCommands`（新会话） | 见用户请求的事件时刻表 | 1 | 执行器的编号减 260–280 |
-| 执行器（`AgentExecutor.configureCascade`） | 每个用户请求，见用户请求的事件时刻表；工具结果请求没有 | 1 | 每个用户请求在上一次的编号上加 943–1168 |
-
-- 同一次解析的两类查询各自抽样，两类事件可能都出现、只出现一类或都不出现
-- 执行器 goroutine 由另一个 goroutine 创建，栈末尾 `created by ... in goroutine <编号>` 的创建者编号为执行器编号加 −33–75
-
-形态为“开关”，`LogEvent` 为 1 事件时刻、6 扩展、11 = 14；扩展为“开关”的公共字段，之后是字段 15：
-
-| 字段 | 值 |
-| --- | --- |
-| 15.1.1 | `LS_ERROR` |
-| 15.1.2 | 毫秒时刻，比事件时刻早 0–1 ms |
-| 15.1.3 | goroutine 栈文本（`runtime.Stack`，缓冲区 8192 字节） |
-
-栈文本以内嵌的官方现场为模板：
-
-| 文件 | 内容 |
-| --- | --- |
-| `internal/antigravity/lserror_<系统>_<解析>_<查询>.txt.gz` | 解析为 `slash`（界面 `GetSlashCommands`）或 `exec`（执行器），查询为 `general`（默认通用模型）或 `planner`（规划模型）；Windows 取自 2.31.2，Linux 取自 2.31.1 |
-
-- 界面解析的栈超过 8192 字节，官方截断在 8192 字节处（截断位置可能在一个地址中间）；执行器的栈 4.2 KB 左右，不截断。Windows 与 Linux 的栈除地址与 `blaze-out/<平台>-opt` 目录外逐行相同
-- 记录时把第一处 `goroutine <编号>` 换成本次解析的编号，执行器模板的第二处（创建者）换成创建者编号；指针按登录前虚拟进程的栈地址规则以本虚拟进程的偏移平移；最后截到 8192 字节
-- 设备档案的系统为 macOS 时不记录
 
 **会话事件：** 按官方 Turbo 权限预设、不在项目中的会话放入同一上报队列。一个生成请求对应官方一次模型调用：最后一条消息为用户请求时开始一次新的执行，为工具结果时是同一执行中工具步骤完成后的续写。
 
@@ -615,7 +589,7 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | --- | --- |
 | 新会话的请求发出前 | `conversation_new`、`AGENT_MANAGER_NEW_WORKSPACE_CONVERSATION`、`SWITCH_CONVERSATION`、`PROJECT_RESOURCES_FINALIZED`、`CASCADE_CONVERSATION_STARTED`、码 10、`conversation_load_completed`（每个虚拟进程的第一个会话）、`conversation_title_generation` |
 | 用户请求的模型与选择器最后选定的不同 | `model_changed`，虚拟 Hub 没有选定过模型时同样发出 |
-| 用户请求发出前 | `SEND_USER_CASCADE_MESSAGE_LATENCY`、码 14 `LS_ERROR`（执行器解析会话配置，新会话另有界面 `GetSlashCommands` 解析，见「码 14 `LS_ERROR`」）、`CASCADE_MESSAGE_SENT`，新会话另有两个 `ls_scoped_rpc_access` 与码 25 `sidecar_event`，之后码 11 用户输入步骤、码 37 `pre_invocation` 的 `message_delivery` 与 `context_summary` |
+| 用户请求发出前 | `SEND_USER_CASCADE_MESSAGE_LATENCY`、`CASCADE_MESSAGE_SENT`，新会话另有两个 `ls_scoped_rpc_access` 与码 25 `sidecar_event`，之后码 11 用户输入步骤、码 37 `pre_invocation` 的 `message_delivery` 与 `context_summary` |
 | 回复含函数调用 | 码 11 模型回复步骤、两条码 2，第一个调用的一组码 37 `pre_tool`：`battle_mode_tool_args`、`command_assessor` 与 `timeout_long_running_search_command`；回复用户请求时另有 `prompt_latency` |
 | 工具结果请求发出前 | 按函数结果依次记录：该调用的一组 `pre_tool`（第一个调用除外）、码 37 `post_tool` 的 `command_assessor`、码 11 终端命令步骤；之后码 37 `post_invocation` 7 个与 `pre_invocation` 2 个 |
 | 回复不含函数调用 | `ttft_completed`、回复用户请求时的 `prompt_latency`、码 11 模型回复步骤、两条码 2、码 37 `post_invocation` 7 个与 `stop` 的 `goal_stop`、`idle_subagent_guard`、`swarm_park_guard`、码 1 |
@@ -626,8 +600,9 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 - 用户请求、模型回复与每个函数结果各占一个步骤序号，从 0 起；`metadata_index` 为会话中已完成的模型调用数，工具前钩子与调用后的钩子为加一后的值；每个用户请求一个执行标识；`hook_seq` 在每个用户请求时归零，每个钩子先加一再写入，第一个为 1，同一执行的工具结果请求与回复接着累加；`post_invocation` 依次为 `chain_check`、`message_continue_check`、`terminal_step_check`、`max_generator_invocations_check`、`empty_output_continuation_check`、`force_invocation`、`no_tool_call_check`，执行结束时最后一个的结果为 `EXECUTOR_TERMINATION_REASON_NO_TOOL_CALL`；码 37 的字段 6 开始时刻等于事件时刻，字段 5 耗时为 0，`context_summary` 在会话已有模型调用时为 1–4 ms
 - 客户端函数按官方终端命令步骤的形状记录，内嵌同样元数据的通用步骤，调用名与 ID 取实际调用，调用参数中的 `WaitMsBeforeAsync` 写入 `wait_ms_before_async`，`shell_name` 在 Windows 为 `powershell`、macOS 为 `zsh`、Linux 为 `bash`
 - 码 2 每次模型调用两条：完整条含全部消息，`last_common_index` 为 -1；增量条只含上一次模型回复之后的消息，`last_common_index` 为该回复的步骤序号，会话第一次调用时同样为 -1。最后一条消息是本次回复，消息元数据再写一段 `segment_index` 1；`step_indices` 为本次回复与其函数调用的步骤序号
-- 码 2 的 token 明细：系统提示各段为以会话、设备档案与推荐插件货架渲染的官方段 ceil(UTF-8 字节数/3)，工具 14 个取 `session.json` 中该模型族的 `toolTokens`，对话消息每步一项 `<步骤序号>: <USER_INPUT|PLANNER_RESPONSE|GENERIC>`，取值见下方「对话消息 token 数」；用量的 `input_tokens` 为 `promptTokenCount` 减 `cachedContentTokenCount`，缓存命中另写 `cache_read_tokens`；`retry_infos` 带响应 `traceId`，`response_model` 为 `modelVersion`，其后写目录中该模型的 `displayName`；模型回复含思考时步骤另写调用开始到最后一个思考事件的 `thinking_duration`
-- 执行配置 `CascadeConfig` 按模型族（Gemini、Argon、Claude、GPT）取模板，填写模型枚举、`maxOutputTokens`、模型 ID、终端 shell 与 23 个实验开关；非 Google 模型另写 `has_ever_used_non_google_model`；`mendel_experiment_ids` 为实验 ID 与 `fetchAvailableModels` 的 `experimentIds` 升序并集
+- 码 2 的 token 明细：系统提示各段为以会话、设备档案与推荐插件货架渲染的官方段 ceil(UTF-8 字节数/3)，工具 16 个取 `session.json` 中该模型族的 `toolTokens`（Linux 设备的 `run_command` 少 3），对话消息每步一项 `<步骤序号>: <USER_INPUT|PLANNER_RESPONSE|GENERIC>`，取值见下方「对话消息 token 数」；用量的 `input_tokens` 为 `promptTokenCount` 减 `cachedContentTokenCount`，缓存命中另写 `cache_read_tokens`；`retry_infos` 带响应 `traceId`，`response_model` 为 `modelVersion`，其后写目录中该模型的 `displayName`；模型回复含思考时步骤另写调用开始到最后一个思考事件的 `thinking_duration`；模型用量的输出 token 为 `candidatesTokenCount` 与 `thoughtsTokenCount` 之和，另写思考 token 与 `candidatesTokenCount`
+- 码 2 的 `prompt_sections`：所选目录条目带 `template__system_prompts__<段名>` 时该段的来源写 4（服务端模板），其余取模板中的值
+- 执行配置 `CascadeConfig` 按模型族（Gemini、Argon、Carbon、Hydrogen、Claude、GPT）取模板，填写模型枚举、`maxOutputTokens`、模型 ID、终端 shell、终端的 `enable_pty` 与 `enable_persistent_mode`、命令评估的 `PolicyGuardianConfig` 与 36 个实验开关；非 Google 模型另写 `has_ever_used_non_google_model`；`mendel_experiment_ids` 为实验 ID 与 `fetchAvailableModels` 的 `experimentIds` 升序并集
 - 会话事件的实验来源：`use-aicode-mendel` 开启时为最近一次 `fetchConfig`（开关取 `experimentFlags`，实验 ID 取 `enabledExperimentIds`），否则为最近一次 `listExperiments`（`flags` 与 `experimentIds`）；执行配置的实验开关取同名开关，布尔值写 `bool_value`，整数与小数写 `number_value`，字符串写 `string_value`，没有该开关时为 `bool_value` false
 - `session.json` 取自官方会话现场，执行配置、请求覆盖配置、代理解析、已加载定制、提示段元数据与工具 token 数随官方客户端版本更新；格式与载荷字段见下方“会话事件载荷”
 - 本轮生成前读取过插件市场目录时，`marketplace_catalog_fetch` 以读取结束时刻记在用户输入步骤或工具步骤之前；用户请求的发送事件及更早的事件以锚点代替请求发出时刻计算，新会话的锚点为标题请求写出后 245–255 ms，其余为读取开始后 5–15 ms
@@ -656,9 +631,7 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | 码 10 | t − 400–410 ms |
 | `conversation_load_completed` | t − 275–285 ms |
 | `conversation_title_generation` | t − 263–266 ms |
-| 码 14 `LS_ERROR`（新会话的界面解析） | 默认通用模型 t − 381–841 ms，规划模型再晚 2 ms |
 | `SEND_USER_CASCADE_MESSAGE_LATENCY` | 发送时刻 s |
-| 码 14 `LS_ERROR`（执行器解析） | 默认通用模型 s − 1 ms 到 s + 6 ms，规划模型再晚 2–3 ms |
 | `CASCADE_MESSAGE_SENT` | 新会话 s + 10–47 ms，其余 s + 8–11 ms |
 | `ls_scoped_rpc_access`（`GetConversationMetadata`） | 新会话 a = c + 440–700 ms |
 | `ls_scoped_rpc_access`（`RecordSidecarEvent`）、码 25 `sidecar_event` | a + 0–100 ms，`sidecar_event` 再晚 0–15 ms |
@@ -917,10 +890,12 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | 10.17 | 本次模型的请求覆盖配置 |
 | 10.18 | `customizations` 模板 |
 
-- 执行配置为 `cascade` 中该模型族的模板，改写 1.1 模型枚举号、1.6 `maxOutputTokens`、1.28 模型 ID、1.13.8.5 shell 名，并把 1.43 换成实验开关表；改写只替换路径上第一个同号字段，其余字段按模板原顺序重新编码
+- 执行配置为 `cascade` 中该模型族的模板，改写 1.1 模型枚举号、1.6 `maxOutputTokens`、1.28 模型 ID、1.13.8.5 shell 名，1.13.8.13 `enable_pty` 与 1.13.8.14 `enable_persistent_mode` 取会话事件实验来源的布尔开关 `enable-pty` 与 `enable-persistent-terminals`，并把 1.43 换成实验开关表；改写只替换路径上第一个同号字段，其余字段按模板原顺序重新编码
+- 3.18.2 `PolicyGuardianConfig` 并入字符串开关 `policy-guardian-config` 的 JSON：`enabled`、`antivirus_enabled`、`max_tool_rounds`、`enable_url_vetting`、`enable_denied_repeat_precheck`、`http_timeout_seconds`、`antivirus_enforced`、`allowed`、`deployment`、`max_concurrent_tool_calls`、`enable_irreversible_vetting`、`enable_reversibility_adjudication`、`use_intent_alignment_for_destruction` 依次为字段 1、4、7–11、12、15、17–20，同号字段换成开关的值；按 Go protobuf 的编码顺序排列，普通字段按字段号升序，oneof 的字段 2 与 5 在最后
+- 请求覆盖配置为 `override` 模板，改写 1.1 模型枚举号与 1.13.8.3.6 终端命令自动执行策略：Linux 设备为 2（`AUTO`），其余为 1（`OFF`）
 - 实验开关表为每个开关一条 1 `{1: 开关名, 2: ExperimentValue}`，开关名取 `experiments`，按会话事件的实验来源取同名开关：布尔值写 1 `bool_value`，整数与小数写 3 `number_value`（double），字符串写 2 `string_value`，没有该开关时写 1 = 0
 - 实验 ID 为会话事件实验来源的实验 ID 与 `fetchAvailableModels` 的 `experimentIds` 去重后升序，以 packed uvarint 写出
-- 模型族：`modelProvider` 为 Anthropic 时 `claude`，为 OpenAI 时 `gpt`，模型 ID 含 `argon` 时 `argon`，其余 `gemini`；模型枚举号与 APIProvider 枚举号按目录条目的 `model`、`apiProvider` 在 `models`、`providers` 中查找，查不到为 0
+- 模型族：`modelProvider` 为 Anthropic 时 `claude`，为 OpenAI 时 `gpt`，模型 ID 含 `argon` 时 `argon`，含 `carbon` 时 `carbon`，含 `hydrogen` 时 `hydrogen`，其余 `gemini`；模型枚举号与 APIProvider 枚举号按目录条目的 `model`、`apiProvider` 在 `models`、`providers` 中查找，查不到为 0
 
 `internal/antigravity/session.json` 以 `go:embed` 内嵌，是一个 JSON 对象，启动时解析：
 
@@ -938,12 +913,12 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 | `models` | 枚举名到整数 | Model 枚举 |
 | `providers` | 枚举名到整数 | APIProvider 枚举 |
 
-- Base64 为标准字母表带填充；`cascade` 的键为 `gemini`、`claude`、`gpt`、`argon`
-- `experiments` 为 22 个：`convenient-multi-agent-coordination`、`default_subagent_interaction_timeout_seconds`、`disable-teamwork-forced-flash-model`、`enable-agent-plugins-spec`、`enable-browser-subagent-webview-script`、`enable-browser-subagent-webview-ux`、`enable-citc-workspace-hygiene-rule`、`enable-compact-slash-command`、`enable-cost-accumulator`、`enable-generative-hooks`、`enable-iapi-tool-steps`、`enable-owl-slash-command`、`enable-permissioned-github`、`enable-programmatic-tools`、`enable-rpc-sandbox-proxy`、`enable-teamwork-subagent`、`enable-trustedcli-config-files`、`enable-url-artifacts`、`jetski-autonomous-mode`、`jetski-generative-ui`、`jetski-unified-customizations-panel-enabled`、`native-swarm-spanner-board`
-- `tools` 为 14 个：`read_file`、`run_command`、`list_plugin_accounts`、`manage_task`、`send_message`、`schedule`、`invoke_subagent`、`define_subagent`、`manage_subagents`、`write_file`、`edit_file`、`search_web`、`search_marketplace`、`ask_question`
-- `toolTokens` 与 `tools` 同序：`gemini` 与 `argon` 为 254、510、300、280、147、681、663、314、233、562、623、127、703、314，`claude` 首项为 250、`gpt` 首项为 244，其余相同
+- Base64 为标准字母表带填充；`cascade` 的键为 `gemini`、`claude`、`gpt`、`argon`、`carbon`、`hydrogen`
+- `experiments` 为 36 个：`convenient-multi-agent-coordination`、`default_subagent_interaction_timeout_seconds`、`deprecate-ephemeral-messages`、`disable-teamwork-forced-flash-model`、`enable-agent-plugins-spec`、`enable-browser-subagent-high-stakes-consent`、`enable-browser-subagent-milestone-collab`、`enable-browser-subagent-sensitive-site-ask`、`enable-browser-subagent-url-safety`、`enable-browser-subagent-webmcp`、`enable-browser-subagent-webview-script`、`enable-browser-subagent-webview-ux`、`enable-citc-top-level-write-guard`、`enable-citc-workspace-hygiene-rule`、`enable-compact-slash-command`、`enable-cost-accumulator`、`enable-generative-hooks`、`enable-help-slash-command`、`enable-iapi-tool-steps`、`enable-owl-slash-command`、`enable-permissioned-github`、`enable-programmatic-tools`、`enable-rpc-sandbox-proxy`、`enable-run-workflow-terminal-return`、`enable-subagent-dropdown-models`、`enable-teamwork-subagent`、`enable-trustedcli-config-files`、`enable-url-artifacts`、`generic-system-prompt`、`jetski-autonomous-mode`、`jetski-generative-ui`、`jetski-generative-ui-prompt`、`jetski-unified-customizations-panel-enabled`、`native-swarm-channels-local`、`native-swarm-channels-spanner`、`native-swarm-spanner-board`
+- `tools` 为 16 个：`read_file`、`run_command`、`list_plugin_accounts`、`manage_task`、`send_message`、`schedule`、`invoke_subagent`、`define_subagent`、`manage_subagents`、`write_file`、`edit_file`、`search_web`、`run_workflow`、`search_marketplace`、`swarm`、`ask_question`
+- `toolTokens` 与 `tools` 同序：`gemini`、`argon`、`carbon` 与 `hydrogen` 为 254、510、300、280、147、681、674、314、246、562、623、127、582、703、1603、314，`claude` 首项为 250、`gpt` 首项为 244，其余相同
 - `sections` 依次为 `identity`、`artifacts`、`conversation_transcript`、`guidelines`、`communication_style`、`slash_commands`、`messaging`、`subagents`、`skills`、`featured_plugins`、`user_information`
-- `models` 有 1691 项，如 `MODEL_CHAT_20706` 为 235、`MODEL_PLACEHOLDER_M418` 为 1418；`providers` 为 `API_PROVIDER_UNSPECIFIED` 0、`API_PROVIDER_INTERNAL` 1、`API_PROVIDER_GOOGLE_VERTEX` 3、`API_PROVIDER_GOOGLE_GEMINI` 24、`API_PROVIDER_ANTHROPIC_VERTEX` 26、`API_PROVIDER_GOOGLE_EVERGREEN` 30、`API_PROVIDER_OPENAI_VERTEX` 31
+- `models` 有 1691 项，如 `MODEL_CHAT_20706` 为 235、`MODEL_PLACEHOLDER_M418` 为 1418；`providers` 为 `API_PROVIDER_UNSPECIFIED` 0、`API_PROVIDER_INTERNAL` 1、`API_PROVIDER_GOOGLE_VERTEX` 3、`API_PROVIDER_GOOGLE_GEMINI` 24、`API_PROVIDER_ANTHROPIC_VERTEX` 26、`API_PROVIDER_GOOGLE_EVERGREEN` 30、`API_PROVIDER_OPENAI_VERTEX` 31、`API_PROVIDER_OPENAI_RESPONSES_VERTEX` 32
 
 
 ## 3. 模型目录与额度
@@ -1111,28 +1086,29 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 
 ### 请求身份
 
-每个账户的 `Client` 持有三个 HTTP 客户端，另有语音转写的 gRPC 连接，全部经该账户的代理选择函数（开发文档“上游代理的选择顺序”）连接；登录与登录前虚拟进程还没有账户，代理取 `PROXY` 的第一项，为空时跟随系统代理：
+每个账户的 `Client` 持有四个 HTTP 客户端，另有语音转写的 gRPC 连接，全部经该账户的代理选择函数（开发文档“上游代理的选择顺序”）连接；登录与登录前虚拟进程还没有账户，代理取 `PROXY` 的第一项，为空时跟随系统代理：
 
 | 客户端 | Transport | 认证 | 用于 |
 | --- | --- | --- | --- |
-| cloudcode | 开 HTTP/1 与 HTTP/2 的零值 `http.Transport` | `oauth2.Transport` 注入 Bearer | cloudcode `v1internal`、userinfo、`fetchConfig`、标题与生成请求 |
-| web | 克隆的 `http.DefaultTransport` | 无 | 头像、tokeninfo、插件市场目录、登录前 clearcut |
-| auth | 克隆的 `http.DefaultTransport` | `oauth2.Transport` 注入 Bearer | clearcut 上报 |
-| token | 克隆的 `http.DefaultTransport`，由 `oauth2.HTTPClient` 传给 oauth2 | 表单中的 client 凭据 | 换取与刷新 token |
+| cloudcode | `http1Transport` | `oauth2.Transport` 注入 Bearer | cloudcode `v1internal`、userinfo、`fetchConfig`、标题与生成请求 |
+| web | `http1Transport` | 无 | 头像、tokeninfo |
+| h2 | `http2Transport` | 无 | 插件市场目录、登录前 clearcut |
+| auth | `http2Transport` | `oauth2.Transport` 注入 Bearer | clearcut 上报 |
+| token | `http1Transport`，由 `oauth2.HTTPClient` 传给 oauth2 | 表单中的 client 凭据 | 换取与刷新 token |
 | gRPC | grpc-go `grpc.NewClient` | 每次调用的 `authorization: Bearer` 元数据 | 语音转写 |
 
 | 主机 | 用途 | 客户端 | HTTP | ALPN | `User-Agent` |
 | --- | --- | --- | --- | --- | --- |
-| `cloudcode-pa.googleapis.com` | 首次 `loadCodeAssist` | cloudcode | HTTP/2 | `h2`、`http/1.1` | 官方 UA |
-| `daily-cloudcode-pa.googleapis.com` | 其余 `v1internal` | cloudcode | HTTP/2 | `h2`、`http/1.1` | 官方 UA；Tab 补全为编辑器版 UA |
-| `businessaicode.googleapis.com` | 企业账户的 `v1internal` | cloudcode | HTTP/2 | `h2`、`http/1.1` | 官方 UA |
-| `aicode.googleapis.com` | `fetchConfig` | cloudcode | HTTP/2 | `h2`、`http/1.1` | 官方 UA |
-| `www.googleapis.com` | userinfo `GET /oauth2/v2/userinfo` | cloudcode | HTTP/2 | `h2`、`http/1.1` | `Go-http-client/2.0` |
-| `www.googleapis.com` | tokeninfo `GET /oauth2/v3/tokeninfo?access_token=<ACCESS_TOKEN>`，不带 `Authorization` | web | HTTP/2 | `h2`、`http/1.1` | `Go-http-client/2.0` |
-| userinfo `picture` 的主机（`lh3.googleusercontent.com`） | 头像 `GET <picture>`，不带 `Authorization` 与其他自设请求头，读完响应即丢弃 | web | HTTP/2 | `h2`、`http/1.1` | `Go-http-client/2.0` |
-| `www.gstatic.com` | 插件市场目录 | web | HTTP/2 | `h2`、`http/1.1` | 官方 UA |
-| `play.googleapis.com` | clearcut 上报 | auth（登录前为 web） | HTTP/2 | `h2`、`http/1.1` | `Go-http-client/2.0` |
-| `oauth2.googleapis.com` | 换取与刷新 token | token | HTTP/2 | `h2`、`http/1.1` | `Go-http-client/2.0` |
+| `cloudcode-pa.googleapis.com` | 首次 `loadCodeAssist` | cloudcode | HTTP/1.1 | `http/1.1` | 官方 UA |
+| `daily-cloudcode-pa.googleapis.com` | 其余 `v1internal` | cloudcode | HTTP/1.1 | `http/1.1` | 官方 UA；Tab 补全为编辑器版 UA |
+| `businessaicode.googleapis.com` | 企业账户的 `v1internal` | cloudcode | HTTP/1.1 | `http/1.1` | 官方 UA |
+| `aicode.googleapis.com` | `fetchConfig` | cloudcode | HTTP/1.1 | `http/1.1` | 官方 UA |
+| `www.googleapis.com` | userinfo `GET /oauth2/v2/userinfo` | cloudcode | HTTP/1.1 | `http/1.1` | `Go-http-client/1.1` |
+| `www.googleapis.com` | tokeninfo `GET /oauth2/v3/tokeninfo?access_token=<ACCESS_TOKEN>`，不带 `Authorization` | web | HTTP/1.1 | `http/1.1` | `Go-http-client/1.1` |
+| userinfo `picture` 的主机（`lh3.googleusercontent.com`） | 头像 `GET <picture>`，不带 `Authorization` 与其他自设请求头，读完响应即丢弃 | web | HTTP/1.1 | `http/1.1` | `Go-http-client/1.1` |
+| `www.gstatic.com` | 插件市场目录 | h2 | HTTP/2 | `h2`、`http/1.1` | 官方 UA |
+| `play.googleapis.com` | clearcut 上报 | auth（登录前为 h2） | HTTP/2 | `h2`、`http/1.1` | `Go-http-client/2.0` |
+| `oauth2.googleapis.com` | 换取与刷新 token | token | HTTP/1.1 | `http/1.1` | `Go-http-client/1.1` |
 | `aicode.googleapis.com:443` | 语音转写 gRPC | gRPC | HTTP/2 | `h2` | `grpc-go/1.86.0-dev` |
 
 - gRPC 的 `User-Agent` 为 `"grpc-go/" + grpc.Version`，与官方 language_server 的 grpc-go 版本相同；经 HTTP 代理的 `CONNECT` 使用同一个值
@@ -1143,13 +1119,13 @@ clearcut 事件（日志源 2747）按官方关闭遥测后的 Hub 放入上报�
 
 ```text
 antigravity/hub/<ClientVersion> (aidev_client; os_type=<档案 os>; arch=<档案 arch>; cl=<档案 os 与 arch 的构建号>)
-antigravity/hub/2.31.2 (aidev_client; os_type=windows; arch=amd64; cl=1019359392)
-antigravity/hub/2.31.2 (aidev_client; os_type=linux; arch=amd64; cl=1019359392)
+antigravity/hub/2.33.0 (aidev_client; os_type=windows; arch=amd64; cl=1023160026)
+antigravity/hub/2.33.0 (aidev_client; os_type=linux; arch=amd64; cl=1023160026)
 ```
 
 `cl` 是官方该系统与架构的 `language_server` 构建号，随客户端版本、系统与架构变化，保存在 `internal/antigravity/version.go` 的 `changelists`；更新 `ClientVersion` 时，从新版各系统 `language_server --stamp` 输出的 `Built at CL:` 取值。官方 userinfo 请求的 ClientHello、HTTP 版本与请求头顺序都与 cloudcode GET 相同，`User-Agent` 为 `net/http` 默认值 `Go-http-client/2.0`。
 
-**ClientHello：** 四个 HTTP 客户端都是 Go `crypto/tls` 默认配置，ClientHello 相同。
+**ClientHello：** 四个 HTTP 客户端都用 Go `crypto/tls` 的默认配置，只有 ALPN 不同。
 
 | 项 | 值 |
 | --- | --- |
@@ -1157,7 +1133,7 @@ antigravity/hub/2.31.2 (aidev_client; os_type=linux; arch=amd64; cl=1019359392)
 | session_id | 32 B |
 | 密码套件 | 13 个 |
 | 扩展顺序 | `0 11 65281 23 18 5 10 13 50 16 43 51` |
-| ALPN（16） | `h2`、`http/1.1` |
+| ALPN（16） | `http1Transport` 为 `http/1.1`；`http2Transport` 为 `h2`、`http/1.1` |
 | 握手长度 | 随 SNI 变化 |
 
 | 扩展 | 内容 |
@@ -1176,58 +1152,66 @@ ClientHello 与官方一致需要满足：
 | --- | --- |
 | 模块 `go` 指令不低于 1.26 | 组、签名算法默认值不同 |
 | `GODEBUG` 保持 `tlsmlkem`、`tlssecpmlkem`、`tlssha1` 默认值 | `tlssecpmlkem=0` 少两个组；`tlsmlkem=0` 只剩经典组；`tlssha1=1` 多两个签名算法 |
-| `TLSClientConfig` 为 nil | 设置 `ClientSessionCache` 时多出 session_ticket（35）与 psk_key_exchange_modes（45） |
+| `TLSClientConfig` 只设置 `NextProtos`（`http2Transport` 为 nil） | 设置 `ClientSessionCache` 时多出 session_ticket（35）与 psk_key_exchange_modes（45） |
 | 默认 `GOFIPS140`，程序不导入 `crypto/tls/fipsonly` | 套件与组受 FIPS 限制 |
 
-**Transport：** `NewClient(account, source, device, proxy)` 以账户的代理选择函数 `proxy` 构造三个客户端，cloudcode Transport 除 `Proxy` 与 `Protocols` 外全部取零值：
+**Transport：** `NewClient(account, source, device, proxy)` 以账户的代理选择函数 `proxy` 构造四个客户端，两种 Transport 都克隆 `http.DefaultTransport`：
 
 ```go
-transport := &http.Transport{Proxy: proxy}
-transport.Protocols = new(http.Protocols)
-transport.Protocols.SetHTTP1(true)
-web := http.DefaultTransport.(*http.Transport).Clone()
-web.Proxy = proxy
-cloudcode := &http.Client{Transport: &oauth2.Transport{Source: source, Base: transport}}
-webClient := &http.Client{Transport: web}
-auth := &http.Client{Transport: &oauth2.Transport{Source: source, Base: web}}
+func http1Transport(proxy Proxy) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = proxy
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+	transport.MaxIdleConnsPerHost = transport.MaxIdleConns
+	return transport
+}
+
+func http2Transport(proxy Proxy) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = proxy
+	return transport
+}
 ```
 
-`Protocols` 同时开 HTTP/1 与 HTTP/2，ClientHello 的 ALPN 为 `h2`、`http/1.1`，连接协商为 HTTP/2。token 的换取与刷新同样用克隆的 `http.DefaultTransport`，`Proxy` 设为账户代理（换取时为登录代理）。
+`http1Transport` 的 ClientHello 只带 `http/1.1`，连接为 HTTP/1.1；`http2Transport` 带 `h2`、`http/1.1`，连接协商为 HTTP/2。token 的换取与刷新用 `http1Transport`，`Proxy` 设为账户代理（换取时为登录代理）。
 
-**请求头：** cloudcode POST 只设置 `User-Agent` 与 `Content-Type: application/json`，GET 只设置 `User-Agent`。`net/http` 的 HTTP/2 编码先写 `:authority`、`:method`、`:path`、`:scheme`，再按 `Header` map 的遍历顺序写请求自带的头（每次请求随机，官方同样随机），然后是 `content-length`（正文长度已知时）与 Transport 追加的 `accept-encoding: gzip`，请求没有设置 `User-Agent` 时最后写默认值：
+**请求头：** cloudcode POST 只设置 `User-Agent` 与 `Content-Type: application/json`，GET 只设置 `User-Agent`。`net/http` 的 HTTP/1.1 编码先写请求行与 `Host`，再写 `User-Agent`、`Content-Length`（正文长度已知时）或 `Transfer-Encoding: chunked`，然后按名称排序写其余请求头，最后是 Transport 追加的 `Accept-Encoding: gzip`；HTTP/2 编码先写 `:authority`、`:method`、`:path`、`:scheme`，再按 `Header` map 的遍历顺序写请求头（每次请求随机，官方同样随机）：
 
 | 请求 | 请求头顺序 |
 | --- | --- |
-| cloudcode POST | `authorization`、`content-type`、`user-agent` 随机排列，`content-length`、`accept-encoding` |
-| `streamGenerateContent` | `authorization`、`content-type`、`user-agent` 随机排列，`accept-encoding` |
-| GET | `authorization`、`user-agent` 随机排列，`accept-encoding` |
-| token、clearcut | `content-type`、`content-length`、`accept-encoding`、`user-agent` |
+| cloudcode POST | `Host`、`User-Agent`、`Content-Length`、`Authorization`、`Content-Type`、`Accept-Encoding` |
+| `streamGenerateContent` | `Host`、`User-Agent`、`Transfer-Encoding: chunked`、`Authorization`、`Content-Type`、`Accept-Encoding` |
+| GET | `Host`、`User-Agent`、`Authorization`、`Accept-Encoding` |
+| token | `Host`、`User-Agent: Go-http-client/1.1`、`Content-Length`、`Content-Type`、`Accept-Encoding` |
+| clearcut（HTTP/2） | `content-type`、`content-length`、`accept-encoding`、`user-agent` |
 
-**正文：** `streamGenerateContent` 与标题请求的正文为 `io.NopCloser(bytes.NewReader(payload))`，`ContentLength` 为 0，请求头不带 `content-length`，正文以 DATA 帧发送，最后一帧带 `END_STREAM`。其余 POST 的正文为 `bytes.NewReader`，带 `content-length`。
+**正文：** `streamGenerateContent` 与标题请求的正文为 `io.NopCloser(bytes.NewReader(payload))`，`ContentLength` 为 0，以 `Transfer-Encoding: chunked` 分块发送。其余 POST 的正文为 `bytes.NewReader`，带 `Content-Length`。
 
 **连接：**
 
-| 项 | cloudcode Transport | 克隆的 `http.DefaultTransport` |
+| 项 | `http1Transport` | `http2Transport` |
 | --- | --- | --- |
 | 代理 | 账户代理选择函数，经 HTTP 代理时 `CONNECT` 带 `User-Agent: Go-http-client/1.1` | 同左 |
-| TCP keep-alive 探测 | 15 秒 | 30 秒 |
-| 空闲连接 | 客户端保持，直到服务端或代理关闭 | 90 秒后关闭 |
-| 连接复用 | 每主机一条 HTTP/2 连接，请求以流多路复用 | 同左 |
-| HTTP/2 SETTINGS | 同右 | `ENABLE_PUSH=0`、`INITIAL_WINDOW_SIZE=4194304`、`MAX_FRAME_SIZE=1048576`、`MAX_HEADER_LIST_SIZE=10485760`，随后 `WINDOW_UPDATE +1073741824` |
+| TCP keep-alive 探测 | 30 秒 | 同左 |
+| 空闲连接 | 90 秒后关闭 | 同左 |
+| 连接复用 | 每个请求独占一条连接，读完响应后放回空闲池；每主机最多保留 100 条空闲连接 | 每主机一条 HTTP/2 连接，请求以流多路复用 |
+| HTTP/2 SETTINGS | — | `ENABLE_PUSH=0`、`INITIAL_WINDOW_SIZE=4194304`、`MAX_FRAME_SIZE=1048576`、`MAX_HEADER_LIST_SIZE=10485760`，随后 `WINDOW_UPDATE +1073741824` |
+| 失败日志 | 请求没有拿到响应时 WARN 日志写出所处阶段（建立连接、写请求、等响应头、读响应）、连接是否复用、空闲时长与代理方案 | 同左 |
 
 ### HTTP 请求
 
 ```text
-:authority: daily-cloudcode-pa.googleapis.com
-:method: POST
-:path: /v1internal:streamGenerateContent?alt=sse
-:scheme: https
-content-type: application/json
-user-agent: antigravity/hub/2.31.2 (aidev_client; os_type=windows; arch=amd64; cl=1019359392)
-authorization: Bearer <ACCESS_TOKEN>
-accept-encoding: gzip
+POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1
+Host: daily-cloudcode-pa.googleapis.com
+User-Agent: antigravity/hub/2.33.0 (aidev_client; os_type=windows; arch=amd64; cl=1023160026)
+Transfer-Encoding: chunked
+Authorization: Bearer <ACCESS_TOKEN>
+Content-Type: application/json
+Accept-Encoding: gzip
 
-<DATA 帧：54033 字节信封 JSON，END_STREAM>
+<分块正文：54033 字节信封 JSON>
 
 ```
 
@@ -1351,11 +1335,12 @@ accept-encoding: gzip
 **会话 ID：** 服务为每个客户端会话保存一条会话记录（`RUNTIME_DIR/conversations/<cascade_id>.json`），新建时 `cascade_id` 与 `trajectory_id` 为随机 UUIDv4，与官方客户端相同。请求按以下规则归入会话：
 
 1. 分区：API key 与客户端会话标识（Anthropic `metadata.user_id`，OpenAI 的 `session_id`、`conversation_id` 请求头、`prompt_cache_key` 与 `user`）中首个去掉首尾空白后非空者以 NUL 字符相连；没有客户端标识时为 API key 加 NUL 字符。Anthropic `metadata.user_id` 是带 `session_id` 的 JSON 时取 `session_id`，以 `_session_<十六进制与连字符>` 结尾时取该段，否则取原值；Gemini 与 Interactions 没有客户端标识
-2. 摘要链：第 0 项为分区、客户端系统提示与工具声明的 SHA-256，第 i 项为第 i-1 项与第 i 条规范消息 JSON 的 SHA-256；公式与 JSON 编码见 [开发文档的运行目录](development.md#运行目录)
+2. 摘要链：第 0 项为分区的 SHA-256，第 i 项为第 i-1 项与第 i 条规范消息 JSON 的 SHA-256；客户端系统提示与工具声明不参与归属，会话中途变化时仍是原会话，变化照实写入上游请求；公式与 JSON 编码见 [开发文档的运行目录](development.md#运行目录)
 3. 匹配：会话记录保存上一次请求的链位置 L 与该处摘要；本次链的第 L 项等于该摘要时为同一会话，本次不多于一条消息且会话已成功生成过时除外。取 L 最大者；并列时先取上一轮回答指纹与本次该位置的 assistant 消息一致者，再取最近使用者。回答指纹的算法同见运行目录
    - 因此请求原样重发时匹配同一会话；只有一条消息的请求成功后原样重发时新建会话
 4. 本次多于一条消息时另按回退匹配：会话记录还保存链位置 L 之前的全部链摘要，取从第 1 条消息起与本次相同部分最长的会话（并列时取最近使用者），相同部分比第 3 步匹配到的 L 更长时改用该会话，退回到相同部分的末尾继续使用，之前的消息沿用原来的时间；客户端回退、改写或替换较早的消息后仍是原会话
-5. 仍没有时新建会话
+5. 仍没有时，取同一分区中保存过本次 assistant 消息里某个思考签名的会话（多个时取最近使用者），沿用其 ID，各消息按当前时刻计时；客户端把较早历史压缩成摘要、保留了近几轮回答时仍是原会话
+6. 仍没有时新建会话
 
 序号为 `E` 的用户请求的执行 ID 为 `uuidOf("execution:" + cascade_id + ":" + E)`，`E` 以十进制写入，首个用户请求为 `:0`；`last_execution_id` 取序号 `E-1` 的执行 ID。`uuidOf(s)` 取 `SHA-256(s)` 前 16 字节，按 UUIDv4 设置版本与变体位后写成 `8-4-4-4-12` 形式。`requestId` 的时间段每次请求取当前毫秒。会话记录空闲 24 小时后删除。
 
@@ -1689,38 +1674,23 @@ Shelves, each as "name: description", followed by example plugins as "- name (id
 - 工具只用客户端声明，每个声明占 `tools[]` 一项
 - 会话 UUID 同时用于 `labels.cascade_id`、`labels.root_cascade_id`、`requestId` 的会话段与 `user_information` 的 Conversation ID
 
-**被拒绝的句子：** 上游对 systemInstruction 中含下表文字的请求在 1 秒内返回不带 `reason` 与 `RetryInfo` 的 `429 RESOURCE_EXHAUSTED`，与模型、档位和文字在 S 中的位置无关；匹配不区分大小写，文字中的空格可对应任意空白序列。服务在发送前删去 C 中含这些文字的整句，其余原文保持不变：
+**被拒绝的句子：** 上游对 systemInstruction 中含某些客户端身份句与说明文字的请求在 1 秒内返回不带 `reason` 与 `RetryInfo` 的 `429 RESOURCE_EXHAUSTED`，与模型、档位和文字在 S 中的位置无关；user 轮中只有 Codex 的身份句同样被拒绝。这些文字维护在正式仓库的规则列表 `rules/rejected.txt` 中，服务在发送前删去 C 与 user 轮中含规则所匹配文字的整句，其余原文保持不变；同样的文字出现在历史中的模型回答、工具声明与工具结果时照常回答，保持原文。
 
-| 文字 | 所在客户端系统提示 |
+规则列表的语法：
+
+| 行 | 含义 |
 | --- | --- |
-| `RFC 2119 keywords` | omp |
-| `Read xd://<tool> for full docs + JSON schema before first use` | omp |
-| `You are omp's trusted coding assistant` | omp |
-| `You are Claude Code,` | Claude Code |
-| `Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context` | Claude Code、Mimo |
-| `was pasted into the message by the user from somewhere else and may contain instructions the user did not write` | Claude Code |
-| `You are a coding agent running in the Codex CLI` | Codex |
-| `You are OpenCode` | OpenCode |
-| `You are a coding assistant running inside pi` | pi |
-| `inside pi, a coding agent harness` | pi |
-| `You are a personal assistant running inside OpenClaw` | OpenClaw |
-| `You are Hermes Agent` | Hermes |
-| `Be direct: match the length of your reply to the weight of the ask` | Hermes |
-| `the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference` | Hermes |
-| `Hermes delivers their message as a standalone user message right after the latest tool results` | Hermes |
-| `<!-- End Hermes runtime environment -->` | Hermes |
-| `The browser provides no implicit DOM, route, or screenshot context` | DeepSeek Harness |
+| `! …` | 注释；第一份列表中的 `! Version: <整数>` 为列表版本 |
+| `[system]`、`[user]` | 之后的规则匹配 C 或 user 轮，节标记之前的规则属于 `[system]` |
+| `/…/` | Go 正则 |
+| 其他非空行 | 短语，不区分大小写，空格可对应任意空白序列 |
 
-带归属声明的身份句同样整句删去。一句身份句需同时满足：
+规则的来源与生效：
 
-- 位于行首（可有空格或制表符缩进），以 `You are` 或 `You're` 开头，不区分大小写
-- 身份短语以 agent、assistant 或 AI 结尾，前面最多 8 个词
-- 身份短语之后 8 个字符内出现归属声明：`created`、`built`、`made`、`developed`、`designed`、`trained`、`powered`、`maintained`、`published`、`released`、`provided` 加 `by`、`on` 或 `upon`，或 `based on`
-- 归属对象 1–80 个字符，到句号为止，句号后是空格、制表符或行尾
-
-```text
-(?im)^[ \t]*(?:you are|you're)\s+(?:an?\s+)?(?:[\w'-]+[\s,]+){0,8}(?:agent|assistant|ai)\b[^.!?\n<>]{0,8}?\b(?:(?:created|built|made|developed|designed|trained|powered|maintained|published|released|provided)\s+(?:by|on|upon)|based\s+on)\s+[^\n<>]{1,80}?\.(?:[ \t]|$)
-```
+- 发布包内置构建时的 `rules/rejected.txt`；服务启动时与之后每小时，经 `PROXY` 的第一个代理（为空时跟随系统代理）以 GitHub contents 接口读取 main 分支的同一文件，带上次的 `ETag`，列表没变化时 GitHub 返回 304
+- 读到的列表能解析且版本不低于当前列表时保存为 `RUNTIME_DIR/rejected.txt` 并替换当前列表；启动时内置列表与已保存列表取版本较高者；读取失败时保留当前列表，失败原因在管理端显示
+- `REJECTED_RULES` 为自定义规则，语法同上，与列表合并使用；保存设置后下一次请求生效
+- 管理端 `GET /api/prompt/rejected` 返回列表版本、规则条数、自定义规则条数、来源（`builtin` 内置或 `remote` 已下载）、上次检查与下载时刻、上次检查的错误和列表原文；`POST /api/prompt/rejected/check` 立即检查一次并返回检查后的状态
 
 一句从同一行中上一个句末标点（`.`、`!`、`?` 后接空白）之后、或行首的缩进与列表符号之后开始，到其后第一个后接空白的句末标点为止，连同其后的空格一起删去；同一行没有句末标点时到行尾。删去后只剩缩进与列表符号的行连同换行一起删去：
 
@@ -1728,8 +1698,6 @@ Shelves, each as "name: description", followed by example plugins as "- name (id
 删去前  You are Codex, a coding agent based on GPT-5. You and the user share the same workspace.
 删去后  You and the user share the same workspace.
 ```
-
-user 轮中只有 Codex 的身份句同样被拒绝：user 轮文本中含 `You are Codex, a coding agent based on GPT-5` 或 `You are Codex, an agent based on GPT-5` 的整句按同一规则删去；其余文字出现在 user 轮、历史中的模型回答、工具声明与工具结果时照常回答，保持原文。
 
 **模板：** 每个系统提示档位由 system 与 user 两个 Go `text/template` 模板实现，system 模板输出 S，user 模板输出每个含文本的 user 轮，user 模板为空时 user 轮按原文发送。内置三档的 system 模板由官方段的原文按官方顺序以 `\n` 相连，再接 `{{if .Client}}\n\n{{.Client}}{{end}}`：`full` 取全部 11 段，`medium` 取 `identity`、`guidelines`、`communication_style`，`aggressive` 取 `identity`。官方段的原文取自 `internal/prompt/official.txt`，各段以 `<段名>` 开头、`</段名>` 结尾；`featured_plugins` 段连同它之前的换行包在 `{{if .FeaturedPlugins}}…{{end}}` 中，没有推荐插件时不输出。内置档的 user 模板为 `internal/prompt/templates/` 中的 `full.user.tmpl` 与 `medium.user.tmpl`，`aggressive` 的 user 模板为空，模板文件末尾不带换行。`custom` 的 system 模板与 user 模板取 `SYSTEM_PROMPT_TEMPLATE` 与 `SYSTEM_PROMPT_USER_TEMPLATE` 的原文，默认值为 `medium` 的两个模板；保存设置与启动时解析模板并以各字段都有值的数据试渲染，出错时该设置无效；请求中模板执行出错时返回 500，`message` 为 `系统提示模板: ` 加模板错误。
 
@@ -1866,7 +1834,7 @@ You are a conversation title generator. The message provided is a transcript of 
 
 ```text
 GET https://www.gstatic.com/antigravity/plugins/marketplace.json
-user-agent: antigravity/hub/2.31.2 (aidev_client; os_type=windows; arch=amd64; cl=1019359392)
+user-agent: antigravity/hub/2.33.0 (aidev_client; os_type=windows; arch=amd64; cl=1023160026)
 cache-control: no-cache
 if-modified-since: <上次响应的 Last-Modified>
 accept-encoding: gzip
@@ -1898,7 +1866,7 @@ accept-encoding: gzip
 :path: /v1internal:generateContent
 :scheme: https
 authorization: Bearer <ACCESS_TOKEN>
-user-agent: antigravity/hub/2.31.2 (aidev_client; os_type=windows; arch=amd64; cl=1019359392)
+user-agent: antigravity/hub/2.33.0 (aidev_client; os_type=windows; arch=amd64; cl=1023160026)
 content-type: application/json
 content-length: <正文字节数>
 accept-encoding: gzip
@@ -1959,9 +1927,54 @@ accept-encoding: gzip
 
 代理选择函数依次取账户代理、代理池分配的 `PROXY` 项与系统代理（见开发文档“配置”）；`PROXY` 与账户代理只接受 `http`、`https`、`socks5`，`socks5h` 只会来自系统代理。
 
-建立流、收发失败或结束状态不为 0 时，错误为 `aicode BidiGenerateContent: <gRPC 错误>`，客户端取消时为取消原因。这类错误按 [开发文档的失败与换号](development.md#失败与换号) 中“连接错误”处理：客户端未取消时检测代理池，并换账户重试。请求账本中该次上游尝试的地址记为 `https://aicode.googleapis.com/google.gca.aicode.v1alpha.PredictionService/BidiGenerateContent`，上游响应为各服务端消息的 Base64 以换行相连。
+建立流、收发失败或结束状态不为 0 时，错误为 `aicode BidiGenerateContent: <错误>`，客户端取消时为取消原因。上游以 gRPC 状态结束时，状态换成与 cloudcode 错误同形的上游错误：HTTP 状态取 `google.rpc.Code` 的标准映射（`UNAUTHENTICATED` 401、`PERMISSION_DENIED` 403、`RESOURCE_EXHAUSTED` 429、`INVALID_ARGUMENT` 400、`UNAVAILABLE` 503 等），正文为 `{"error":{"code","message","status","details"}}`，`details` 保留 ErrorInfo 的 `reason`、`domain` 与 `metadata`，按 [开发文档的失败与换号](development.md#失败与换号) 中同一状态的上游错误处理（401 刷新 token 后重试、违反服务条款的 403 停用账户等）；连接失败按“连接错误”处理：客户端未取消时检测代理池，并换账户重试。请求账本中该次上游尝试的地址记为 `https://aicode.googleapis.com/google.gca.aicode.v1alpha.PredictionService/BidiGenerateContent`，上游响应为各服务端消息的 Base64 以换行相连。
 
 服务把 WAV（8、16、24、32 位整数与 32 位浮点）、MP3、FLAC 与带 `rate` 参数的 `audio/l16` 解码为单声道，以 Speex 重采样器换成 16 kHz。转写条目在账户的公开目录中（见「`fetchAvailableModels` 顶层字段」），属于 `gemini` 额度组；转写请求按与生成相同的规则选择账户，按「会话 ID」的规则归入会话，不发 `writeTrajectoryAcls` 与标题请求，不记录会话事件。转写的用量为估算：输入按音频时长每秒 25 token（Gemini API 定价页估算 Gemini 3.5 Transcribe 费用所用的换算），输出为转写正文的本地计数。
+
+### 语音模式双向流
+
+官方语音模式由 language_server 经 grpc-go 向 `aicode.googleapis.com:443` 打开两条 HTTP/2 双向流，各用一条连接：先打开识别流，再打开语音流。服务的语音会话按同一顺序与字节打开这两条流，消息定义取自 language_server 内嵌的描述符（`google.gca.aicode.v1main`、`exa.remote_agent_proxy_pb`、`exa.jetski_cortex_pb`）。
+
+| 流 | 方法 | User-Agent（代理 `CONNECT` 相同） |
+| --- | --- | --- |
+| 识别流 | `/google.gca.aicode.v1alpha.PredictionService/BidiGenerateContent` | `grpc-go/1.86.0-dev` |
+| 语音流 | `/google.gca.aicode.v1alpha.JetskiRemoteAgentProxyService/StreamVoice` | 设备档案的客户端 User-Agent 加空格与 `grpc-go/1.86.0-dev` |
+
+识别流的 setup 为 `1 { 1: "models/<转写条目 ID>", 5 { 6 { 1: false, 4: 1, 5: 500 } }, 8 {} }`：自动语音活动检测、语音结束灵敏度高、静默 500 ms、输入转写；之后只发音频块（与语音转写相同的 1280 字节帧）。上游每条识别流约 300 秒以 `grpc-status: 14` 结束，服务随即在同一账户上重新打开。
+
+语音流的客户端消息为 `StreamVoiceRequest { 1: VoiceClientMessage }`：
+
+| 消息 | 字段 |
+| --- | --- |
+| setup | `1 { 1: <会话 ID>, 2: <音色>, 3: 16000, 4: <计划模型枚举>, 6: true, 13 { 1: 3, 2: 1, 5: <语言> } }`；语言提示只在客户端给出语言时发送 |
+| settings_update | `3 { 1: <计划模型枚举> }`，紧接 setup 发送 |
+| 麦克风音频 | `2: <1280 字节 16 kHz PCM>`，每 40 ms 一帧，同一帧也发往识别流 |
+| 用户转写 | `5 { 1: <文本>, 2: <是否识别结束> }`：识别流的临时转写（`2 { 11 {} }`）为未结束，输入转写（`2 { 6 {} }`）为结束 |
+| 调用回复 | `4 { 1: <调用 ID>, 2: <响应> }`，以 `4 { 1: <调用 ID>, 3 {} }` 结束该调用 |
+
+计划模型枚举为目录条目 `model` 在 language_server `exa.codeium_common_pb.Model` 中的值。音色为 Fola（默认）、Arlo、Cleo、Finn、Gero、Lora、Neno、Olin、Tari。
+
+语音流的服务端消息为 `StreamVoiceResponse { 1: VoiceServerMessage }`：
+
+| 字段 | 内容 |
+| --- | --- |
+| `1` | 语音，24 kHz 单声道 16 位小端 PCM |
+| `2` | 会话状态：`1` 启动中、`2` 聆听中、`3` 重试中、`4` 停止中、`5` 失败（`3` 为说明） |
+| `3` | 对 language_server 的调用：`1` 调用 ID，`2 { 1: <方法>, 2: <请求> }` 开始，`3 {}` 取消 |
+| `4` | 事件名与属性 |
+| `7` | 语音的转写片段与回合序号 |
+| `8` | 用户语音的识别结果（`3` 为临时） |
+| `9` | 用户插话，客户端停止播放已收到的语音 |
+| `10` | 转写片段在语音中的时刻 |
+
+| 调用方法 | 服务的回复 |
+| --- | --- |
+| `1` 订阅会话状态 | 回复空闲状态 `1 { 2: <轨迹 ID>, 3: 1, 7 { 1 {} } }`，调用保持打开，之后的状态都经它推送 |
+| `2` 交给智能体 | 先回复空响应并结束；请求的 `2 { 1: <文字> }` 为语音说明与对话记录，`14 { 1: <MIME>, 2: <数据> }` 为语音片段（`audio/wav`）。服务以会话模型回答后依次推送运行 `3: 2`、回复步骤生成中 `7 { 1 { 1: [<下标>], 2 { 4: 8 }, 3: <下标+1> } }`、回复步骤完成 `2 { 4: 3, 20 { 1: <回复文字> } }` 与空闲 `3: 1, 6 { 1: 4 }`，语音流朗读回复文字 |
+| `3` 取消智能体回合 | 停止进行中的回答，回复空响应并结束 |
+| 其他（`4` 用户交互、`5` 读取模型配置） | 回复空响应并结束 |
+
+只发用户转写不发麦克风音频时，语音流约 10 秒后以 `SETUP_STALLED` 失败。
 
 ### Tab 补全请求
 
@@ -2094,7 +2107,7 @@ The user has mentioned some items in the form @[ITEM]. Here is extra information
 
 ### SSE 帧
 
-响应头为 `content-type: text/event-stream`、`content-disposition: attachment`，正文以 HTTP/2 DATA 帧送达。每个事件为一行 `data:` 加一个空行：
+响应头为 `content-type: text/event-stream`、`content-disposition: attachment`，正文以 HTTP/1.1 分块送达。每个事件为一行 `data:` 加一个空行：
 
 ```text
 data: {"response": {RESPONSE},"traceId": "<16 位十六进制>","metadata": {}}
@@ -2181,6 +2194,8 @@ data: {"response": {"usageMetadata": {"promptTokenCount": 10177,"candidatesToken
 
 Gemini 4 的 Carbon、Argon 与 Hydrogen 在一个流中最多输出 65536 个思考与正文 token。`maxOutputTokens` 大于这个数而输出还没写完时，这一跳的最后一个事件为空文本与 `thoughtSignature` 的 part、`finishReason: CONTINUATION` 和 candidate 上的 `continuationToken`（约 14 万字符）。服务以同一信封在 `request.continuationToken` 中带上该令牌再发一跳，新的一跳从停下处接着输出，直到以其他结束原因结束；`maxOutputTokens` 是各跳合计的上限。各跳事件依次转发给客户端，以 `CONTINUATION` 结束的一跳不发出自己的 usage，后续各跳的 usage 加上此前各跳的合计，每一跳都重新计入输入。
 
+续接出的一跳中几乎每个帧的 candidate 都带新的 `continuationToken`，第一跳只有结束帧带。一跳在流中出现过令牌之后没有结束原因就断开（读取错误或流提前结束）时，服务以最近一次的令牌按同一信封重拨，上游从该处接着输出，同一跳最多重拨 3 次；没有出现过令牌时照常以流中断结束。
+
 ### 规范事件
 
 `DecodeStream` 逐行读取 `data: ` 行，按 part 发出规范事件：
@@ -2194,6 +2209,7 @@ Gemini 4 的 Carbon、Argon 与 Hydrogen 在一个流中最多输出 65536 个�
 | 空 `text` 带 `thoughtSignature` | `thought_signature` | `ThoughtSignature` |
 | 空 `text`、只有 `role` 的 content | — | — |
 
+- 结束帧标记：candidate 带 `finishReason` 或 `finishMessage` 时，它的各 part 发出的事件 `Final` 为真
 - 逐帧用量：所在 SSE 帧带 `usageMetadata` 时，该帧发出的 `text`、`reasoning`、`tool_call`、`media` 与 `thought_signature` 事件的 `Usage` 为截至该帧的累计用量
 - 用量的使用：Anthropic 流开头的输入用量取首个事件的 `Usage`；Gemini 族的输出上限截断与客户端中途断开时的账本用量按事件携带的累计用量计算
 - 结束：流读完后依次发出 `usage`（取最后一个 `usageMetadata`，流中没有时省略）与 `finish`；`finishReason` 为内容策略类原因（`SAFETY`、`RECITATION`、`BLOCKLIST`、`PROHIBITED_CONTENT`、`SPII`、`IMAGE_SAFETY`、`IMAGE_PROHIBITED_CONTENT`、`IMAGE_RECITATION`）或出现过滤提示时，此前没有函数调用则 `usage` 之后发出 `Err` 为 `ContentPolicyError{Reason, Message}` 的 `error` 事件、不发 `finish`，此前已发出函数调用则发出 `FinishReason` 为 `STOP`、`Err` 为该 `ContentPolicyError` 的 `finish`（见过滤提示与内容策略）；流在没有 `finishReason` 时结束或读取中断，此前已发出函数调用则发出 `FinishReason` 为 `STOP`、`Err` 为 `ErrIncompleteStream` 或读取错误的 `finish`，否则发出 `error` 事件
@@ -2305,6 +2321,14 @@ data: {"response": {"candidates": [{"content": {"parts": [{"text": "This request
 - 此前没有函数调用：发出 `ContentPolicyError`，消息为 `上游因内容策略结束生成: <原因>`，有 `finishMessage` 时接 `: <finishMessage>`；HTTP 状态为 502，不冷却账户、不换账户，由客户端按自己的重试策略重新请求；此前已发出的正文照常保留，流以协议错误事件结束
 - 此前已发出完整的函数调用：这一轮以 `STOP` 正常结束，各协议按函数调用结束（Chat `tool_calls`、Anthropic `tool_use`、Responses `completed`、Gemini `STOP`），不输出 `finishMessage`；被忽略的原因与原文写入服务日志的警告与该次上游尝试的 `Error`
 
+受限账户的每个请求返回 HTTP 200，流中只有一个同形的通知帧，之后没有其他帧：
+
+```text
+data: {"response": {"candidates": [{"content": {"parts": [{"text": "Request is blocked due to the account restrictions for Prohibited Use Policy (PUP) violations. If you think this was an error, [send feedback](https://aistudio.google.com/docs/troubleshooting)."}]}}]}}
+```
+
+`DecodeStream` 把不带 `role`、唯一 part 是以 `Request is blocked due to the account restrictions` 开头的文本的 candidate 记为 `AccountRestrictedError`，通知原文为 `Message`，不作为正文输出；服务停用该账户、换账户重试，没有其他账户时返回 403。
+
 上游按输入本身拒绝请求时，流中的帧不带 `candidates`，带 `promptFeedback` 与 `usageMetadata`：
 
 ```text
@@ -2406,7 +2430,7 @@ Error()  upstream 403 PERMISSION_DENIED: Consumer 'projects/***' (project number
 
 需要验证时，管理端显示的验证链接取正文中的 `validation_url`。
 
-服务按状态与 ErrorInfo `reason` 处理账户并决定是否换账户，规则见 [开发文档的失败与换号](development.md#失败与换号)。流式请求在客户端收到首个事件之前、非流式请求在生成结束之前出现的错误可以换账户重新生成；流式响应头在首个用量以外的事件到达或开始生成满 10 秒后写出，其间包括选账户、换账户与等待上游首个事件，此前出现的错误以 HTTP 错误状态返回；客户端已收到事件后出现的错误只处理账户，以 `error` 事件结束输出。
+服务按状态与 ErrorInfo `reason` 处理账户并决定是否换账户，规则见 [开发文档的失败与换号](development.md#失败与换号)。流式请求在客户端收到首个事件之前、非流式请求在生成结束之前出现的错误可以换账户重新生成；流式响应头在首个用量以外的事件到达或开始生成满 10 秒后写出，其间包括选账户、换账户与等待上游首个事件，此前出现的错误以 HTTP 错误状态返回；客户端已收到事件后出现的错误只处理账户，以 `error` 事件结束输出；Gemini 4 的续写段在流中出现过续接令牌之后中断时，以最近一次的令牌重拨，见「长解码续接」。
 
 ## 6. API 投影
 
@@ -2818,7 +2842,7 @@ computer_*
 | 签名 | `extra_content.google.thought_signature` | reasoning 项的 `encrypted_content` | thinking 块 `signature` | part `thoughtSignature` |
 | 图片 | `![image](data:<mime>;base64,…)` 独占一行 | `image_generation_call`，`result` 为 base64 | 独立 `text` 块 | `inlineData` 与 `thoughtSignature` |
 | 停止序列结束 | `stop` | `completed` | `stop_sequence` 与命中序列 | `STOP` |
-| 保活（流中 10 秒没有事件时） | `: ping` 注释 | 重发序号为 1 的 `response.in_progress` 事件 | `ping` 事件 | `alt=sse` 时空行 |
+| 保活（流中 10 秒没有事件时） | `: ping` 注释 | 重发序号为 1 的 `response.in_progress` 事件 | `ping` 事件 | `alt=sse` 时空帧 `\n\n` |
 | 流式格式 | SSE | SSE | SSE | `alt=sse` 时 SSE，否则为逐个对象写出的 JSON 数组 |
 | 流开头输入用量 | — | — | 首个上游事件的用量 | — |
 | 模型版本 | — | — | — | 每块取上游 `modelVersion` |
@@ -2833,9 +2857,12 @@ computer_*
 | 搜索来源 | `message.annotations` 的 `url_citation` | `web_search_call` 项与 `output_text` 的 `url_citation` | `server_tool_use`、`web_search_tool_result` 块与 text 块 `citations` | candidate `groundingMetadata` |
 
 - Anthropic thinking 块始终带 `signature` 字段，思考上的签名与紧随其后的函数调用签名并入该块，没有时为空串；没有进行中的 thinking 块时，独立签名与函数调用签名在请求思考时输出为 `thinking` 为空串、带该签名的 thinking 块，与官方不显示思考时同形；未请求思考时不输出思考类块
+- 已向客户端写出思考后重新生成或改用另一方时，Anthropic 流结束正在进行的块，新尝试的思考与签名另起一个 thinking 块，此前的块只带此前尝试自己的签名（没有时为空串）
 - Claude 族错误投影到 Anthropic 协议时取上游内嵌 Anthropic 错误的类型与消息，投影到其他协议时取其消息
 - 账户全部冷却与上游给出恢复时刻的 429 带 `Retry-After` 秒数（向上取整）：冷却取最早恢复时刻，上游错误在该模型的账户都已冷却时取最早恢复时刻，否则依次取 RetryInfo `retryDelay`、ErrorInfo `quotaResetDelay` 与 `quotaResetTimeStamp`；Gemini 的 RetryInfo `retryDelay` 为同一秒数
 - 可重试的 OpenAI 与 Anthropic 错误消息末尾另起一句 `Please try again in <秒数>s.`，秒数与 `Retry-After` 相同；响应头已写出后的错误事件（含非流式保活已先返回 200 的请求）同样带这句，Gemini 流内错误对象带 RetryInfo
+- 公开错误的消息为英文，其中的邮箱地址写为 `[account]`；指定的账户或全部账户不可调度时为 `No account can serve this request (accounts <状态>: <账户数>, …)`，状态为 `disabled`、`verification required`、`unavailable`、`initializing`；完整原因写入管理端的请求记录
+- 过滤提示与内容策略类结束的消息在上游原因之后接 `. Blocked <秒数>s after the request started; output before the block: <内容>`，内容为此前已输出的 `thinking`、`text`、`function calls`、`media`（隐藏的思考不计），以 `, ` 相连，没有时为 `none`
 - Chat、Completions、Responses 与 Anthropic 的 5xx 错误与流内错误的消息以 HTTP 状态的英文说明开头：503 为 `Service unavailable: `，504 为 `Request timed out: `，529 为 `Overloaded: `，其余 5xx 与流开始后的错误为 `Internal server error: `，之后接原消息（原消息已以该说明开头时不重复）
 - `REQUEST_TIMEOUT` 到期时首事件前返回 504，流开始后以协议错误事件结束；Responses `response.failed` 的 `error.code` 为 `rate_limit_exceeded` 或 `server_error`，`output` 为已写出的输出项
 - 搜索来源取上游 candidate 的 `groundingMetadata`：
@@ -2868,7 +2895,7 @@ computer_*
 | --- | --- |
 | OpenAI（Chat、Completions、Responses、Images、Audio、Files） | `{"error":{"message","type","param":null,"code"}}` |
 | Anthropic（`/v1/messages*` 或带 `Anthropic-Version`） | `{"type":"error","error":{"type","message"}}` |
-| Gemini（`/v1beta/*`、`/upload/*`、`/v1/interactions*`） | `{"error":{"code","message","status"}}`，有恢复时刻时 `details` 带 RetryInfo |
+| Gemini（`/v1beta/*`、`/upload/*`、`/v1/interactions*` 与 `/v1` 下的 Gemini 接口） | `{"error":{"code","message","status"}}`，有恢复时刻时 `details` 带 RetryInfo |
 
 | 状态与来源 | OpenAI `code` | OpenAI `type` | Anthropic `type` | Gemini `status` |
 | --- | --- | --- | --- | --- |
@@ -2885,7 +2912,7 @@ computer_*
 | 529 | `upstream_error` | `server_error` | `overloaded_error` | `INTERNAL` |
 
 - 上游错误投影到 Gemini 时 `status` 取上游正文的 `status`；投影到 Anthropic 时，Claude 族上游错误取内嵌 Anthropic 错误的类型
-- API key 错误与未知路径的错误体按请求选择协议：路径以 `/v1beta/`、`/upload/` 或 `/v1/interactions` 开头为 Gemini，路径以 `/v1/messages` 开头或带 `Anthropic-Version` 头为 Anthropic，其余为 OpenAI；API key 校验失败与 `API_KEYS` 为空时浏览器来源检查的拒绝都按此写出。OpenAI 与 Anthropic 为 401，消息为 `Invalid API Key`；Gemini 与官方 API 相同，请求带有任一 key 来源时为 400 `INVALID_ARGUMENT`，`details` 依次为 ErrorInfo（`API_KEY_INVALID`）与 LocalizedMessage，没有 key 时为 403 `PERMISSION_DENIED`，Interactions 与不带 `alt=sse` 的 `streamGenerateContent` 外层为数组 `[{"error":...}]`：
+- API key 错误与未知路径的错误体按请求选择协议：路径以 `/v1beta/`、`/upload/` 或 `/v1/interactions` 开头、`POST /v1/models/*`、`/v1/cachedContents*`，以及带 `x-goog-api-key` 请求头或 `key` 查询参数且不带 `Authorization` 的 `/v1/models*` 与 `/v1/files*` 为 Gemini，路径以 `/v1/messages` 开头或带 `Anthropic-Version` 头为 Anthropic，其余为 OpenAI；API key 校验失败与 `API_KEYS` 为空时浏览器来源检查的拒绝都按此写出。OpenAI 与 Anthropic 为 401，消息为 `Invalid API Key`；Gemini 与官方 API 相同，请求带有任一 key 来源时为 400 `INVALID_ARGUMENT`，`details` 依次为 ErrorInfo（`API_KEY_INVALID`）与 LocalizedMessage，没有 key 时为 403 `PERMISSION_DENIED`，Interactions 与不带 `alt=sse` 的 `streamGenerateContent` 外层为数组 `[{"error":...}]`：
 
 ```text
 OpenAI     {"error":{"message":"Invalid API Key","type":"invalid_request_error","param":null,"code":"invalid_api_key"}}
@@ -3011,7 +3038,7 @@ Gemini 缺 key    {"error":{"code":403,"message":"Method doesn't allow unregiste
 - 搜索结果为 `{"type":"web_search_result","url","title","encrypted_content":"","page_age":null}`，引用为 `{"type":"web_search_result_location","url","title","encrypted_index":"","cited_text"}`；`server_tool_use` 的 `id` 为消息 ID 去掉 `msg_` 后加前缀 `srvtoolu_`
 - Gemini 对象：`{"candidates":[{"index","content":{"role":"model","parts"},"finishReason","groundingMetadata"}],"modelVersion","responseId","usageMetadata"}`；没有输出时省略 `content`；上游 candidate 带 `finishMessage` 时在 `finishReason` 旁原样写出，流式写在最后一个对象；`usageMetadata` 为 `promptTokenCount`、`candidatesTokenCount`、`thoughtsTokenCount`、`totalTokenCount` 与 `cachedContentTokenCount`，与官方一样省略值为 0 的计数；`generationConfig.responseFormat` 的 `image.delivery` 为 `URI` 时，输出图片存入 Files API，part 为 `fileData{mimeType,fileUri}`
 - Gemini `finishReason`：上游值原样转大写写出（`STOP`、`MAX_TOKENS`、`SAFETY`、`RECITATION`、`LANGUAGE`、`OTHER`、`BLOCKLIST`、`PROHIBITED_CONTENT`、`SPII`、`MALFORMED_FUNCTION_CALL`、`MALFORMED_RESPONSE`、`IMAGE_SAFETY`、`UNEXPECTED_TOOL_CALL`、`TOO_MANY_TOOL_CALLS`、`IMAGE_PROHIBITED_CONTENT`、`IMAGE_OTHER`、`NO_IMAGE`、`IMAGE_RECITATION`、`FINISH_REASON_UNSPECIFIED`），停止序列为 `STOP`，未知值为 `OTHER`
-- Gemini 流式：每个增量一个对象 `{"responseId","modelVersion","candidates":[{"index","content":{"role":"model","parts":[一个 part]}}],"usageMetadata"}`；单个候选时各对象带所在上游事件的累计用量，最后一个内容对象同时带 `finishReason`、`groundingMetadata` 与最终用量；多个候选时最后一个对象的每个候选为空 `parts`、`finishReason` 与 `groundingMetadata`，并带各候选用量之和；不带 `alt=sse` 时响应头带 `X-Accel-Buffering: no` 并立即写出。不带 `alt=sse` 时响应为 `application/json; charset=UTF-8`，以 `[` 开始，对象之间为 `\r\n,\r\n`，以 `\r\n]` 结束，没有对象时为 `[]`；`alt=sse` 时流中错误为一行不带 `data: ` 前缀的 `{"error":{"code","message","status"}}` 并以换行结束，不带 `alt=sse` 时为数组中的一个对象
+- Gemini 流式：每个增量一个对象 `{"responseId","modelVersion","candidates":[{"index","content":{"role":"model","parts":[一个 part]}}],"usageMetadata"}`；单个候选时各对象带所在上游事件的累计用量，内容对象到达即写出，来自带 `finishReason` 的上游 candidate 的最后一个内容对象同时带 `finishReason`、`groundingMetadata` 与最终用量，上游结束帧没有内容时另写一个空 `parts` 的结束对象；多个候选时最后一个对象的每个候选为空 `parts`、`finishReason` 与 `groundingMetadata`，并带各候选用量之和；不带 `alt=sse` 时响应头带 `X-Accel-Buffering: no` 并立即写出。不带 `alt=sse` 时响应为 `application/json; charset=UTF-8`，以 `[` 开始，对象之间为 `\r\n,\r\n`，以 `\r\n]` 结束，没有对象时为 `[]`；`alt=sse` 时流中错误为一行不带 `data: ` 前缀的 `{"error":{"code","message","status"}}` 并以换行结束，不带 `alt=sse` 时为数组中的一个对象
 
 一次回答 `OK` 的流式输出如下，JSON 对象的键按官方字段顺序写出，ID 与时间随请求变化。Chat：
 
@@ -3119,7 +3146,8 @@ data: {"candidates":[{"content":{"parts":[{"text":"OK"}],"role":"model"},"finish
 | PDF | 每页 516 | 每个文件 88 加每页 1546 |
 
 - 图片尺寸按 PNG、JPEG、GIF、WebP 文件头读取；PDF 页数为 `/Type /Page` 页对象的个数，没有找到时按 1 页
-- 前缀校准（Gemini 与 Claude 族）：会话记录保存最近一次成功生成的模型、规范消息条数 L、该处链摘要、上游 contents 条数 C 与上游 `promptTokenCount` T。计数请求的摘要链在第 L 项与之相同且模型相同时（多个会话符合时取 L 最大者），结果为 T 加信封中第 C 条之后 contents 的计数；否则计整个信封。GPT-OSS 族始终计整个信封
+- 前缀校准（Gemini 与 Claude 族）：会话记录保存最近一次成功生成的模型、规范消息条数 L、该处链摘要、上游 contents 条数 C 与上游 `promptTokenCount` T。计数请求的摘要链在第 L 项与之相同、系统提示与工具声明相同且模型相同时（多个会话符合时取 L 最大者），结果为 T 加信封中第 C 条之后 contents 的计数；否则计整个信封。GPT-OSS 族始终计整个信封
+- 思考签名（Gemini 族）：上游把上一次回答的思考签名按该次 `thoughtsTokenCount` 加 2 计入下一次输入，上游 `countTokens` 不计签名。前缀校准时会话记录另存上一次的 `thoughtsTokenCount` R，第 C 条为带签名的 model 轮时，该签名按 R + 2 计；其余签名按 (字符数 − 150) / 5.5 取整估算，Claude 与 GPT-OSS 族不计签名
 - 计数请求与生成请求一样解析模型，没有就绪账户时返回 503（见「模型 ID 与思考档位」）；计数请求不指定账户，系统提示按 `added_at` 最早（相同时按账户 ID）的就绪账户的设备档案组装；会话不存在时 `cascade_id` 与 `trajectory_id` 为全零 UUID，不写会话记录
 
 | 计数端点 | 请求体 | 响应 |
@@ -3148,6 +3176,23 @@ data: {"candidates":[{"content":{"parts":[{"text":"OK"}],"role":"model"},"finish
 | `/v1/responses/{id}`、`/v1/responses/{id}/input_items`、`/v1/responses/{id}/cancel` | 见下方「保存的响应」 |
 | `/v1beta/interactions` | 见下方「Interactions」 |
 | `/v1beta/cachedContents` | 见下方「缓存内容」 |
+| `GET /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent`（`v1alpha` 相同） | 见下方「Live」 |
+
+**Live：**
+
+Gemini Live API 的 WebSocket 会话，鉴权与其他 Gemini 接口相同（`key` 查询参数、`x-goog-api-key` 或 `Authorization: Bearer`）。客户端第一条消息为 `{"setup":{...}}`，字段名可用 camelCase 或 snake_case；服务端消息为二进制帧中的 JSON。目录中带 `bidiGenerateContent` 方法的模型可用于 Live：
+
+| 模型 | 会话 | 输入 | 输出 |
+| --- | --- | --- | --- |
+| 转写条目（`proactive-observer-v10`） | 上游 `BidiGenerateContent`，客户端消息按内嵌描述符编码后逐条转发，服务端消息解码为 JSON 逐条返回 | `realtimeInput`（`mediaChunks` 按 MIME 换为 `audio` 或 `video`）、`clientContent`、`toolResponse` | 上游决定，转写条目只输出文本（`responseModalities: AUDIO` 由上游拒绝） |
+| Agent 模型 | 语音模式（见「语音模式双向流」），计划模型为该模型 | `realtimeInput.audio` 或 `mediaChunks` 的 16 位 PCM，`rate` 缺省为 16000，其他采样率重采样为 16 kHz；`toolResponse` | 24 kHz PCM 语音 |
+
+- 转写会话：上游消息没有的字段（如 `generationConfig.speechConfig`）以 1007 关闭并写明字段；服务端消息去掉上游的临时转写 `serverContent.undecidedInputTranscription`；用量按音频时长每秒 25 token 与转写正文估算记入请求记录
+- 语音会话：音色取 `generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`（缺省 Fola），`speechConfig.languageCode` 作为语音识别的语言提示；上游进入聆听状态后返回 `setupComplete`；客户端音频按 40 ms 一帧发送，没有音频时补静音
+- 语音会话的服务端消息：语音为 `serverContent.modelTurn.parts[].inlineData`（`audio/pcm;rate=24000`）；setup 带 `outputAudioTranscription` 时语音转写片段为 `serverContent.outputTranscription`，带 `inputAudioTranscription` 时用户语音的最终识别结果为 `serverContent.inputTranscription`；用户插话为 `serverContent.interrupted: true`；一段语音之后 1.5 秒没有新的语音时依次返回 `generationComplete` 与 `turnComplete`
+- 语音模式交给智能体的请求由会话模型按 setup 的 `systemInstruction`、`tools` 与生成参数回答，文字与语音片段作为用户回合接在会话历史后；回答中的函数调用以 `toolCall.functionCalls`（`id`、`name`、`args`）发给客户端，等到每个调用的 `toolResponse.functionResponses` 后继续，回复文字交给语音朗读；每次回答作为一次生成计入该会话的请求记录
+- 语音会话以 1007 关闭的输入：`responseModalities` 不是 `AUDIO`、`automaticActivityDetection.disabled`、`activityHandling: NO_INTERRUPTION`、`sessionResumption.handle`、`proactivity`、`clientContent`、`realtimeInput` 的文字、视频与 `activityStart`/`activityEnd`、不是 16 位 PCM 的音频
+- 上游与回答出错时以 1011 关闭，原因为错误说明；会话占用所选账户的一个并发槽位直到关闭
 
 **缓存内容：**
 
@@ -3361,13 +3406,13 @@ Content-Type: application/json
 | 事件 | 数据 |
 | --- | --- |
 | `interaction.created` | `{"interaction":{"id","object":"interaction","model","created","updated","status":"in_progress"}}` |
-| `step.start` | `{"index","step"}`；`model_output` 的 `content` 与 `thought` 的 `summary` 为空数组，`function_call` 为完整步骤 |
+| `step.start` | `{"index","step"}`；`model_output` 的 `content` 与 `thought` 的 `summary` 为空数组，`function_call` 的 `arguments` 为空对象 |
 | `step.delta` | `{"index","delta"}`；见下 |
 | `step.stop` | `{"index"}` |
 | `interaction.completed` | `{"interaction":<完整对象，不含 steps>}` |
 | `error` | `{"error":{"code":<Gemini status>,"message"}}` |
 
-- `step.delta` 的 `delta`：正文与媒体为内容块，思考为 `{"type":"thought_summary","content"}`，签名为 `{"type":"thought_signature","signature"}`，搜索来源为所属正文步骤内的 `{"type":"text_annotation_delta","annotations"}`；正文之后的独立签名步骤排在搜索来源之后
+- `step.delta` 的 `delta`：正文与媒体为内容块，函数调用为 `{"type":"arguments_delta","arguments":<参数的 JSON 字符串>}`，思考为 `{"type":"thought_summary","content"}`，签名为 `{"type":"thought_signature","signature"}`，搜索来源为所属正文步骤内的 `{"type":"text_annotation_delta","annotations"}`；正文之后的独立签名步骤排在搜索来源之后
 - 步骤类型变化或遇到 `function_call` 时先写上一步的 `step.stop`，再以下一个 `index` 写 `step.start`
 
 请求与回答 `OK` 的流式输出（ID 与时间随请求变化）：
@@ -3564,7 +3609,9 @@ Format (omit inapplicable sections):
 | --- | --- | --- |
 | OpenAI | `GET /v1/models` 为 `{"object":"list","data":[...]}`，不分页 | `GET /v1/models/{model}` |
 | Anthropic（带 `anthropic-version`） | `{"data","has_more","first_id","last_id"}`，`limit` 1–1000（默认 20）、`after_id`、`before_id` 分页；`lifecycle` 参数不含 `active` 时为空 | 同一路径 |
-| Gemini | `GET /v1beta/models` 为 `{"models":[...]}`，不分页 | `GET /v1beta/models/{model}` |
+| Gemini | `GET /v1beta/models` 为 `{"models":[...]}`，不分页；带 `x-goog-api-key` 或 `key` 且不带 `Authorization` 的 `GET /v1/models` 相同 | `GET /v1beta/models/{model}`，`/v1` 下同上 |
+
+- Gemini API 的模型方法（`generateContent`、`streamGenerateContent`、`countTokens` 等）、`cachedContents`、上传与文件接口在 `/v1` 与 `/v1beta` 下行为相同；`/v1/files*` 的 GET 与 DELETE 按上表的鉴权方式区分 Gemini 与 OpenAI
 
 - OpenAI 对象：`{"id","object":"model","created":0,"owned_by":"google","name","description","supported_generation_methods","input_token_limit","output_token_limit","context_length","max_completion_tokens"}`，`context_length` 与 `max_completion_tokens` 同输入与输出上限，`input_modalities` 为 `text` 加上图片能力的 `image`、视频能力的 `video` 与转写模型的 `audio`，有能力时带 `capabilities`，族条目带 `supported_reasoning_levels` 与 `default_reasoning_level`
 - Anthropic 对象：`{"type":"model","id","display_name","created_at":"1970-01-01T00:00:00Z","max_input_tokens","max_tokens","capabilities","lifecycle":"active","line":null,"deprecated_at":null,"retires_at":null}`，上限为 0 时为 null；`capabilities` 中 `thinking`（`enabled`、`adaptive` 随目录思考能力，`disabled` 为 true，`between_tools` 为 false）与 `effort` 的 `low`、`medium`、`high` 随目录思考档位，`xhigh`、`max` 为 false，`image_input` 与 `pdf_input` 随目录图片能力，`server_tools.web_search` 只在 Google 族为 true，`context_management` 与其三种编辑、`structured_outputs` 为 true，`batch`、`citations`、`code_execution` 为 false；族条目带 `thinking_levels` 与 `default_thinking_level`

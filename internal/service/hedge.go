@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/Mag1cFall/Antigravity2API/internal/balancer"
 	"github.com/Mag1cFall/Antigravity2API/internal/config"
+	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 )
 
@@ -178,7 +180,7 @@ type hedgePlan struct {
 	start func() *upstreamStream
 }
 
-// await 等待原请求的首个上游事件，正常开始的原请求的首字等待记为样本；plan 不为 nil 时原请求到阈值仍没有首个事件则发起一个备用请求，没有空闲账户或已有 hedgeLimit 个备用请求在进行时每 hedgeRecheck 再试；先返回首个事件的一方胜出、另一方取消，一方失败而另一方仍在等待时交给 failed 处理，一方的首个事件为错误而另一方仍在等待时取代它；返回胜出的一方，两方都失败时返回后失败的一方
+// await 等待原请求的首个上游事件，正常开始的原请求的首字等待记为样本；plan 不为 nil 时原请求到阈值仍没有首个事件则发起一个备用请求，没有空闲账户或已有 hedgeLimit 个备用请求在进行时每 hedgeRecheck 再试；先返回首个事件的一方胜出、另一方挂为它的 standby，一方失败而另一方仍在等待时交给 failed 处理，一方的首个事件为错误而另一方仍在等待时取代它；返回胜出的一方，两方都失败时返回后失败的一方；备用请求计数在只剩一方时减去，留有 standby 时由 relay 处理 standby 后减去
 func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedgePlan, failed func(*upstreamStream)) *upstreamStream {
 	model := primary.lease.Model.ID
 	var check <-chan time.Time
@@ -188,8 +190,9 @@ func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedg
 		check = timer.C
 	}
 	var hedge *upstreamStream
+	paired := false
 	defer func() {
-		if hedge != nil {
+		if hedge != nil && !paired {
 			s.hedges.Add(-1)
 		}
 	}()
@@ -211,8 +214,8 @@ func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedg
 				s.firstEvents.observe(model, primary.firstAt, primary.firstAt.Sub(primary.begun), primary.bytes)
 			}
 			if primary.err == nil && hedgeDone != nil {
-				supersede(ctx, hedge, "原请求先返回首个上游事件")
-				slog.InfoContext(ctx, fmt.Sprintf("原请求胜出，取消备用请求 | 备用账户=%s | 模型=%s", hedge.lease.ID, model), "source", primary.lease.ID)
+				primary.standby, paired = hedge, true
+				slog.InfoContext(ctx, fmt.Sprintf("原请求胜出，备用请求留作后备 | 备用账户=%s | 模型=%s", hedge.lease.ID, model), "source", primary.lease.ID)
 			}
 			return primary
 		case <-hedgeDone:
@@ -231,7 +234,7 @@ func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedg
 			waited := time.Since(primary.begun)
 			if primaryDone != nil {
 				s.firstEvents.observe(model, time.Now(), waited, primary.bytes)
-				supersede(ctx, primary, "备用请求先返回首个上游事件")
+				hedge.standby, paired = primary, true
 			}
 			slog.InfoContext(ctx, fmt.Sprintf("备用请求胜出 | 原请求已等待=%s | 模型=%s", waited.Round(time.Millisecond), model), "source", hedge.lease.ID)
 			return hedge
@@ -252,6 +255,23 @@ func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedg
 				primary.lease.ID, time.Since(primary.begun).Round(time.Millisecond), plan.delay.Round(time.Millisecond), model), "source", hedge.lease.ID)
 		}
 	}
+}
+
+// takeover 等待后备一方的首个上游事件，首个事件正常时返回真；流开始前失败或首个事件为错误时把它记入账本、按失败原因处理账户并归还槽位
+func (s *Service) takeover(ctx context.Context, standby *upstreamStream, tier prompt.Tier) bool {
+	<-standby.done
+	if standby.err == nil && standby.first.Kind != antigravity.EventError {
+		return true
+	}
+	if standby.events != nil {
+		for range standby.events {
+		}
+	}
+	err := cmp.Or(standby.err, standby.first.Err)
+	requestdb.TraceFrom(ctx).AddAttempt(standby.record(err, antigravity.Event{}))
+	s.fail(ctx, standby.current, standby.lease.Model, err, tier)
+	standby.lease.Release()
+	return false
 }
 
 // supersede 取消落败的一方，排空它的事件后记为被取代的尝试并归还槽位

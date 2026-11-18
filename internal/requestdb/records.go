@@ -21,7 +21,7 @@ var ErrNotFound = errors.New("请求记录不存在")
 const rowColumns = `id, time, client_request_id, response_id, protocol, path, api_key, client_ip, user_agent, stream,
  model, upstream_model, model_version, request_type, prompt_tier, cascade_id, step_index, account, quota_group,
  status, state, error_phase, upstream_status, error_code, duration_ms, first_event_ms, queue_ms,
- input_tokens, cached_tokens, reasoning_tokens, reply_tokens, tool_calls, cost_usd, error, attempts`
+ input_tokens, cached_tokens, reasoning_tokens, reply_tokens, tool_calls, cost_usd, error, attempts, first_output_ms`
 
 // Cursor 是请求记录的分页位置，下一页从该记录之后的更早记录开始
 type Cursor struct {
@@ -169,6 +169,7 @@ func (store *Store) ExportRecords(ctx context.Context, query RecordQuery, output
 			row.State, row.ErrorPhase, strconv.Itoa(row.UpstreamStatus), csvText(row.ErrorCode), integer(row.DurationMS),
 			integer(row.FirstEventMS), integer(row.QueueMS), integer(row.InputTokens), integer(row.CachedTokens),
 			integer(row.ReasoningTokens), integer(row.ReplyTokens), strconv.Itoa(row.ToolCalls), costText(row.CostUSD), csvText(row.Error), string(attempts),
+			integer(row.FirstOutputMS),
 		}); err != nil {
 			return errors.Join(err, rows.Close())
 		}
@@ -248,7 +249,7 @@ func scanRow(rows *sql.Rows) (Row, error) {
 		&row.UserAgent, &row.Stream, &row.Model, &row.UpstreamModel, &row.ModelVersion, &row.RequestType, &row.PromptTier,
 		&row.CascadeID, &row.StepIndex, &row.Account, &row.QuotaGroup, &row.Status, &row.State, &row.ErrorPhase,
 		&row.UpstreamStatus, &row.ErrorCode, &row.DurationMS, &row.FirstEventMS, &row.QueueMS, &row.InputTokens,
-		&row.CachedTokens, &row.ReasoningTokens, &row.ReplyTokens, &row.ToolCalls, &costUSD, &row.Error, &attempts)
+		&row.CachedTokens, &row.ReasoningTokens, &row.ReplyTokens, &row.ToolCalls, &costUSD, &row.Error, &attempts, &row.FirstOutputMS)
 	if err != nil {
 		return Row{}, err
 	}

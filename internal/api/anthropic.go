@@ -281,6 +281,7 @@ func (s *server) countAnthropicTokens(w http.ResponseWriter, r *http.Request, re
 	}
 	tokens, err := s.service.CountTokens(r.Context(), generateRequest)
 	if err != nil {
+		recordFailure(r, err)
 		writeAnthropicRequestError(w, err)
 	}
 	return tokens, err
@@ -1206,7 +1207,7 @@ func (writer *anthropicStreamWriter) start() error {
 	return writer.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 }
 
-// live 写出一个事件：思考为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，紧跟 text 块的独立签名不输出，搜索来源为 server_tool_use 与 web_search_tool_result 块
+// live 写出一个事件：思考为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，紧跟 text 块的独立签名不输出，搜索来源为 server_tool_use 与 web_search_tool_result 块，重新生成时结束正在进行的块，新尝试的思考另起一块
 func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 	switch event.Kind {
 	case antigravity.EventGrounding:
@@ -1265,6 +1266,8 @@ func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 			return nil
 		}
 		return writer.sign(event.ThoughtSignature)
+	case antigravity.EventRestart:
+		return writer.closeBlock()
 	case antigravity.EventMedia:
 		if err := writer.media.save(*event.Media); err != nil {
 			return err

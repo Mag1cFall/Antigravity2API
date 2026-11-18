@@ -1,3 +1,4 @@
+import { type CustomRange, parseCustom } from '@/features/requests/RangePicker'
 import type { RequestState } from '@/features/requests/types'
 
 // ranges 是时间范围的取值与对应毫秒数
@@ -37,9 +38,10 @@ export function protocolName(protocol: string) {
   return protocolNames[protocol] ?? protocol
 }
 
-// RequestFilter 是请求记录页的筛选条件，全部来自 URL
+// RequestFilter 是请求记录页的筛选条件，全部来自 URL；custom 是自定义时间范围，有值时代替 range
 interface RequestFilter {
   range: RangeKey
+  custom: CustomRange | undefined
   state: string
   protocol: string
   model: string
@@ -55,6 +57,7 @@ export function parseFilter(params: URLSearchParams): RequestFilter {
   const protocol = params.get('protocol') ?? ''
   return {
     range: range && range in ranges ? (range as RangeKey) : '24h',
+    custom: parseCustom(params),
     state: (states as string[]).includes(state) ? state : '',
     protocol: (protocols as readonly string[]).includes(protocol) ? protocol : '',
     model: params.get('model') ?? '',
@@ -64,12 +67,16 @@ export function parseFilter(params: URLSearchParams): RequestFilter {
   }
 }
 
-// apiQuery 把筛选条件换成 GET /api/usage/records 与 records.csv 的查询参数，时间范围截止到 now
+// apiQuery 把筛选条件换成 GET /api/usage/records 与 records.csv 的查询参数，预设范围截止到 now
 export function apiQuery(filter: RequestFilter, now: Date) {
-  const query = new URLSearchParams({
-    from: new Date(now.getTime() - ranges[filter.range]).toISOString(),
-    to: new Date(now.getTime() + 1000).toISOString(),
-  })
+  const query = new URLSearchParams(
+    filter.custom
+      ? { from: filter.custom.from.toISOString(), to: filter.custom.to.toISOString() }
+      : {
+          from: new Date(now.getTime() - ranges[filter.range]).toISOString(),
+          to: new Date(now.getTime() + 1000).toISOString(),
+        },
+  )
   if (filter.state) query.set('state', filter.state)
   if (filter.protocol) query.set('protocol', filter.protocol)
   if (filter.model) query.set('model', filter.model)

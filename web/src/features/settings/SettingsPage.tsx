@@ -22,7 +22,7 @@ import { Card } from '@/components/ui/card'
 import { DurationInput } from '@/components/ui/duration-input'
 import { FormRow } from '@/components/ui/form-row'
 import { Indicator } from '@/components/ui/indicator'
-import { Input, Textarea } from '@/components/ui/input'
+import { Input, PasswordInput, Textarea } from '@/components/ui/input'
 import { NumberInput } from '@/components/ui/number-input'
 import { PageHeader } from '@/components/ui/page'
 import { RadioGroup } from '@/components/ui/radio-group'
@@ -31,10 +31,10 @@ import { ErrorState, Loading } from '@/components/ui/states'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { Tooltip } from '@/components/ui/tooltip'
+import { DirectoryPicker } from '@/features/files/FileBrowser'
 import { useModels } from '@/features/models/queries'
 import { kindOf } from '@/features/models/types'
 import { AboutSection } from '@/features/settings/AboutSection'
-import { DirectoryPicker } from '@/features/settings/DirectoryPicker'
 import {
   PromptPreviewDialog,
   PromptTemplateFields,
@@ -47,6 +47,7 @@ import {
   useSaveSettings,
   useSettings,
 } from '@/features/settings/queries'
+import { RejectedStatusRow } from '@/features/settings/RejectedRules'
 import { type SettingsForm, settingsSchema, toForm, toValues } from '@/features/settings/schema'
 import type { FirstEventLatency, Settings } from '@/features/settings/types'
 import { isDesktop } from '@/lib/desktop'
@@ -88,6 +89,7 @@ const fieldSection: Record<keyof SettingsForm, Section> = {
   SYSTEM_PROMPT: 'prompt',
   SYSTEM_PROMPT_TEMPLATE: 'prompt',
   SYSTEM_PROMPT_USER_TEMPLATE: 'prompt',
+  REJECTED_RULES: 'prompt',
   ACCOUNT_CONCURRENCY: 'scheduling',
   ROUTING_STRATEGY: 'scheduling',
   PREFER_LOWER_TIER_MODELS: 'scheduling',
@@ -687,6 +689,29 @@ function SettingsEditor({
             />
           </div>
         )}
+        <FormRow id="rejected-status" label={m.rejected} hint={m.rejectedHint}>
+          <RejectedStatusRow />
+        </FormRow>
+        {lock(
+          'REJECTED_RULES',
+          <FormRow
+            id="REJECTED_RULES"
+            label={m.rejectedCustom}
+            hint={codeText(m.rejectedCustomHint)}
+            tag={restartTag('REJECTED_RULES')}
+            error={errors.REJECTED_RULES?.message}
+          >
+            <Textarea
+              {...describe('REJECTED_RULES')}
+              {...form.register('REJECTED_RULES')}
+              rows={6}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={m.rejectedCustomPlaceholder}
+              className="font-mono text-xs"
+            />
+          </FormRow>,
+        )}
       </>
     ),
     scheduling: (
@@ -864,10 +889,11 @@ function SettingsEditor({
               error={errors.ADMIN_PASSWORD?.message}
             >
               <Tooltip disabledReason={!adminAuth && m.adminDisabled}>
-                <Input
+                <PasswordInput
                   {...describe('ADMIN_PASSWORD')}
                   {...form.register('ADMIN_PASSWORD')}
-                  type="password"
+                  showLabel={m.showPassword}
+                  hideLabel={m.hidePassword}
                   autoComplete="new-password"
                   disabled={!adminAuth}
                   placeholder={settings.admin_password_set ? m.adminPasswordSet : ''}

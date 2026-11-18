@@ -267,6 +267,7 @@ func (s *server) handleGeminiCacheCreate(w http.ResponseWriter, r *http.Request)
 	tokens, err := s.service.CountTokens(r.Context(), cached)
 	if err != nil {
 		if shouldWriteRequestError(r, err) {
+			recordFailure(r, err)
 			writeGeminiRequestError(w, err)
 		}
 		return

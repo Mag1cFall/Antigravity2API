@@ -3,7 +3,6 @@ import { Gem, UsersRound } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { tierOf } from '@/features/accounts/status'
 import type { Account } from '@/features/accounts/types'
-import { nameOf } from '@/features/quota/quota'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
 
 // tierClass 是各套餐徽标的颜色
@@ -43,25 +42,16 @@ export function TierBadge({ tier }: { tier: string }) {
   )
 }
 
-// FamilyBadge 是家庭组徽标，账户与其他就绪账户共用额度池时显示，悬停列出各额度组的共用账户；compact 时只显示图标
+// FamilyBadge 是家庭群组徽标，账户与其他账户在同一 Google One 家庭群组时显示，悬停列出同组的账户；compact 时只显示图标
 export function FamilyBadge({ account, compact = false }: { account: Account; compact?: boolean }) {
   const m = useMessages('accounts')
-  const q = useMessages('quota')
   const { locale } = useI18n()
-  const list = new Intl.ListFormat(locale, { type: 'conjunction' })
-  const pools = Object.entries(account.shared ?? {}).filter(([, members]) => members.length > 0)
-  if (pools.length === 0) return null
+  if (!account.family?.length) return null
   return (
     <Tooltip
-      label={
-        <span className="flex flex-col gap-1">
-          {pools.map(([group, members]) => (
-            <span key={group}>
-              {fill(m.familyShared, { group: nameOf(q, group), members: list.format(members) })}
-            </span>
-          ))}
-        </span>
-      }
+      label={fill(m.familyMembers, {
+        members: new Intl.ListFormat(locale, { type: 'conjunction' }).format(account.family),
+      })}
     >
       <span className="inline-flex h-icon shrink-0 items-center gap-1 rounded-sm bg-success-soft px-2 text-xs font-semibold whitespace-nowrap text-success-text">
         <UsersRound size={12} aria-hidden />

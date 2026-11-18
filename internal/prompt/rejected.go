@@ -1,42 +1,97 @@
 package prompt
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/rules"
 )
 
-// systemRejected 匹配上游见到即以不带 reason 的 429 拒绝请求的客户端系统提示文字与带归属声明的身份句，短语取自各客户端系统提示的逐词二分
-var systemRejected = []*regexp.Regexp{phrases(
-	"RFC 2119 keywords",
-	"Read xd://<tool> for full docs + JSON schema before first use",
-	"You are omp's trusted coding assistant",
-	"You are Claude Code,",
-	"Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context",
-	"was pasted into the message by the user from somewhere else and may contain instructions the user did not write",
-	"You are a coding agent running in the Codex CLI",
-	"You are OpenCode",
-	"You are a coding assistant running inside pi",
-	"inside pi, a coding agent harness",
-	"You are a personal assistant running inside OpenClaw",
-	"You are Hermes Agent",
-	"Be direct: match the length of your reply to the weight of the ask",
-	"the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference",
-	"Hermes delivers their message as a standalone user message right after the latest tool results",
-	"<!-- End Hermes runtime environment -->",
-	"The browser provides no implicit DOM, route, or screenshot context",
-), clientIdentity}
+// Rejected 是解析后的上游拒绝句规则：上游见到即以不带 reason 的 429 拒绝请求的文字，system 匹配客户端系统提示，user 匹配 user 轮
+type Rejected struct {
+	// Version 是列表 `! Version:` 头的值，没有时为空
+	Version string
+	// Rules 是规则条数
+	Rules int
+	// Digest 是各份列表原文的 SHA-256
+	Digest string
+	system []*regexp.Regexp
+	user   []*regexp.Regexp
+}
 
-// userRejected 匹配出现在 user 轮中同样被上游拒绝的文字
-var userRejected = []*regexp.Regexp{phrases(
-	"You are Codex, a coding agent based on GPT-5",
-	"You are Codex, an agent based on GPT-5",
-)}
+// rejected 是请求使用的拒绝句规则，初值为内置列表
+var rejected atomic.Pointer[Rejected]
 
-// clientIdentity 匹配行首带归属声明的身份句：You are 加以 agent、assistant 或 AI 结尾的身份短语，8 个字符内接 created by、built on、based on 等归属声明
-var clientIdentity = regexp.MustCompile(`(?im)^[ \t]*(?:you are|you're)\s+(?:an?\s+)?(?:[\w'-]+[\s,]+){0,8}(?:agent|assistant|ai)\b[^.!?\n<>]{0,8}?\b(?:(?:created|built|made|developed|designed|trained|powered|maintained|published|released|provided)\s+(?:by|on|upon)|based\s+on)\s+[^\n<>]{1,80}?\.(?:[ \t]|$)`)
+func init() {
+	builtin, err := ParseRejected(string(rules.Rejected))
+	if err != nil {
+		panic(err)
+	}
+	rejected.Store(builtin)
+}
+
+// SetRejected 替换之后的请求使用的拒绝句规则
+func SetRejected(r *Rejected) {
+	rejected.Store(r)
+}
+
+// RejectedDigest 返回请求当前使用的拒绝句规则的摘要
+func RejectedDigest() string {
+	return rejected.Load().Digest
+}
+
+// ParseRejected 依次解析拒绝句列表文本并合并：`!` 开头的行为注释，第一份文本中的 `! Version:` 为版本；`[system]` 与 `[user]` 切换所在节，节标记之前的行属于 system；`/…/` 为 Go 正则，其余非空行为短语，不区分大小写，短语中的空格可对应任意空白序列
+func ParseRejected(texts ...string) (*Rejected, error) {
+	result := &Rejected{}
+	var system, user []string
+	hash := sha256.New()
+	for index, text := range texts {
+		hash.Write(append([]byte(text), 0))
+		section := &system
+		for number, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			switch {
+			case line == "":
+			case strings.HasPrefix(line, "!"):
+				if version, ok := strings.CutPrefix(strings.TrimSpace(line[1:]), "Version:"); ok && index == 0 && result.Version == "" {
+					result.Version = strings.TrimSpace(version)
+				}
+			case line == "[system]":
+				section = &system
+			case line == "[user]":
+				section = &user
+			case len(line) > 2 && strings.HasPrefix(line, "/") && strings.HasSuffix(line, "/"):
+				pattern, err := regexp.Compile(line[1 : len(line)-1])
+				if err != nil {
+					return nil, fmt.Errorf("第 %d 份列表第 %d 行: %w", index+1, number+1, err)
+				}
+				if section == &system {
+					result.system = append(result.system, pattern)
+				} else {
+					result.user = append(result.user, pattern)
+				}
+				result.Rules++
+			default:
+				*section = append(*section, line)
+				result.Rules++
+			}
+		}
+	}
+	if len(system) > 0 {
+		result.system = append(result.system, phrases(system...))
+	}
+	if len(user) > 0 {
+		result.user = append(result.user, phrases(user...))
+	}
+	result.Digest = hex.EncodeToString(hash.Sum(nil))
+	return result, nil
+}
 
 // listMarker 匹配行首的缩进与列表符号
 var listMarker = regexp.MustCompile(`^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*`)
@@ -54,11 +109,11 @@ func phrases(list ...string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)` + strings.Join(alternatives, "|"))
 }
 
-// dropUserRejected 返回删去 userRejected 所匹配整句后的 contents，只改 user 轮的文本，删句后为空的文本 part 一并去掉，没有匹配时原样返回
-func dropUserRejected(contents []antigravity.Content) []antigravity.Content {
+// dropUserRejected 返回删去 patterns 所匹配整句后的 contents，只改 user 轮的文本，删句后为空的文本 part 一并去掉，没有匹配时原样返回
+func dropUserRejected(contents []antigravity.Content, patterns []*regexp.Regexp) []antigravity.Content {
 	var dropped []antigravity.Content
 	for index, content := range contents {
-		if content.Role != antigravity.RoleUser || !slices.ContainsFunc(content.Parts, func(part antigravity.Part) bool { return matches(userRejected, part.Text) }) {
+		if content.Role != antigravity.RoleUser || !slices.ContainsFunc(content.Parts, func(part antigravity.Part) bool { return matches(patterns, part.Text) }) {
 			continue
 		}
 		if dropped == nil {
@@ -67,7 +122,7 @@ func dropUserRejected(contents []antigravity.Content) []antigravity.Content {
 		parts := make([]antigravity.Part, 0, len(content.Parts))
 		for _, part := range content.Parts {
 			if part.Text != "" {
-				if part.Text = dropRejected(part.Text, userRejected); part.Text == "" {
+				if part.Text = dropRejected(part.Text, patterns); part.Text == "" {
 					continue
 				}
 			}

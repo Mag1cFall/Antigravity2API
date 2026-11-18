@@ -1023,7 +1023,7 @@ func normalizeImplicitType(schema map[string]json.RawMessage) error {
 		}
 	}
 	var typeName string
-	if json.Unmarshal(schema["type"], &typeName) != nil || !strings.EqualFold(typeName, "array") || schema["items"] != nil {
+	if json.Unmarshal(schema["type"], &typeName) != nil || !strings.EqualFold(typeName, "array") || schema["items"] != nil || branchesHave(schema["allOf"], "items") {
 		return nil
 	}
 	schema["items"] = json.RawMessage(`true`)
@@ -1044,6 +1044,13 @@ func normalizeImplicitType(schema map[string]json.RawMessage) error {
 		}
 	}
 	return nil
+}
+
+// branchesHave 判断 Schema 数组中是否有分支带 name 字段
+func branchesHave(raw json.RawMessage, name string) bool {
+	var variants []map[string]json.RawMessage
+	json.Unmarshal(raw, &variants)
+	return slices.ContainsFunc(variants, func(variant map[string]json.RawMessage) bool { return variant[name] != nil })
 }
 
 // enumType 返回 enum 取值的 JSON Schema 类型：全为整数为 integer，全为数字为 number，全为布尔值为 boolean，其余为 string
@@ -1115,6 +1122,9 @@ func toolSchemaShape(value any) map[string]any {
 		}
 		if stringsOnly {
 			result["enum"] = values
+		} else if _, typed := result["type"]; !typed {
+			encoded, _ := json.Marshal(values)
+			result["type"] = strings.Trim(string(enumType(encoded)), `"`)
 		}
 	}
 	if typeName, ok := result["type"].(string); ok && strings.EqualFold(typeName, "null") {
@@ -1193,8 +1203,14 @@ func schemaInteger(raw json.RawMessage, name string) (int64, error) {
 	return value, nil
 }
 
+// schemaNumber 读取数值约束，JSON 数字与内容为数字的字符串都接受
 func schemaNumber(raw json.RawMessage, name string) (float64, error) {
-	value, err := strconv.ParseFloat(string(raw), 64)
+	text := string(raw)
+	var quoted string
+	if json.Unmarshal(raw, &quoted) == nil {
+		text = strings.TrimSpace(quoted)
+	}
+	value, err := strconv.ParseFloat(text, 64)
 	if err != nil {
 		return 0, fmt.Errorf("schema.%s 必须是数字", name)
 	}

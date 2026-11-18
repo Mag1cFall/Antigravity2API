@@ -3,6 +3,7 @@ package antigravity
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,11 +173,12 @@ func (e *UpstreamError) RetryAt(now time.Time) time.Time {
 	return time.Time{}
 }
 
-// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，web 为头像等 HTTP/2 请求的客户端，auth 为带 Bearer 的 HTTP/2 客户端，market 让同一虚拟进程的插件市场目录只读取一次，state 为伴随请求所需的账户状态，observe 接收每次成功读取的账户状态
+// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，http 为带 Bearer 的 HTTP/1.1 客户端，web 为头像与 tokeninfo 的 HTTP/1.1 客户端，h2 为插件市场目录与登录前 clearcut 的 HTTP/2 客户端，auth 为带 Bearer 的 HTTP/2 客户端，state 为伴随请求所需的账户状态，observe 接收每次成功读取的账户状态
 type Client struct {
 	account string
 	http    *http.Client
 	web     *http.Client
+	h2      *http.Client
 	auth    *http.Client
 	source  oauth2.TokenSource
 	proxy   Proxy
@@ -184,7 +186,6 @@ type Client struct {
 	project string
 	device  Device
 	mu      sync.Mutex
-	market  sync.Mutex
 	state   companionState
 	hub     hub
 	observe func(Observed)
@@ -210,21 +211,16 @@ func (c *Client) notify(observed Observed) {
 	}
 }
 
-// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode 走 ALPN 为 h2、http/1.1 的 Transport（每个代理各用一个），Authorization 由 oauth2.Transport 注入；头像、tokeninfo 与 clearcut 走克隆的 http.DefaultTransport，clearcut 另由 oauth2.Transport 注入 Authorization
+// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode、头像与 tokeninfo 走 http1Transport，插件市场目录与 clearcut 走 http2Transport，两者都按代理各用一个 Transport；cloudcode、userinfo、aicode 与 clearcut 的 Authorization 由 oauth2.Transport 注入
 func NewClient(account string, source oauth2.TokenSource, device Device, proxy Proxy) *Client {
-	transport := newProxyTransport(proxy, func(proxy Proxy) *http.Transport {
-		transport := &http.Transport{Proxy: proxy}
-		transport.Protocols = new(http.Protocols)
-		transport.Protocols.SetHTTP1(true)
-		transport.Protocols.SetHTTP2(true)
-		return transport
-	})
-	web := webTransport(proxy)
+	plain := newProxyTransport(proxy, http1Transport)
+	multiplexed := newProxyTransport(proxy, http2Transport)
 	return &Client{
 		account: account,
-		http:    &http.Client{Transport: &oauth2.Transport{Source: source, Base: transport}},
-		web:     &http.Client{Transport: web},
-		auth:    &http.Client{Transport: &oauth2.Transport{Source: source, Base: web}},
+		http:    &http.Client{Transport: &oauth2.Transport{Source: source, Base: plain}},
+		web:     &http.Client{Transport: plain},
+		h2:      &http.Client{Transport: multiplexed},
+		auth:    &http.Client{Transport: &oauth2.Transport{Source: source, Base: multiplexed}},
 		source:  source,
 		proxy:   proxy,
 		base:    EndpointDaily,
@@ -232,13 +228,22 @@ func NewClient(account string, source oauth2.TokenSource, device Device, proxy P
 	}
 }
 
-// webTransport 返回按账户代理使用克隆 http.DefaultTransport 的 RoundTripper，token 与头像请求经它以 HTTP/2 发出
-func webTransport(proxy Proxy) http.RoundTripper {
-	return newProxyTransport(proxy, func(proxy Proxy) *http.Transport {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.Proxy = proxy
-		return transport
-	})
+// http1Transport 返回只走 HTTP/1.1 的 Transport：ALPN 只带 http/1.1，每主机保留的空闲连接数与总数相同，其余字段同 http.DefaultTransport（空闲连接 90 s 后关闭）
+func http1Transport(proxy Proxy) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = proxy
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+	transport.MaxIdleConnsPerHost = transport.MaxIdleConns
+	return transport
+}
+
+// http2Transport 返回以代理选择函数克隆的 http.DefaultTransport，ALPN 为 h2 与 http/1.1
+func http2Transport(proxy Proxy) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = proxy
+	return transport
 }
 
 // proxyTransport 为每个请求按代理选择函数选出的代理使用各自的 Transport，HTTP/2 连接只在经同一代理的请求间复用
@@ -277,7 +282,34 @@ func (t *proxyTransport) RoundTrip(request *http.Request) (*http.Response, error
 	return transport.RoundTrip(request)
 }
 
-// traced 给请求挂上 httptrace，在 debug 级记录连接复用、空闲时长与代理方案
+// connTrace 记录一次上游请求的连接经过：是否拿到连接、连接是否复用与空闲时长、请求是否写完、是否收到响应首字节与代理方案
+type connTrace struct {
+	mu                        sync.Mutex
+	got, reused, wrote, first bool
+	idle                      time.Duration
+	scheme                    string
+}
+
+// connTraceKey 是请求上下文中 connTrace 的键
+type connTraceKey struct{}
+
+// describe 返回请求失败时所处的连接阶段与连接情况
+func (t *connTrace) describe() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	phase := "读响应"
+	switch {
+	case !t.got:
+		phase = "建立连接"
+	case !t.wrote:
+		phase = "写请求"
+	case !t.first:
+		phase = "等响应头"
+	}
+	return fmt.Sprintf("阶段=%s | 复用=%t | 空闲=%s | 代理=%s", phase, t.reused, t.idle, t.scheme)
+}
+
+// traced 给请求挂上 httptrace，在 debug 级记录连接复用、空闲时长与代理方案，并在上下文中记下连接经过供失败日志使用
 func (c *Client) traced(request *http.Request) *http.Request {
 	scheme := "direct"
 	if c.proxy != nil {
@@ -285,10 +317,34 @@ func (c *Client) traced(request *http.Request) *http.Request {
 			scheme = proxy.Scheme
 		}
 	}
-	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) {
-		slog.DebugContext(request.Context(), fmt.Sprintf("上游连接 | 主机=%s | 复用=%t | 空闲=%s | 代理=%s", request.URL.Host, info.Reused, info.IdleTime, scheme), "source", c.account)
-	}}
-	return request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	state := &connTrace{scheme: scheme}
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			state.mu.Lock()
+			state.got, state.reused, state.idle = true, info.Reused, info.IdleTime
+			state.mu.Unlock()
+			slog.DebugContext(request.Context(), fmt.Sprintf("上游连接 | 主机=%s | 复用=%t | 空闲=%s | 代理=%s", request.URL.Host, info.Reused, info.IdleTime, scheme), "source", c.account)
+		},
+		WroteRequest: func(httptrace.WroteRequestInfo) {
+			state.mu.Lock()
+			state.wrote = true
+			state.mu.Unlock()
+		},
+		GotFirstResponseByte: func() {
+			state.mu.Lock()
+			state.first = true
+			state.mu.Unlock()
+		},
+	}
+	return request.WithContext(context.WithValue(httptrace.WithClientTrace(request.Context(), trace), connTraceKey{}, state))
+}
+
+// connPhase 返回经 traced 发出的请求失败时的连接阶段说明，没有挂 traced 时为空
+func connPhase(request *http.Request) string {
+	if state, ok := request.Context().Value(connTraceKey{}).(*connTrace); ok {
+		return " | " + state.describe()
+	}
+	return ""
 }
 
 // Project 返回 loadCodeAssist 返回的 cloudaicompanionProject
@@ -484,7 +540,8 @@ func (c *Client) avatar(ctx context.Context, picture string) {
 		return
 	}
 	started := time.Now()
-	response, err := c.web.Do(c.traced(request))
+	request = c.traced(request)
+	response, err := c.web.Do(request)
 	if err != nil {
 		c.logRequest(request, 0, started, err)
 		return
@@ -601,8 +658,9 @@ func (c *Client) get(ctx context.Context, target string, out any) error {
 func (c *Client) do(request *http.Request, out any) (err error) {
 	started := time.Now()
 	status := 0
+	request = c.traced(request)
 	defer func() { c.logRequest(request, status, started, err) }()
-	response, err := c.http.Do(c.traced(request))
+	response, err := c.http.Do(request)
 	if err != nil {
 		return err
 	}
@@ -621,7 +679,7 @@ func (c *Client) do(request *http.Request, out any) (err error) {
 	return json.Unmarshal(data, out)
 }
 
-// logRequest 写一条非生成上游请求的日志，连接错误只写原因，不写带查询参数的地址
+// logRequest 写一条非生成上游请求的日志，连接错误只写原因与连接阶段，不写带查询参数的地址
 func (c *Client) logRequest(request *http.Request, status int, started time.Time, err error) {
 	level := slog.LevelInfo
 	message := fmt.Sprintf("上游请求 | %s %s%s | 状态=%d | 耗时=%dms", request.Method, request.URL.Host, request.URL.Path, status, time.Since(started).Milliseconds())
@@ -629,7 +687,7 @@ func (c *Client) logRequest(request *http.Request, status int, started time.Time
 		err = address.Err
 	}
 	if err != nil {
-		level, message = slog.LevelWarn, message+" | 错误="+err.Error()
+		level, message = slog.LevelWarn, message+connPhase(request)+" | 错误="+err.Error()
 	}
 	slog.Log(request.Context(), level, message, "event", "upstream.request", "source", c.account)
 }

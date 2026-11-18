@@ -147,25 +147,40 @@ func TestExhaustedBucketCoolsGroupUntilReset(t *testing.T) {
 	}
 }
 
-func TestSessionSticksUntilAccountUnavailable(t *testing.T) {
+// TestSessionSticksToLastSuccessfulAccount 验证会话沿用最近一次成功生成所用的账户：粘连账户冷却时借用其他账户不改绑，借用的账户成功后改绑，较早开始的尝试晚于它成功时不覆盖
+func TestSessionSticksToLastSuccessfulAccount(t *testing.T) {
 	pool, now := testPool(2)
-	reset := now.Add(time.Hour)
-	pool.Set("a", models("claude-opus-5-5-high"))
-	pool.Set("b", models("claude-opus-5-5-high"))
-	pool.Set("a", []antigravity.CatalogModel{remaining("claude-opus-5-5-high", 0.9, reset)})
-	pool.Set("b", []antigravity.CatalogModel{remaining("claude-opus-5-5-high", 0.5, reset)})
-	acquire(t, pool, "claude-opus-5-5-high", "cascade", nil).Release()
-	pool.Set("b", []antigravity.CatalogModel{remaining("claude-opus-5-5-high", 0.95, reset)})
-	if lease := acquire(t, pool, "claude-opus-5-5-high", "cascade", nil); lease.ID != "a" {
-		t.Fatalf("同一会话选中 %s，期望沿用 a", lease.ID)
+	model := "claude-opus-5-5-high"
+	pool.Set("a", models(model))
+	pool.Set("b", models(model))
+	first := *now
+	lease := acquire(t, pool, model, "cascade", nil)
+	lease.Release()
+	pool.Bind("cascade", lease.ID, first)
+	bound, other := lease.ID, map[string]string{"a": "b", "b": "a"}[lease.ID]
+	for range 3 {
+		if lease := acquire(t, pool, model, "cascade", nil); lease.ID != bound {
+			t.Fatalf("同一会话选中 %s，期望沿用 %s", lease.ID, bound)
+		} else {
+			lease.Release()
+		}
+	}
+	pool.Limit(bound, antigravity.QuotaGroupThirdParty, now.Add(time.Minute))
+	if lease := acquire(t, pool, model, "cascade", nil); lease.ID != other {
+		t.Fatalf("粘连账户冷却时选中 %s，期望借用 %s", lease.ID, other)
 	} else {
 		lease.Release()
 	}
-	pool.Limit("a", antigravity.QuotaGroupThirdParty, now.Add(time.Minute))
-	acquire(t, pool, "claude-opus-5-5-high", "cascade", nil).Release()
 	*now = now.Add(time.Minute)
-	if lease := acquire(t, pool, "claude-opus-5-5-high", "cascade", nil); lease.ID != "b" {
-		t.Fatalf("冷却结束后同一会话选中 %s，期望沿用改绑后的 b", lease.ID)
+	if lease := acquire(t, pool, model, "cascade", nil); lease.ID != bound {
+		t.Fatalf("借用的账户没有成功生成，冷却结束后选中 %s，期望沿用 %s", lease.ID, bound)
+	} else {
+		lease.Release()
+	}
+	pool.Bind("cascade", other, now.Add(-time.Second))
+	pool.Bind("cascade", bound, first)
+	if lease := acquire(t, pool, model, "cascade", nil); lease.ID != other {
+		t.Fatalf("较早开始的尝试晚成功后选中 %s，期望沿用较新成功的 %s", lease.ID, other)
 	}
 }
 

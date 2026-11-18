@@ -70,18 +70,18 @@ func (s *Service) resolve(name string, config antigravity.GenerationConfig) (ant
 			return model, nil
 		}
 	}
-	if reasons := s.pending(candidates); len(reasons) > 0 {
-		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: fmt.Sprintf("模型 %s 所在的账户尚未就绪\n%s", name, strings.Join(reasons, "\n"))}
+	if reasons, states := s.pending(candidates); len(reasons) > 0 {
+		return antigravity.CatalogModel{}, &Error{Status: http.StatusServiceUnavailable, Message: fmt.Sprintf("模型 %s 所在的账户尚未就绪\n%s", name, strings.Join(reasons, "\n")), States: states}
 	}
 	return antigravity.CatalogModel{}, &Error{Status: http.StatusNotFound, Message: fmt.Sprintf("模型 %s 不在账户目录中", name)}
 }
 
-// pending 返回上一次目录中含 ids 之一的未就绪已启用账户及其原因，初始化未结束的账户原因为初始化中
-func (s *Service) pending(ids []string) []string {
+// pending 返回上一次目录中含 ids 之一的未就绪已启用账户的原因与英文状态，初始化未结束的账户原因为初始化中
+func (s *Service) pending(ids []string) ([]string, []string) {
 	records := s.store.Accounts()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var reasons []string
+	var reasons, states []string
 	for _, record := range records {
 		if _, ready := s.pool.Status(record.ID); ready || !record.Enabled {
 			continue
@@ -89,9 +89,11 @@ func (s *Service) pending(ids []string) []string {
 		if !slices.ContainsFunc(s.catalogs[record.ID], func(model antigravity.CatalogModel) bool { return slices.Contains(ids, model.ID) }) {
 			continue
 		}
-		reasons = append(reasons, record.ID+": "+cmp.Or(s.failures[record.ID], "初始化中"))
+		reason, failed := s.failures[record.ID]
+		reasons = append(reasons, record.ID+": "+cmp.Or(reason, "初始化中"))
+		states = append(states, accountState(true, reason, failed))
 	}
-	return reasons
+	return reasons, states
 }
 
 // public 把目录条目投影为公开目录：Agent 模型中 ID 档位后缀与显示名档位一致的条目按族合并为一个族 ID，列出可选档位，名称去掉档位，上限与能力取默认档位的条目；默认档位依次取 medium、high、low 中族内有的第一个，与 resolve 一致；其余条目原样公开
@@ -205,6 +207,14 @@ func (s *Service) ModelAccounts() map[string]int {
 		}
 	}
 	return counts
+}
+
+// AccountModels 返回账户最近一次读到的目录中的公开模型，Agent 模型按 public 合并档位
+func (s *Service) AccountModels(id string) []antigravity.Model {
+	s.mu.Lock()
+	catalog := s.catalogs[id]
+	s.mu.Unlock()
+	return public(catalog)
 }
 
 // lowerTier 判断模型是否在 PREFER_LOWER_TIER_MODELS 中

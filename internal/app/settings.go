@@ -81,6 +81,7 @@ func (s *server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	s.ledger.SetBodyCapture(running.RequestLogBodies)
 	s.auth.update(running)
 	s.deps.Service.SetProxies(running.Proxies())
+	s.rejected.apply()
 	slog.InfoContext(r.Context(), "服务配置已保存 | 变更="+strings.Join(saved.Changed(cfg), ","), "source", "service")
 	writeJSON(w, http.StatusOK, s.settings(cfg))
 }

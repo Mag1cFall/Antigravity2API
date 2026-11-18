@@ -1,5 +1,13 @@
-import { ExternalLink, Network, RefreshCw, RotateCcw, Trash2 } from 'lucide-react'
-import { type ReactNode, useState } from 'react'
+import {
+  Download,
+  ExternalLink,
+  Network,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+  UsersRound,
+} from 'lucide-react'
+import { type ReactNode, useId, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Callout } from '@/components/ui/callout'
@@ -18,11 +26,13 @@ import {
   useSetLabel,
   useSetPriority,
 } from '@/features/accounts/actions'
+import { useAccountModels } from '@/features/accounts/queries'
 import { creditsShort, statusOf } from '@/features/accounts/status'
 import { SwitchClientDialog } from '@/features/accounts/SwitchClientDialog'
 import { FamilyBadge, TierBadge } from '@/features/accounts/TierBadge'
 import type { Account } from '@/features/accounts/types'
-import { groups, nameOf } from '@/features/quota/quota'
+import { kindOf } from '@/features/models/types'
+import { groups, nameOf, type QuotaGroup } from '@/features/quota/quota'
 import type { UsageStats } from '@/features/usage/types'
 import {
   formatCompact,
@@ -53,10 +63,13 @@ function Block({
   aside?: ReactNode
   children: ReactNode
 }) {
+  const id = useId()
   return (
-    <section className="flex flex-col gap-3">
+    <section aria-labelledby={id} className="flex flex-col gap-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-base font-semibold">{title}</h3>
+        <h3 id={id} className="text-base font-semibold">
+          {title}
+        </h3>
         {aside && <span className="text-xs text-foreground-muted">{aside}</span>}
       </div>
       {children}
@@ -159,7 +172,144 @@ function CreditsField({ account }: { account: Account }) {
   )
 }
 
-// AccountDetailSheet 是从右侧滑入的账户详情：状态与原因、额度、调度优先级、备注名、AI 积分超额使用、近 30 天用量、资料、设备档案与全部操作
+// deviceKeys 是设备档案各字段在详情中的顺序
+const deviceKeys = [
+  'os',
+  'arch',
+  'user_name',
+  'hostname',
+  'app_data_dir',
+  'time_zone',
+  'installation_id',
+  'user_agent',
+] as const
+
+// familyURL 返回以该账户打开 Google 家庭群组管理页的地址
+function familyURL(email: string) {
+  return (
+    'https://accounts.google.com/AccountChooser?' +
+    new URLSearchParams({
+      Email: email,
+      continue: 'https://myaccount.google.com/family/details',
+    }).toString()
+  )
+}
+
+// FamilyBlock 是账户详情中的家庭群组：共用同一组每周额度的其他账户（点击打开其详情）与在 Google 中管理家庭群组的链接
+function FamilyBlock({ account, onOpen }: { account: Account; onOpen: (id: string) => void }) {
+  const m = useMessages('accounts')
+  const members = account.family ?? []
+  return (
+    <Block title={m.family}>
+      <p className="text-sm text-foreground-muted">
+        {members.length > 0 ? m.familyHint : m.familyNone}
+      </p>
+      {members.length > 0 && (
+        <ul className="flex flex-wrap gap-2">
+          {members.map((member) => (
+            <li key={member}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  onOpen(member)
+                }}
+              >
+                <UsersRound size={16} aria-hidden />
+                {member}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <a
+        href={familyURL(account.id)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 self-start text-sm font-medium text-primary hover:text-primary-hover"
+      >
+        {m.familyManage}
+        <ExternalLink size={14} aria-hidden />
+      </a>
+    </Block>
+  )
+}
+
+// ModelsBlock 是账户详情中该账户可用的模型：对话模型按额度组分组，生图、语音转写与代码补全各为一组，列出名称、ID 与思考档位
+function ModelsBlock({ account }: { account: Account }) {
+  const m = useMessages('accounts')
+  const q = useMessages('quota')
+  const mm = useMessages('models')
+  const models = useAccountModels(account.id)
+  const list = (models.data?.models ?? []).map((model) => ({ ...model, accounts: 0 }))
+  const chat = list.filter((model) => kindOf(model) === 'chat')
+  const chatGroups = [...new Set(chat.map((model) => model.quota_group ?? 'gemini'))].sort(
+    (a, b) =>
+      (groups.indexOf(a as QuotaGroup) + 1 || groups.length + 1) -
+      (groups.indexOf(b as QuotaGroup) + 1 || groups.length + 1),
+  )
+  const kindTitles = {
+    image: mm.kindImage,
+    transcription: mm.kindTranscription,
+    completion: mm.kindCompletion,
+  }
+  const sections = [
+    ...chatGroups.map((group) => ({
+      key: group,
+      title: nameOf(q, group),
+      items: chat.filter((model) => (model.quota_group ?? 'gemini') === group),
+    })),
+    ...(['image', 'transcription', 'completion'] as const).map((kind) => ({
+      key: kind,
+      title: kindTitles[kind],
+      items: list.filter((model) => kindOf(model) === kind),
+    })),
+  ].filter((section) => section.items.length > 0)
+  return (
+    <Block
+      title={m.detailModels}
+      aside={list.length > 0 && fill(m.detailModelsCount, { count: list.length })}
+    >
+      {models.isPending ? (
+        <p className="text-sm text-foreground-muted">{m.detailModelsLoading}</p>
+      ) : models.isError ? (
+        <p role="alert" className="text-sm wrap-anywhere text-error-text">
+          {models.error.message}
+        </p>
+      ) : list.length === 0 ? (
+        <p className="text-sm text-foreground-muted">{m.detailModelsNone}</p>
+      ) : (
+        <div className="flex flex-col gap-4">
+          {sections.map((section) => (
+            <div key={section.key} className="flex flex-col gap-2">
+              <h4 className="text-sm font-medium text-foreground-muted">{section.title}</h4>
+              <ul className="flex flex-col overflow-hidden rounded-md border border-border">
+                {section.items.map((model) => (
+                  <li
+                    key={model.id}
+                    className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-2 first:border-t-0"
+                  >
+                    <span className="text-sm font-medium">{model.name || model.id}</span>
+                    <span className="min-w-0 font-mono text-xs break-all text-foreground-muted">
+                      {model.id}
+                    </span>
+                    {model.thinking_levels && model.thinking_levels.length > 0 && (
+                      <span className="ml-auto text-xs text-foreground-muted">
+                        {fill(m.detailModelsLevels, { levels: model.thinking_levels.join(' / ') })}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </Block>
+  )
+}
+
+// AccountDetailSheet 是从右侧滑入的账户详情：状态与原因、额度、可用模型、家庭群组、调度优先级、备注名、AI 积分超额使用、近 30 天用量、资料、设备档案与全部操作
 export function AccountDetailSheet({
   account,
   usage,
@@ -167,6 +317,7 @@ export function AccountDetailSheet({
   verifying,
   refreshing,
   actions,
+  onOpen,
   onClose,
 }: {
   account: Account | undefined
@@ -175,6 +326,7 @@ export function AccountDetailSheet({
   verifying: boolean
   refreshing: boolean
   actions: RowActions
+  onOpen: (id: string) => void
   onClose: () => void
 }) {
   const m = useMessages('accounts')
@@ -185,6 +337,16 @@ export function AccountDetailSheet({
   const quotaRefresh = useQuotaRefresh()
   const clearCooldown = useClearCooldown()
   const failure = account && quotaFailure(quotaRefresh, account)
+  const deviceLabels: Record<(typeof deviceKeys)[number], string> = {
+    os: m.deviceOs,
+    arch: m.deviceArch,
+    user_name: m.deviceUserName,
+    hostname: m.deviceHostname,
+    app_data_dir: m.deviceAppData,
+    time_zone: m.deviceTimeZone,
+    installation_id: m.deviceInstallation,
+    user_agent: m.deviceUserAgent,
+  }
   return (
     <Dialog
       open={account !== undefined}
@@ -231,6 +393,15 @@ export function AccountDetailSheet({
               >
                 <Network size={16} aria-hidden />
                 {m.proxyMenu}
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  actions.onExport(account)
+                }}
+              >
+                <Download size={16} aria-hidden />
+                {m.exportJson}
               </Button>
               <label className="ml-2 flex items-center gap-2 text-sm">
                 <Switch
@@ -359,6 +530,8 @@ export function AccountDetailSheet({
                 </ul>
               )}
             </Block>
+            <ModelsBlock account={account} />
+            <FamilyBlock account={account} onOpen={onOpen} />
             <Block title={m.priority}>
               <p className="text-sm text-foreground-muted">{m.priorityHint}</p>
               <PriorityField key={account.id + ':' + String(account.priority)} account={account} />
@@ -437,11 +610,14 @@ export function AccountDetailSheet({
             <Block title={m.device}>
               <p className="text-sm text-foreground-muted">{m.deviceHint}</p>
               <dl>
-                {Object.entries(account.device).map(([key, value]) => (
-                  <Row key={key} label={key}>
-                    <span className="font-mono text-xs">{value || '—'}</span>
-                  </Row>
-                ))}
+                {deviceKeys.map((key) => {
+                  const value = account.device[key] ?? ''
+                  return (
+                    <Row key={key} label={deviceLabels[key]}>
+                      <span className="font-mono text-xs">{value === '' ? '—' : value}</span>
+                    </Row>
+                  )
+                })}
               </dl>
             </Block>
           </div>

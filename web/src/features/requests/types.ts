@@ -45,6 +45,7 @@ export interface RequestRecord {
   error_code: string
   duration_ms: number
   first_event_ms: number
+  first_output_ms: number
   queue_ms: number
   input_tokens: number
   cached_tokens: number

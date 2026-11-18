@@ -10,7 +10,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -144,16 +143,10 @@ const (
 	remoteBackoffLimit = 60 * time.Second
 )
 
-// remoteLists 为官方 language_server 冷启动读完模型目录后并发读取的远程会话、项目与触发器列表
-var remoteLists = []string{"remote:listTriggerOptions", remoteConversations, remoteProjects, "remote:listTriggers?pageSize=50"}
-
 // loginLists 为官方 language_server 登录后读完模型目录并发读取的远程项目与会话列表
 var loginLists = []string{remoteProjects, remoteConversations}
 
-// marketplaceDelays 为登录序列界面渲染后到读取插件市场目录的两种间隔（毫秒），官方 2.31.1 与 2.31.2 登录现场各出现一次
-var marketplaceDelays = [2][2]int{{17, 21}, {178, 184}}
-
-// listRemotes 记下本虚拟进程轮询远程列表，并在后台于 32–112 ms 后并发读取 lists
+// listRemotes 记下本虚拟进程轮询远程列表，并在后台于 32–112 ms 后并发读取 lists 与插件市场目录（官方 2.33.0 登录序列），目录读完后记录读取事件
 func (c *Client) listRemotes(ctx context.Context, lists []string) {
 	c.mu.Lock()
 	c.hub.remote = true
@@ -166,6 +159,11 @@ func (c *Client) listRemotes(ctx context.Context, lists []string) {
 		for _, list := range lists {
 			group.Go(func() { c.get(ctx, endpointAICode+"/v1alpha/"+list, nil) })
 		}
+		group.Go(func() {
+			if c.readMarketplaces(ctx) {
+				c.logMarketplace()
+			}
+		})
 		group.Wait()
 	}()
 }
@@ -293,8 +291,9 @@ func (c *Client) tokeninfo(ctx context.Context, token string) error {
 // discard 经指定客户端发送请求并丢弃响应正文，返回状态码，结束后写 upstream.request 日志
 func (c *Client) discard(client *http.Client, request *http.Request) (status int, err error) {
 	started := time.Now()
+	request = c.traced(request)
 	defer func() { c.logRequest(request, status, started, err) }()
-	response, err := client.Do(c.traced(request))
+	response, err := client.Do(request)
 	if err != nil {
 		return 0, err
 	}
@@ -310,7 +309,7 @@ type refresher interface {
 	Refresh() (*oauth2.Token, error)
 }
 
-// ColdStart 按官方客户端以已保存账户启动时的请求与并发关系完成初始化，不发 prod loadCodeAssist、fetchAdminControls 与额度摘要：tokeninfo 与第一次 loadCodeAssist 并发，access token 已过期时两路各自刷新、tokeninfo 之后再刷新一次，userinfo 与 tokeninfo 同时发出，结束 139–413 ms 后读头像；tokeninfo 结束 46–126 ms 后发第二次 loadCodeAssist；第一次 loadCodeAssist 结束 50–74 ms 后（第二次已先结束时为 7–10 ms）同时发 fetchAvailableModels、fetchUserInfo 与 listExperiments；第二次 loadCodeAssist 结束 36–61 ms 后（它先于第一次结束时与前述三个请求同时）同时发第三次 loadCodeAssist 与 userinfo，userinfo 结束 47–73 ms 后读头像，第三次发出时 fetchUserInfo 已结束则在第三次结束 52–64 ms 后再发一次 fetchUserInfo；目录之后在后台按 listRemotes 读取远程列表；fetchUserInfo 结束 23–63 ms 后按 hubStartup 记录启动事件；listExperiments 结束 113–175 ms 后发一次 fetchConfig 作对照，listExperiments 失败时不发；迁移组在目录读取结束 35–295 ms 后记录，对照事件在 fetchConfig 结束 3–15 ms 后记录，两者都不早于 ready：启动事件之后 1–7 ms，发过第二次 fetchUserInfo 的冷启动中有三分之一为它结束 46–51 ms 后，对照事件再晚 1–2 ms；userinfo 与头像不计入初始化；只有 token、loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
+// ColdStart 按官方客户端以已保存账户启动时的请求与并发关系完成初始化，不发 prod loadCodeAssist、fetchAdminControls 与额度摘要：tokeninfo 与第一次 loadCodeAssist 并发，access token 已过期时两路各自刷新、tokeninfo 之后再刷新一次，userinfo 与 tokeninfo 同时发出，结束 139–413 ms 后读头像；tokeninfo 结束 46–126 ms 后发第二次 loadCodeAssist；第一次 loadCodeAssist 结束 50–74 ms 后（第二次已先结束时为 7–10 ms）同时发 fetchAvailableModels、fetchUserInfo 与 listExperiments；第二次 loadCodeAssist 结束 36–61 ms 后（它先于第一次结束时与前述三个请求同时）同时发第三次 loadCodeAssist 与 userinfo，userinfo 结束 47–73 ms 后读头像，第三次发出时 fetchUserInfo 已结束则在第三次结束 52–64 ms 后再发一次 fetchUserInfo；目录之后记下本虚拟进程轮询远程列表（启动读取由 hubInterface 在界面渲染后发出）；fetchUserInfo 结束 23–63 ms 后按 hubStartup 记录启动事件；listExperiments 结束 113–175 ms 后发一次 fetchConfig 作对照，listExperiments 失败时不发；迁移组在目录读取结束 35–295 ms 后记录，对照事件在 fetchConfig 结束 3–15 ms 后记录，两者都不早于 ready：启动事件之后 1–7 ms，发过第二次 fetchUserInfo 的冷启动中有三分之一为它结束 46–51 ms 后，对照事件再晚 1–2 ms；userinfo 与头像不计入初始化；只有 token、loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
 func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 	source, renew := c.source.(refresher)
 	renew = renew && source.Stale()
@@ -376,7 +375,9 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 				return err
 			}
 			c.recordCatalog(result.Catalog)
-			c.listRemotes(context.WithoutCancel(ctx), remoteLists)
+			c.mu.Lock()
+			c.hub.remote = true
+			c.mu.Unlock()
 			return record(time.Now().Add(time.Duration(between(35, 295))*time.Millisecond), 0, c.hubMigrations)
 		}, func() error {
 			result.Settings, _ = c.FetchUserInfo(ctx)
@@ -600,14 +601,11 @@ func titleEnvelopeFor(project, model string, contents []Content) (titleEnvelope,
 	return envelope, true
 }
 
-// StartTrajectory 按官方新会话的顺序在后台列出远程插件（冷启动后的第一个新会话除外）并发出 writeTrajectoryAcls，ACL 响应后虚拟 Hub 的会话数加一；50–230 ms 后以目录 mqueryModelIds 的模型发出标题请求；标题请求写出（或失败、或没有标题请求）25–85 ms 后读取插件市场目录，读到目录时随即返回标题请求写出的时刻，否则在写出 40–440 ms 后返回零值，调用方随后发生成请求
+// StartTrajectory 按官方新会话的顺序在后台发出伴随请求：列出远程插件（冷启动后的第一个新会话除外）、writeTrajectoryAcls（响应后虚拟 Hub 的会话数加一）与以目录 mqueryModelIds 的模型发出的标题请求，再按 LoadMarketplace 读取插件市场目录；本次读取了目录时返回标题请求发起的时刻，否则返回零值，调用方随即发生成请求
 func (c *Client) StartTrajectory(ctx context.Context, trajectory string, contents []Content) time.Time {
-	c.mu.Lock()
-	model := c.state.title
-	c.mu.Unlock()
 	background := context.WithoutCancel(ctx)
 	c.mu.Lock()
-	plugins := c.hub.plugins
+	model, plugins := c.state.title, c.hub.plugins
 	c.hub.plugins = true
 	c.mu.Unlock()
 	if plugins {
@@ -617,37 +615,14 @@ func (c *Client) StartTrajectory(ctx context.Context, trajectory string, content
 		c.post(background, c.base+"/v1internal:writeTrajectoryAcls", trajectoryACL{TrajectoryID: trajectory}, nil)
 		c.countConversation()
 	}()
-	written := make(chan struct{})
-	release := sync.OnceFunc(func() { close(written) })
-	if envelope, ok := titleEnvelopeFor(c.Project(), model, contents); ok && model != "" {
-		go func() {
-			defer release()
-			time.Sleep(50*time.Millisecond + rand.N(180*time.Millisecond))
-			c.title(httptrace.WithClientTrace(background, &httptrace.ClientTrace{WroteRequest: func(httptrace.WroteRequestInfo) { release() }}), envelope)
-		}()
-	} else {
-		release()
-	}
-	select {
-	case <-written:
-	case <-ctx.Done():
-		return time.Time{}
-	}
 	titled := time.Now()
-	wait := time.After(40*time.Millisecond + rand.N(400*time.Millisecond))
-	select {
-	case <-time.After(time.Duration(between(25, 85)) * time.Millisecond):
-	case <-ctx.Done():
+	if envelope, ok := titleEnvelopeFor(c.Project(), model, contents); ok && model != "" {
+		go c.title(background, envelope)
+	}
+	if c.LoadMarketplace(ctx).IsZero() {
 		return time.Time{}
 	}
-	if !c.LoadMarketplace(ctx).IsZero() {
-		return titled
-	}
-	select {
-	case <-wait:
-	case <-ctx.Done():
-	}
-	return time.Time{}
+	return titled
 }
 
 // title 以与生成请求相同的分块正文发出标题请求并读完响应流
@@ -693,7 +668,7 @@ func (m *Companion) every(ctx context.Context, offset, period time.Duration, run
 	}
 }
 
-// Run 读取过远程列表时按 pollRemote 轮询远程会话与项目列表；冷启动时按官方界面加载记录 Hub 界面事件；登录序列启动时记录摘要订阅、迁移、sidecar 启动、搜索索引与权限迁移事件，0.87–1.07 s 后按 hubOnboarded 记录界面渲染，渲染后按 slashErrors 记录 GetSlashCommands 的查询失败（登录进程的 goroutine 编号为 1244–2040），85–92 ms 列出远程插件，按 marketplaceDelays 取一种间隔读取插件市场目录，此后的第一个新会话不再列出，新手提示从初始化中的那次读取起每 120 s 读取；此后在启动后每个整分钟读取实验与配置，每 6 轮同时刷新套餐与目录，读到的账户状态经 Observe 交出；ctx 结束时返回
+// Run 读取过远程列表时按 pollRemote 轮询远程会话与项目列表；冷启动时按官方界面加载记录 Hub 界面事件；登录序列启动时记录摘要订阅、迁移、sidecar 启动、搜索索引与权限迁移事件，0.87–1.07 s 后按 hubOnboarded 记录界面渲染，23–29 ms 后列出远程插件（插件市场目录在初始化中与远程列表同时读取），此后的第一个新会话不再列出，新手提示从初始化中的那次读取起每 120 s 读取；此后在启动后每个整分钟读取实验与配置，每 6 轮同时刷新套餐与目录，读到的账户状态经 Observe 交出；ctx 结束时返回
 func (m *Companion) Run(ctx context.Context) {
 	m.client.mu.Lock()
 	remote := m.client.hub.remote
@@ -706,7 +681,7 @@ func (m *Companion) Run(ctx context.Context) {
 		go m.client.hubInterface(ctx)
 	} else {
 		m.client.mu.Lock()
-		m.client.hub.plugins, m.client.hub.goroutine = false, between(1244, 2040)
+		m.client.hub.plugins = false
 		m.client.mu.Unlock()
 		m.client.hubLogin()
 		go m.every(ctx, time.Since(m.started), nuxPeriod, func(int) { m.client.nuxes(ctx) })
@@ -714,18 +689,10 @@ func (m *Companion) Run(ctx context.Context) {
 			if pause(ctx, 870, 1070) != nil {
 				return
 			}
-			go m.client.slashErrors(ctx, m.client.hubOnboarded())
-			go func() {
-				if pause(ctx, 85, 92) == nil {
-					m.client.listPlugins(ctx)
-				}
-			}()
-			delay := marketplaceDelays[between(0, 1)]
-			if pause(ctx, delay[0], delay[1]) != nil {
-				return
+			m.client.hubOnboarded()
+			if pause(ctx, 23, 29) == nil {
+				m.client.listPlugins(ctx)
 			}
-			m.client.readMarketplaces(ctx)
-			m.client.logMarketplace()
 		}()
 	}
 	m.every(ctx, pollOffset, pollPeriod, func(round int) { m.poll(ctx, round) })

@@ -33,6 +33,8 @@ type sessionState struct {
 	Enabled bool `json:"enabled"`
 	// Authenticated 表示当前请求能访问管理 API：回环访问或已登录
 	Authenticated bool `json:"authenticated"`
+	// Local 表示请求来自服务所在电脑，保存文件与在文件夹中显示作用于这台电脑
+	Local bool `json:"local"`
 }
 
 // adminSession 是一个管理会话，ctx 在退出登录、到期或登录配置变化时取消
@@ -130,7 +132,7 @@ func (auth *adminAuth) session(r *http.Request) (*adminSession, bool) {
 // getSession 返回当前请求的会话状态
 func (s *server) getSession(w http.ResponseWriter, r *http.Request) {
 	session, enabled := s.auth.session(r)
-	writeJSON(w, http.StatusOK, sessionState{Enabled: enabled, Authenticated: loopback(r) || session != nil})
+	writeJSON(w, http.StatusOK, sessionState{Enabled: enabled, Authenticated: loopback(r) || session != nil, Local: loopback(r)})
 }
 
 // login 校验用户名与密码并签发会话 Cookie，同一客户端 IP 一分钟内失败 5 次后拒绝

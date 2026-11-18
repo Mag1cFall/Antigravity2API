@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 
 import type { Account } from '@/features/accounts/types'
+import type { Model } from '@/features/models/types'
 import { api } from '@/lib/api'
 
 // accountsKey 是账户列表的查询键，事件流推送时直接写入
@@ -22,5 +23,17 @@ export function useAccounts() {
   return useQuery({
     queryKey: accountsKey,
     queryFn: () => api<{ accounts: Account[] }>('/api/accounts'),
+  })
+}
+
+// useAccountModels 读取账户最近一次读到的目录中的公开模型，id 为空时不读取
+export function useAccountModels(id: string | undefined) {
+  return useQuery({
+    queryKey: ['accounts', id, 'models'],
+    queryFn: () =>
+      api<{ models: Omit<Model, 'accounts'>[] }>(
+        '/api/accounts/' + encodeURIComponent(id ?? '') + '/models',
+      ),
+    enabled: id !== undefined,
   })
 }

@@ -172,7 +172,7 @@ func (t *Trace) SetConversation(cascadeID string, step int) {
 	t.row.CascadeID, t.row.StepIndex = cascadeID, step
 }
 
-// AddAttempt 追加一次上游尝试并写进度日志，被丢弃的尝试带的用量计入记录；错误响应中的错误码、重试延迟与说明在调用方未填写时从响应体读取
+// AddAttempt 追加一次上游尝试并写进度日志，被丢弃的尝试带的用量计入记录并取代该尝试事件中暂存的用量；错误响应中的错误码、重试延迟与说明在调用方未填写时从响应体读取
 func (t *Trace) AddAttempt(attempt Attempt) {
 	if t == nil {
 		return
@@ -185,7 +185,10 @@ func (t *Trace) AddAttempt(attempt Attempt) {
 	}
 	t.mu.Lock()
 	t.row.Attempts = append(t.row.Attempts, attempt)
-	t.addUsage(attempt.Usage)
+	if attempt.Usage != nil {
+		t.addUsage(attempt.Usage)
+		t.pending = nil
+	}
 	id, index := t.row.ID, len(t.row.Attempts)
 	t.mu.Unlock()
 	if attempt.Status == http.StatusOK && attempt.Error == "" {
@@ -239,6 +242,18 @@ func (t *Trace) addUsage(usage *antigravity.Usage) {
 	t.row.CachedTokens += usage.CachedTokens
 	t.row.ReasoningTokens += usage.ReasoningTokens
 	t.row.ReplyTokens += usage.OutputTokens
+}
+
+// Output 记下首个正文或函数调用交给公开协议写出的时刻，之后的调用不改变它
+func (t *Trace) Output() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.row.FirstOutputMS == 0 {
+		t.row.FirstOutputMS = max(time.Since(t.started).Milliseconds(), 1)
+	}
 }
 
 // Fail 记录同一请求最近一次生成未能开始的错误，生成开始时为 nil

@@ -33,6 +33,7 @@ var Keys = []string{
 	"SYSTEM_PROMPT",
 	"SYSTEM_PROMPT_TEMPLATE",
 	"SYSTEM_PROMPT_USER_TEMPLATE",
+	"REJECTED_RULES",
 	"MODEL_MAPPING",
 	"MEDIA_OUTPUT",
 	"MEDIA_BASE_URL",
@@ -98,6 +99,8 @@ type Config struct {
 	SystemPromptTemplate string
 	// SystemPromptUserTemplate 是 custom 档的 user 轮模板，为空时 user 轮不包装
 	SystemPromptUserTemplate string
+	// RejectedRules 是与上游拒绝句列表合并使用的自定义规则，语法同 rules/rejected.txt
+	RejectedRules string
 	// ModelMapping 是客户端模型名到目录模型 ID 的映射，按书写顺序匹配
 	ModelMapping []ModelAlias
 	// MediaOutput 是 Chat、Messages 正文与 Images url 格式中生成媒体的输出方式
@@ -260,6 +263,9 @@ func (c *Config) Set(values map[string]string) error {
 	if value, ok := values["SYSTEM_PROMPT_USER_TEMPLATE"]; ok {
 		c.SystemPromptUserTemplate = value
 	}
+	if value, ok := values["REJECTED_RULES"]; ok {
+		c.RejectedRules = value
+	}
 	if value, ok := values["MODEL_MAPPING"]; ok && err == nil {
 		c.ModelMapping, err = parseModelMapping(value)
 	}
@@ -309,6 +315,7 @@ func (c Config) Values() map[string]string {
 		"SYSTEM_PROMPT":               c.SystemPrompt,
 		"SYSTEM_PROMPT_TEMPLATE":      c.SystemPromptTemplate,
 		"SYSTEM_PROMPT_USER_TEMPLATE": c.SystemPromptUserTemplate,
+		"REJECTED_RULES":              c.RejectedRules,
 		"MODEL_MAPPING":               formatModelMapping(c.ModelMapping),
 		"MEDIA_OUTPUT":                c.MediaOutput,
 		"MEDIA_BASE_URL":              c.MediaBaseURL,
@@ -397,6 +404,12 @@ var checks = []struct {
 	{[]string{"SYSTEM_PROMPT_TEMPLATE", "SYSTEM_PROMPT_USER_TEMPLATE"}, func(c Config) error {
 		if _, err := prompt.New(prompt.TierCustom, prompt.Custom{System: c.SystemPromptTemplate, User: c.SystemPromptUserTemplate}); err != nil {
 			return fmt.Errorf("SYSTEM_PROMPT_TEMPLATE 或 SYSTEM_PROMPT_USER_TEMPLATE 无效: %w", err)
+		}
+		return nil
+	}},
+	{[]string{"REJECTED_RULES"}, func(c Config) error {
+		if _, err := prompt.ParseRejected(c.RejectedRules); err != nil {
+			return fmt.Errorf("REJECTED_RULES 无效: %w", err)
 		}
 		return nil
 	}},

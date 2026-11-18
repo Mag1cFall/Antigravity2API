@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS requests (
  error_phase TEXT NOT NULL, upstream_status INTEGER NOT NULL, error_code TEXT NOT NULL,
  duration_ms INTEGER NOT NULL, first_event_ms INTEGER NOT NULL, queue_ms INTEGER NOT NULL,
  input_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, reasoning_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL,
- tool_calls INTEGER NOT NULL, cost_usd REAL, error TEXT NOT NULL, attempts TEXT NOT NULL);
+ tool_calls INTEGER NOT NULL, cost_usd REAL, error TEXT NOT NULL, attempts TEXT NOT NULL,
+ first_output_ms INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS requests_time ON requests(time);
 CREATE INDEX IF NOT EXISTS requests_model_time ON requests(model, time);
 CREATE INDEX IF NOT EXISTS requests_account_time ON requests(account, time);
@@ -140,17 +141,19 @@ type Row struct {
 	Status      int    `json:"status"`
 	State       string `json:"state"`
 	// ErrorPhase 是失败所在阶段：request、routing、upstream、network、timeout、internal
-	ErrorPhase      string `json:"error_phase"`
-	UpstreamStatus  int    `json:"upstream_status"`
-	ErrorCode       string `json:"error_code"`
-	DurationMS      int64  `json:"duration_ms"`
-	FirstEventMS    int64  `json:"first_event_ms"`
-	QueueMS         int64  `json:"queue_ms"`
-	InputTokens     int64  `json:"input_tokens"`
-	CachedTokens    int64  `json:"cached_tokens"`
-	ReasoningTokens int64  `json:"reasoning_tokens"`
-	ReplyTokens     int64  `json:"reply_tokens"`
-	ToolCalls       int    `json:"tool_calls"`
+	ErrorPhase     string `json:"error_phase"`
+	UpstreamStatus int    `json:"upstream_status"`
+	ErrorCode      string `json:"error_code"`
+	DurationMS     int64  `json:"duration_ms"`
+	FirstEventMS   int64  `json:"first_event_ms"`
+	// FirstOutputMS 是请求进入服务到首个正文或函数调用交给公开协议写出的毫秒数，没有时为 0
+	FirstOutputMS   int64 `json:"first_output_ms"`
+	QueueMS         int64 `json:"queue_ms"`
+	InputTokens     int64 `json:"input_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	ReplyTokens     int64 `json:"reply_tokens"`
+	ToolCalls       int   `json:"tool_calls"`
 	// ImageOutput 表示回答中有模型输出的图片，只用于估算费用，不入库
 	ImageOutput bool `json:"-"`
 	// CostUSD 是按上游模型官方单价估算的美元费用，模型没有单价时为 null
@@ -446,12 +449,12 @@ func insertRow(tx *sql.Tx, row Row) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	result, err := tx.Exec(`INSERT OR IGNORE INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	result, err := tx.Exec(`INSERT OR IGNORE INTO requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		row.ID, row.Time.UnixMilli(), row.ClientRequestID, row.ResponseID, row.Protocol, row.Path, row.APIKey, row.ClientIP,
 		row.UserAgent, row.Stream, row.Model, row.UpstreamModel, row.ModelVersion, row.RequestType, row.PromptTier, row.CascadeID,
 		row.StepIndex, row.Account, row.QuotaGroup, row.Status, row.State, row.ErrorPhase, row.UpstreamStatus, row.ErrorCode,
 		row.DurationMS, row.FirstEventMS, row.QueueMS, row.InputTokens, row.CachedTokens, row.ReasoningTokens, row.ReplyTokens,
-		row.ToolCalls, row.CostUSD, row.Error, string(encoded))
+		row.ToolCalls, row.CostUSD, row.Error, string(encoded), row.FirstOutputMS)
 	if err != nil {
 		return false, err
 	}

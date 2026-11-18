@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -46,6 +47,24 @@ var ErrIncompleteStream = errors.New("upstream stream ended without finishReason
 
 // filterBlockedText 为上游过滤提示的开头，该提示以不带 role 的 candidate 正文代替回答
 const filterBlockedText = "This request was blocked by Gemini's filters."
+
+// restrictedText 为上游对受限账户的通知开头，该通知以不带 role 的 candidate 正文代替回答
+const restrictedText = "Request is blocked due to the account restrictions"
+
+// AccountRestrictedError 表示上游以账户受限通知拒绝请求，Message 为通知原文
+type AccountRestrictedError struct {
+	Message string
+}
+
+// Error 返回带通知原文的错误说明
+func (e *AccountRestrictedError) Error() string {
+	return "account restricted by upstream: " + e.Message
+}
+
+// HTTPStatus 返回公开协议使用的状态码
+func (e *AccountRestrictedError) HTTPStatus() int {
+	return http.StatusForbidden
+}
 
 // ContentPolicyError 表示上游以内容策略类原因结束生成，Reason 为上游 finishReason（过滤提示为 OTHER），Message 为上游 finishMessage 或过滤提示原文
 type ContentPolicyError struct {
@@ -113,16 +132,24 @@ func contentPolicyFinish(reason string) bool {
 
 // NewConversation 以会话的 cascade 与 trajectory 标识和规范历史推导步序号：Turn 为历史中的模型轮数，Step 为历史按官方步骤模型展开的步骤数，Execution 为当前用户请求的序号
 func NewConversation(cascade, trajectory string, contents []Content) Conversation {
-	turn, execution := 0, -1
+	turn, execution, step := 0, -1, 0
 	for _, content := range contents {
-		if content.Role == RoleAssistant {
+		switch {
+		case content.Role == RoleAssistant:
 			turn++
-		}
-		if userRequest(content) {
+			step++
+		case userRequest(content):
 			execution++
+			step++
+		default:
+			for _, part := range content.Parts {
+				if part.FunctionResult != nil {
+					step++
+				}
+			}
 		}
 	}
-	conversation := Conversation{CascadeID: cascade, TrajectoryID: trajectory, Turn: turn, Step: len(sessionSteps(contents, nil)), Execution: max(execution, 0)}
+	conversation := Conversation{CascadeID: cascade, TrajectoryID: trajectory, Turn: turn, Step: step, Execution: max(execution, 0)}
 	if execution > 0 {
 		conversation.LastExecutionID = conversation.ExecutionID(execution - 1)
 	}
@@ -165,6 +192,8 @@ type Envelope struct {
 	RequestType string      `json:"requestType"`
 	// EnabledCreditTypes 是额度用尽后可用的积分类型，账户开启 AI 积分超额使用时为 GOOGLE_ONE_AI
 	EnabledCreditTypes []string `json:"enabledCreditTypes,omitempty"`
+	// payload 是 Client.Encode 按发出编码写好的请求正文
+	payload []byte
 }
 
 // CreditGoogleOneAI 是官方客户端开启 Enable AI Credit Overages 后 agent 信封带的积分类型
@@ -736,7 +765,7 @@ type Exchange struct {
 	Response []byte
 }
 
-// StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回本次请求与响应的正文；Tab 补全信封以编辑器版的 User-Agent 发出。上游以 CONTINUATION 结束一跳时以同一信封带上续接令牌发下一跳，各跳事件接在同一通道，后续各跳的用量加上此前各跳的合计，以 CONTINUATION 结束的一跳不发出自己的 usage 事件；交换记录的请求正文为第一跳的，响应正文为各跳依次相接
+// StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回本次请求与响应的正文；Tab 补全信封以编辑器版的 User-Agent 发出。上游以 CONTINUATION 结束一跳时以同一信封带上续接令牌发下一跳，一跳在流中出现过续接令牌之后中断或没有结束原因时以最近一次的令牌重拨，同一跳最多 midStreamResumes 次，各跳事件接在同一通道，后续各跳的用量加上此前各跳的合计，以 CONTINUATION 结束的一跳不发出自己的 usage 事件；交换记录的请求正文为第一跳的，响应正文为各跳依次相接
 func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (<-chan Event, *Exchange, error) {
 	exchange := &Exchange{URL: c.base + "/v1internal:streamGenerateContent?alt=sse"}
 	response, payload, err := c.streamHop(ctx, envelope, exchange)
@@ -748,6 +777,7 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 	go func() {
 		defer close(events)
 		var before Usage
+		resumes := 0
 		for {
 			hop := make(chan Event)
 			var body bytes.Buffer
@@ -757,11 +787,16 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 				DecodeStream(io.TeeReader(response.Body, &body), hop)
 			}()
 			var token string
+			var resumed bool
 			var last Usage
 			var usage *Event
 			for event := range hop {
 				if event.Kind == EventFinish && event.FinishReason == "CONTINUATION" && event.ContinuationToken != "" {
 					token, usage = event.ContinuationToken, nil
+					continue
+				}
+				if event.Kind == EventError && event.ContinuationToken != "" && resumes < midStreamResumes && ctx.Err() == nil {
+					token, resumed, usage = event.ContinuationToken, true, nil
 					continue
 				}
 				if event.Usage != nil {
@@ -785,8 +820,13 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 			if token == "" {
 				return
 			}
+			if resumed {
+				resumes++
+			} else {
+				resumes = 0
+			}
 			before = *addUsage(before, last)
-			envelope.Request.ContinuationToken = token
+			envelope.Request.ContinuationToken, envelope.payload = token, nil
 			if response, _, err = c.streamHop(ctx, envelope, exchange); err != nil {
 				events <- Event{Kind: EventError, Err: err}
 				return
@@ -795,6 +835,9 @@ func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (
 	}()
 	return events, exchange, nil
 }
+
+// midStreamResumes 是同一跳中断后以续接令牌重拨的次数上限
+const midStreamResumes = 3
 
 // addUsage 返回此前各跳的合计 a 与这一跳的用量 b 逐项相加的结果，PromptTokens 为第一跳的输入
 func addUsage(a, b Usage) *Usage {
@@ -808,15 +851,29 @@ func addUsage(a, b Usage) *Usage {
 	}
 }
 
-// streamHop 发出一次 streamGenerateContent，返回状态码 2xx 的响应与请求正文；非 2xx 时读出正文追加到交换记录并返回 UpstreamError
-func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exchange) (*http.Response, []byte, error) {
-	encode := c.device.hubJSON
+// Encode 按发出时的编码写好信封的请求正文并返回其字节数，之后发出这个信封时直接使用这份正文
+func (c *Client) Encode(envelope *Envelope) (int, error) {
+	payload, err := c.encode(*envelope)
+	envelope.payload = payload
+	return len(payload), err
+}
+
+// encode 按发出时的编码返回信封的请求正文：Tab 补全为紧凑 JSON，其余按 hubJSON
+func (c *Client) encode(envelope Envelope) ([]byte, error) {
 	if envelope.RequestType == requestTypeTab {
-		encode = marshal
+		return marshal(envelope)
 	}
-	payload, err := encode(envelope)
-	if err != nil {
-		return nil, nil, err
+	return c.device.hubJSON(envelope)
+}
+
+// streamHop 发出一次 streamGenerateContent，返回状态码 2xx 的响应与请求正文；没有拿到响应时在 WARN 级记下失败所处的连接阶段；信封带有 Encode 写好的正文时直接使用；非 2xx 时读出正文追加到交换记录并返回 UpstreamError
+func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exchange) (*http.Response, []byte, error) {
+	payload := envelope.payload
+	if payload == nil {
+		var err error
+		if payload, err = c.encode(envelope); err != nil {
+			return nil, nil, err
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, exchange.URL, io.NopCloser(bytes.NewReader(payload)))
 	if err != nil {
@@ -828,8 +885,12 @@ func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exc
 	}
 	request.Header.Set("User-Agent", agent)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := c.http.Do(c.traced(request))
+	request = c.traced(request)
+	response, err := c.http.Do(request)
 	if err != nil {
+		if ctx.Err() == nil {
+			slog.WarnContext(ctx, "上游生成请求失败 | "+request.URL.Host+request.URL.Path+connPhase(request)+" | 错误="+err.Error(), "event", "upstream.request", "source", c.account)
+		}
 		return nil, payload, err
 	}
 	if response.StatusCode/100 != 2 {
@@ -841,12 +902,14 @@ func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exc
 	return response, payload, nil
 }
 
-// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion，usageMetadata 没有 promptTokenCount 时输入用量取总量减去输出与思考；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；已发出函数调用后上游没有结束帧就结束或读取中断时以 STOP 结束、结束事件的 Err 带该原因；promptFeedback 的 blockReason 在没有发出函数调用时以安全设置、屏蔽词或禁止内容结束为 PromptFeedbackError；不带 role 的过滤提示记为原因 OTHER，它、其余 blockReason 与内容策略类原因在已发出函数调用时以 STOP 结束、结束事件的 Err 带被忽略的 ContentPolicyError，否则以 ContentPolicyError 结束
+// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion，usageMetadata 没有 promptTokenCount 时输入用量取总量减去输出与思考；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；没有发出函数调用时流中断或以 ErrIncompleteStream 结束的错误事件带流中最近一次的续接令牌；已发出函数调用后上游没有结束帧就结束或读取中断时以 STOP 结束、结束事件的 Err 带该原因；promptFeedback 的 blockReason 在没有发出函数调用时以安全设置、屏蔽词或禁止内容结束为 PromptFeedbackError；不带 role 的账户受限通知以 AccountRestrictedError 结束，不带 role 的过滤提示记为原因 OTHER，它、其余 blockReason 与内容策略类原因在已发出函数调用时以 STOP 结束、结束事件的 Err 带被忽略的 ContentPolicyError，否则以 ContentPolicyError 结束
 func DecodeStream(reader io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 64<<20)
 	var usage *Usage
 	var called, filtered, prompted bool
+	// checkpoint 是流中最近一次出现的续接令牌，流中断或没有结束原因时带在错误事件上
+	var checkpoint string
 	finish := Event{Kind: EventFinish}
 	for scanner.Scan() {
 		line, ok := bytes.CutPrefix(scanner.Bytes(), []byte("data: "))
@@ -881,6 +944,10 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 			finish.FinishReason, finish.FinishMessage = feedback.BlockReason, feedback.BlockReasonMessage
 		}
 		for _, candidate := range chunk.Response.Candidates {
+			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, restrictedText) {
+				events <- Event{Kind: EventError, Err: &AccountRestrictedError{Message: parts[0].Text}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+				return
+			}
 			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, filterBlockedText) {
 				filtered = true
 				finish.FinishReason, finish.FinishMessage = "OTHER", parts[0].Text
@@ -888,11 +955,12 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 			}
 			for _, part := range candidate.Content.Parts {
 				called = called || part.FunctionCall != nil
-				emitPart(part, chunk.Response.UsageMetadata != nil, usage, chunk.Response.ModelVersion, events)
+				emitPart(part, chunk.Response.UsageMetadata != nil, candidate.FinishReason != "" || candidate.FinishMessage != "", usage, chunk.Response.ModelVersion, events)
 			}
 			if candidate.GroundingMetadata != nil {
 				events <- Event{Kind: EventGrounding, ProviderModel: chunk.Response.ModelVersion, Grounding: candidate.GroundingMetadata}
 			}
+			checkpoint = cmp.Or(candidate.ContinuationToken, checkpoint)
 			switch {
 			case candidate.FinishReason != "":
 				finish.FinishReason, finish.FinishMessage, finish.ContinuationToken = candidate.FinishReason, candidate.FinishMessage, candidate.ContinuationToken
@@ -902,8 +970,12 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		if !called || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			events <- Event{Kind: EventError, Err: err, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+			return
+		}
+		if !called {
+			events <- Event{Kind: EventError, Err: err, TraceID: finish.TraceID, ResponseID: finish.ResponseID, ContinuationToken: checkpoint}
 			return
 		}
 		finish.Err = err
@@ -913,7 +985,7 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 	}
 	if finish.FinishReason == "" {
 		if !called {
-			events <- Event{Kind: EventError, Err: ErrIncompleteStream, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
+			events <- Event{Kind: EventError, Err: ErrIncompleteStream, TraceID: finish.TraceID, ResponseID: finish.ResponseID, ContinuationToken: checkpoint}
 			return
 		}
 		finish.FinishReason, finish.Err = "STOP", cmp.Or(finish.Err, ErrIncompleteStream)
@@ -933,8 +1005,8 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 	events <- finish
 }
 
-// emitPart 把上游的一个 part 转成文本、思考、函数调用、内联媒体或独立签名事件，所在事件带 usageMetadata 时附上累计用量，model 为所在事件的 modelVersion
-func emitPart(part WirePart, counted bool, usage *Usage, model string, events chan<- Event) {
+// emitPart 把上游的一个 part 转成文本、思考、函数调用、内联媒体或独立签名事件，所在事件带 usageMetadata 时附上累计用量，model 为所在事件的 modelVersion，final 为所在 candidate 是否带结束原因
+func emitPart(part WirePart, counted, final bool, usage *Usage, model string, events chan<- Event) {
 	if !counted {
 		usage = nil
 	}
@@ -944,14 +1016,14 @@ func emitPart(part WirePart, counted bool, usage *Usage, model string, events ch
 		if id == "" {
 			id = fmt.Sprintf("call_%06d", rand.IntN(1000000))
 		}
-		events <- Event{Kind: EventToolCall, Usage: usage, ProviderModel: model, ToolCall: &FunctionCall{ID: id, Name: part.FunctionCall.Name, Arguments: part.FunctionCall.Args, ThoughtSignature: part.ThoughtSignature}}
+		events <- Event{Kind: EventToolCall, Usage: usage, ProviderModel: model, Final: final, ToolCall: &FunctionCall{ID: id, Name: part.FunctionCall.Name, Arguments: part.FunctionCall.Args, ThoughtSignature: part.ThoughtSignature}}
 	case part.InlineData != nil:
-		events <- Event{Kind: EventMedia, Usage: usage, ProviderModel: model, Media: &Blob{MIME: part.InlineData.MIMEType, Data: part.InlineData.Data}, ThoughtSignature: part.ThoughtSignature}
+		events <- Event{Kind: EventMedia, Usage: usage, ProviderModel: model, Final: final, Media: &Blob{MIME: part.InlineData.MIMEType, Data: part.InlineData.Data}, ThoughtSignature: part.ThoughtSignature}
 	case part.Thought && part.Text != "":
-		events <- Event{Kind: EventReasoning, Usage: usage, ProviderModel: model, Text: part.Text, ThoughtSignature: part.ThoughtSignature}
+		events <- Event{Kind: EventReasoning, Usage: usage, ProviderModel: model, Final: final, Text: part.Text, ThoughtSignature: part.ThoughtSignature}
 	case part.Text != "":
-		events <- Event{Kind: EventText, Usage: usage, ProviderModel: model, Text: part.Text, ThoughtSignature: part.ThoughtSignature}
+		events <- Event{Kind: EventText, Usage: usage, ProviderModel: model, Final: final, Text: part.Text, ThoughtSignature: part.ThoughtSignature}
 	case part.ThoughtSignature != "":
-		events <- Event{Kind: EventThoughtSignature, Usage: usage, ProviderModel: model, ThoughtSignature: part.ThoughtSignature}
+		events <- Event{Kind: EventThoughtSignature, Usage: usage, ProviderModel: model, Final: final, ThoughtSignature: part.ThoughtSignature}
 	}
 }

@@ -1,16 +1,23 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 
+import type { CustomRange } from '@/features/requests/RangePicker'
 import type { UsageReport } from '@/features/usage/types'
 import { api } from '@/lib/api'
 
 // UsageBucketSize 是用量分桶：auto 由服务按范围选择，86400 为按本机时区的自然日
 type UsageBucketSize = 'auto' | '86400'
 
-// rangeQuery 是截止到当前时间的 from 与 to
-export function rangeQuery(rangeMs: number) {
+// UsageSpan 是用量的时间范围：截止到当前时间的毫秒数，或自定义的起止时刻
+export type UsageSpan = number | CustomRange
+
+// rangeQuery 是时间范围的 from 与 to，毫秒数时截止到当前时间
+export function rangeQuery(span: UsageSpan) {
+  if (typeof span !== 'number') {
+    return new URLSearchParams({ from: span.from.toISOString(), to: span.to.toISOString() })
+  }
   const now = Date.now()
   return new URLSearchParams({
-    from: new Date(now - rangeMs).toISOString(),
+    from: new Date(now - span).toISOString(),
     to: new Date(now + 1000).toISOString(),
   })
 }
@@ -28,14 +35,19 @@ export function filterQuery(query: URLSearchParams, filters: UsageFilters) {
 
 // useUsage 读取一段时间内符合筛选的用量报告，分桶按本机时区对齐
 export function useUsage(
-  rangeMs: number,
+  span: UsageSpan,
   bucket: UsageBucketSize = 'auto',
   filters: UsageFilters = {},
 ) {
   return useQuery({
-    queryKey: ['usage', rangeMs, bucket, filters],
+    queryKey: [
+      'usage',
+      typeof span === 'number' ? span : [span.from.getTime(), span.to.getTime()],
+      bucket,
+      filters,
+    ],
     queryFn: () => {
-      const query = filterQuery(rangeQuery(rangeMs), filters)
+      const query = filterQuery(rangeQuery(span), filters)
       query.set('tz', Intl.DateTimeFormat().resolvedOptions().timeZone)
       query.set('bucket', bucket)
       return api<UsageReport>('/api/usage?' + query.toString())

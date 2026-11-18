@@ -21,7 +21,7 @@
 
 - **OpenAI 兼容**：`/v1/chat/completions`、`/v1/completions`、`/v1/responses`、`/v1/models`、`/v1/images`、`/v1/audio`、`/v1/files`
 - **Claude 兼容**：`/v1/messages`、`/v1/messages/count_tokens`
-- **Gemini 兼容**：`/v1beta/models/{model}:generateContent`、`:streamGenerateContent`、`:countTokens`、Files API、Interactions API
+- **Gemini 兼容**：`/v1beta/models/{model}:generateContent`、`:streamGenerateContent`、`:countTokens`、Files API、Interactions API、Live API
 - **官方客户端身份**：以纯 Go HTTP 按 Antigravity 官方客户端的 TLS 与 HTTP 形态、User-Agent、请求信封、初始化顺序与伴随请求访问 Cloud Code，每个账户使用导入时生成的设备档案
 - **Agent 模型**：Gemini、Claude 与 GPT-OSS 的全部 Agent 模型，按账户实时目录公开，思考参数映射到同族 Low、Medium、High 思考档位
 - **流式输出**：文本、思考与思考签名实时增量返回，工具调用、并行函数调用、图片与 PDF 输入在 OpenAI Chat、OpenAI Responses、Claude Messages 与 Gemini 四个协议间互通
@@ -30,9 +30,9 @@
 - **系统提示档位**：全保留、中等、激进与自定义四档，控制官方系统提示与用户消息包装的保留程度
 - **多账户调度**：按账户优先级与 Gemini、第三方模型两组额度选择账户，请求在同级账户间轮换，同一会话固定在同一账户；指定的模型可优先使用低套餐账户；额度耗尽冷却到重置时间，限速、容量不足与服务端错误按原因冷却或换号；各账户额度定时刷新，账户页可随时刷新全部或单个账户
 - **token 计数**：按模型族本地计算输入 token，GPT-OSS 按官方聊天模板渲染后计数，Gemini 与 Claude 族同一会话以上游实际用量校准
-- **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置，界面支持简体中文、繁体中文（台湾）、英文、日文、韩文、法文与德文，服务日志与错误说明随界面语言显示；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
+- **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置；账户详情列出该账户可用的模型与与该账户共用每周额度的其他账户（通常是同一 Google One 家庭群组），用量与请求记录可按预设或自定义的时间范围查看，趋势图悬停查看各时段的请求，导出的文件保存到运行服务的电脑上的文件夹；界面支持简体中文、繁体中文（台湾）、英文、日文、韩文、法文与德文，服务日志与错误说明随界面语言显示；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志与请求账本**：结构化日志按请求记录选号、换号、冷却与上游尝试；SQLite 账本保存每个请求的账户、模型、token、缓存命中与分段耗时，并按官方 API 单价估算费用
-- **登录方式**：浏览器登录、粘贴授权码登录、导入本机官方客户端的账户、从另一台电脑配对上传，账户 JSON 导出与导入（兼容 Antigravity Manager、CLIProxyAPI、sub2api、gcli2api、opencode-antigravity-auth 与 antigravity-claude-proxy 的账户文件）
+- **登录方式**：浏览器登录、粘贴授权码登录、导入本机官方客户端的账户、从另一台电脑配对上传，账户 JSON 导出与导入（全部、所选或单个账户；导入前列出文件中的账户，勾选后导入；兼容 Antigravity Manager、CLIProxyAPI、sub2api、gcli2api、opencode-antigravity-auth 与 antigravity-claude-proxy 的账户文件）
 - **代理**：HTTP、HTTPS、SOCKS5 全局代理与每账户代理，未设置时跟随系统代理
 
 ## 支持的模型
@@ -208,9 +208,10 @@ POST   /v1beta/interactions
 GET    /v1beta/interactions/{id}
 DELETE /v1beta/interactions/{id}
 POST   /v1beta/interactions/{id}/cancel
+GET    /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
 ```
 
-`streamGenerateContent` 不带 `alt=sse` 时返回 JSON 数组。Interactions 的四个端点也可用 `/v1/interactions` 路径。`generationConfig.responseModalities` 含 `IMAGE` 时需要图像生成模型，图片以 `inlineData` part 返回，`imageConfig` 的 `aspectRatio` 与 `imageSize` 原样生效。
+`streamGenerateContent` 不带 `alt=sse` 时返回 JSON 数组。Interactions 的四个端点也可用 `/v1/interactions` 路径。Gemini SDK 默认的 `/v1` 路径同样可用：模型方法、上下文缓存与文件上传把 `v1beta` 换成 `v1` 即可，`/v1/models` 与 `/v1/files` 以 `x-goog-api-key` 或 `key` 认证时按 Gemini 格式返回。Live API 经上面的 WebSocket 地址连接（`v1alpha` 同样可用）：转写模型返回语音的文字转写，Agent 模型以语音模式对话并输出 24 kHz 语音。`generationConfig.responseModalities` 含 `IMAGE` 时需要图像生成模型，图片以 `inlineData` part 返回，`imageConfig` 的 `aspectRatio` 与 `imageSize` 原样生效。
 
 ### 认证
 
@@ -273,6 +274,8 @@ wire_api = "responses"
 
 管理端设置页的“查看原文”显示各系统提示档位发给上游的系统指令与首轮用户消息。`custom` 在设置页直接编辑两段文字：系统指令与用户消息的包装。“载入预设”把内置档位的全文放进编辑框，“插入”在光标处放入官方段落或变量；`{{.Client}}` 处是客户端自己的系统提示，`{{.Text}}` 处是用户消息原文。两段都是 Go `text/template` 模板，编辑框下方显示代入示例数据后的字符数或模板错误。
 
+Google 会直接拒绝系统提示中含某些客户端身份句与说明文字的请求（返回 429）。服务在发送前删去含这些文字的句子，规则列表在 [`rules/rejected.txt`](rules/rejected.txt)，服务启动时与每小时自动更新；设置页显示列表版本与上次检查结果，“立即更新”马上检查一次，还可以填写自己的规则（`REJECTED_RULES`），保存后下一次请求生效。
+
 ## 目录结构
 
 ```text
@@ -310,6 +313,7 @@ docs/                 # 协议、开发与日志文档
 | `SYSTEM_PROMPT` | 系统提示档位：`full`、`medium`、`aggressive`、`custom` | `full` |
 | `SYSTEM_PROMPT_TEMPLATE` | `custom` 档位的系统指令模板，多行内容写成双引号内以 `\n` 换行的一行 | `medium` 档位的系统指令 |
 | `SYSTEM_PROMPT_USER_TEMPLATE` | `custom` 档位的用户消息模板，为空时原样发送 | `medium` 档位的用户消息包装 |
+| `REJECTED_RULES` | 自定义拒绝句规则，与自动更新的列表合并使用，语法见 `rules/rejected.txt` 开头 | 空 |
 | `MODEL_MAPPING` | 客户端模型名到目录模型 ID 的映射，每项写成 `别名:模型 ID`，逗号分隔多项 | 空 |
 | `MEDIA_OUTPUT` | 生成媒体的给出方式：`inline` 或 `url` | `inline` |
 | `MEDIA_BASE_URL` | 媒体链接使用的服务地址，例如 `https://ai.example.com`；为空时使用每个请求访问的地址，经反向代理时跟随 `X-Forwarded-Proto` | 空 |

@@ -18,7 +18,7 @@ func (s *Service) complete(ctx context.Context, request antigravity.GenerateRequ
 			prefix.WriteString(part.Text)
 		}
 	}
-	return s.dispatch(ctx, request, model, conversation{}, nil, "tab", 0, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
+	return s.dispatch(ctx, request, model, conversation{}, identity{}, "tab", 0, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
 		file := antigravity.NewTabFile(current.device, prefix.String(), request.Suffix)
 		envelope, err := antigravity.BuildTabEnvelope(current.client.Project(), catalog, file, time.Now().In(current.device.Location()))
 		if err != nil {

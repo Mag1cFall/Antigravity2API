@@ -46,6 +46,12 @@ var sessionFixed = func() sessionTemplate {
 	return template
 }()
 
+// sectionGroups 为 token 明细中单独成组的系统提示段：段名到组名与组类型，按 SessionSections 的顺序排在系统提示组之后
+var sectionGroups = map[string]struct {
+	name string
+	kind int
+}{"subagents": {"Subagents", 6}, "skills": {"Skills", 5}, "featured_plugins": {"Plugins", 9}}
+
 // SessionSections 为官方系统提示 token 明细中各段的段名
 var SessionSections = sessionFixed.Sections
 
@@ -182,9 +188,27 @@ func sessionFamily(model CatalogModel) string {
 		return "gpt"
 	case strings.Contains(model.ID, "argon"):
 		return "argon"
+	case strings.Contains(model.ID, "carbon"):
+		return "carbon"
+	case strings.Contains(model.ID, "hydrogen"):
+		return "hydrogen"
 	}
 	return "gemini"
 }
+
+// promptSections 返回 prompt_sections：所选目录条目带 template__system_prompts__<段名> 的段来源（4.1）为服务端模板 4，其余为模板中的值
+func promptSections(model CatalogModel) []byte {
+	nodes := pbParse(sessionFixed.PromptSections)
+	for index := range nodes {
+		if _, ok := model.ModelExperiments.Experiments["template__system_prompts__"+sessionFixed.Sections[index]]; ok {
+			nodes[index].raw = pbSet(nodes[index].raw, []int{4, 1}, pbNode{wire: 0, u: 4})
+		}
+	}
+	return pbEncode(nodes)
+}
+
+// shellToolTokens 为 run_command 工具说明按设备系统的 token 数相对模板（Windows）的差，官方 2.33.0 Linux 各模型族都少 3
+var shellToolTokens = map[string]int64{"linux": -3}
 
 // shellName 返回设备系统上官方终端工具使用的 shell
 func shellName(os string) string {
@@ -284,14 +308,79 @@ func appendDouble(b []byte, field int, value float64) []byte {
 	return binary.LittleEndian.AppendUint64(appendTag(b, field, 1), math.Float64bits(value))
 }
 
-// sessionCascade 按模型族模板填写执行配置：模型枚举、输出上限、模型名、终端 shell 与按 mendelFlags 取值的实验开关
+// sessionCascade 按模型族模板填写执行配置：模型枚举、输出上限、模型名、终端 shell、终端的 enable_pty 与 enable_persistent_mode（取 mendelFlags 的 enable-pty 与 enable-persistent-terminals）、命令评估的 PolicyGuardianConfig（并入 mendelFlags 的 policy-guardian-config）与按 mendelFlags 取值的实验开关
 func (s companionState) sessionCascade(model CatalogModel, device Device) []byte {
 	config := sessionFixed.Cascade[sessionFamily(model)]
 	config = pbSet(config, []int{1, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[model.Model])})
 	config = pbSet(config, []int{1, 6}, pbNode{wire: 0, u: uint64(model.MaxOutputTokens)})
 	config = pbSet(config, []int{1, 28}, pbNode{wire: 2, raw: []byte(model.ID)})
 	config = pbSet(config, []int{1, 13, 8, 5}, pbNode{wire: 2, raw: []byte(shellName(device.OS))})
+	config = pbSet(config, []int{1, 13, 8, 13}, pbNode{wire: 0, u: s.mendelBool("enable-pty")})
+	config = pbSet(config, []int{1, 13, 8, 14}, pbNode{wire: 0, u: s.mendelBool("enable-persistent-terminals")})
+	config = pbSet(config, []int{3, 18, 2}, pbNode{wire: 2, raw: policyGuardian(pbGet(config, 3, 18, 2).raw, s.mendelString("policy-guardian-config"))})
 	return pbSet(config, []int{1, 43}, pbNode{wire: 2, raw: s.sessionExperiments()})
+}
+
+// mendelString 返回 mendelFlags 中字符串开关 name 的值，没有该开关时为空串
+func (s companionState) mendelString(name string) string {
+	for _, entry := range s.mendelFlags() {
+		if entry.Name == name && entry.StringValue != nil {
+			return *entry.StringValue
+		}
+	}
+	return ""
+}
+
+// policyGuardianFields 为 PolicyGuardianConfig 中标量字段的 JSON 名与字段号（官方 2.33.0 cortex.proto）
+var policyGuardianFields = map[string]int{
+	"enabled": 1, "antivirus_enabled": 4, "max_tool_rounds": 7, "enable_url_vetting": 8, "enable_denied_repeat_precheck": 9, "http_timeout_seconds": 10, "antivirus_enforced": 11,
+	"allowed": 12, "deployment": 15, "max_concurrent_tool_calls": 17, "enable_irreversible_vetting": 18, "enable_reversibility_adjudication": 19, "use_intent_alignment_for_destruction": 20,
+}
+
+// policyGuardian 把开关 policy-guardian-config 的 JSON 并入模板的 PolicyGuardianConfig：同号字段换成开关的值，按 Go protobuf 的编码顺序排列，即普通字段按字段号升序、oneof 的 model（2）与 model_tier（5）在最后；开关为空时原样返回
+func policyGuardian(template []byte, config string) []byte {
+	var values map[string]any
+	if json.Unmarshal([]byte(config), &values) != nil || len(values) == 0 {
+		return template
+	}
+	nodes := pbParse(template)
+	for name, value := range values {
+		number, ok := policyGuardianFields[name]
+		if !ok {
+			continue
+		}
+		node := pbNode{num: number}
+		switch v := value.(type) {
+		case bool:
+			node.u = flag(v)
+		case float64:
+			node.u = uint64(v)
+		case string:
+			node.wire, node.raw = 2, []byte(v)
+		default:
+			continue
+		}
+		nodes = slices.DeleteFunc(nodes, func(n pbNode) bool { return n.num == number })
+		nodes = append(nodes, node)
+	}
+	oneof := func(n pbNode) int {
+		if n.num == 2 || n.num == 5 {
+			return 1
+		}
+		return 0
+	}
+	slices.SortStableFunc(nodes, func(a, b pbNode) int { return cmp.Or(oneof(a)-oneof(b), a.num-b.num) })
+	return pbEncode(nodes)
+}
+
+// mendelBool 返回 mendelFlags 中布尔开关 name 的值，打开为 1，没有该开关或关闭为 0
+func (s companionState) mendelBool(name string) uint64 {
+	for _, entry := range s.mendelFlags() {
+		if entry.Name == name && entry.BoolValue != nil {
+			return flag(*entry.BoolValue)
+		}
+	}
+	return 0
 }
 
 // sessionExperiments 编码执行配置的实验开关 map：开关名取模板，值取 mendelFlags 中的同名开关，布尔值为 bool_value，整数与小数为 number_value，字符串为 string_value，没有该开关时为 false
@@ -342,9 +431,16 @@ func (s companionState) mendelIDs() []byte {
 	return out
 }
 
-// sessionOverride 返回填写模型枚举的请求覆盖配置
-func sessionOverride(model CatalogModel) []byte {
-	return pbSet(sessionFixed.Override, []int{1, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[model.Model])})
+// autoExecution 为官方客户端新装后的终端命令自动执行策略，键为设备是否为 Linux：setting 为 Hub user_config 存储事件中的设置，request 为请求覆盖配置中的 auto_execution_policy（官方 2.33.0 Windows 为 OFF 与 1，Linux 为 PROCEED_IN_SANDBOX 与 AUTO 的 2）
+var autoExecution = map[bool]struct {
+	setting string
+	request uint64
+}{false: {"CASCADE_COMMANDS_AUTO_EXECUTION_OFF", 1}, true: {"CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX", 2}}
+
+// sessionOverride 返回填写模型枚举与设备系统的终端命令自动执行策略的请求覆盖配置
+func sessionOverride(model CatalogModel, device Device) []byte {
+	override := pbSet(sessionFixed.Override, []int{1, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[model.Model])})
+	return pbSet(override, []int{1, 13, 8, 3, 6}, pbNode{wire: 0, u: autoExecution[device.OS == "linux"].request})
 }
 
 // structuredEvent 编码带结构化载荷的会话 clearcut 事件：公共字段与名称事件相同并附实验开关，载荷写入扩展的 field，事件码为 kind
@@ -475,14 +571,9 @@ func (c *Client) hooks(at time.Time, turn SessionTurn, track *sessionTrack, kind
 	}
 }
 
-// preTool 记录一个函数调用执行前的三个钩子
+// preTool 记录一个函数调用执行前的两个钩子
 func (c *Client) preTool(at time.Time, turn SessionTurn, track *sessionTrack, metadata int, step int64) {
-	c.hooks(at, turn, track, "pre_tool", []string{"battle_mode_tool_args", "command_assessor", "timeout_long_running_search_command"}, metadata, step, func(name string) []byte {
-		if name != "timeout_long_running_search_command" {
-			return nil
-		}
-		return appendBytes(nil, 3, appendString(nil, 1, "allow"))
-	})
+	c.hooks(at, turn, track, "pre_tool", []string{"battle_mode_tool_args", "command_assessor"}, metadata, step, func(string) []byte { return nil })
 }
 
 // preInvocation 记录模型调用前的消息投递与上下文摘要钩子
@@ -495,29 +586,24 @@ func (c *Client) preInvocation(at time.Time, turn SessionTurn, track *sessionTra
 	})
 }
 
-// postInvocation 记录模型调用后的钩子，final 为真时回复不含工具调用，另记执行结束前的钩子；chain_check 与 swarm_park_guard 不带结果
+// postInvocation 记录模型调用后的钩子，final 为真时回复不含工具调用，另记执行结束前的钩子；只有 no_tool_call_check 带结果
 func (c *Client) postInvocation(at time.Time, turn SessionTurn, track *sessionTrack, metadata int, final bool) {
 	c.hooks(at, turn, track, "post_invocation", postHooks, metadata, -1, func(name string) []byte {
 		switch {
-		case name == "chain_check":
+		case name != "no_tool_call_check":
 			return nil
-		case final && name == "no_tool_call_check":
+		case final:
 			return invocationResult(noToolCall)
 		}
 		return invocationResult("")
 	})
 	if final {
-		c.hooks(at, turn, track, "stop", stopHooks, metadata, -1, func(name string) []byte {
-			if name == "swarm_park_guard" {
-				return nil
-			}
-			return appendBytes(nil, 2, appendVarint(nil, 1, 0))
-		})
+		c.hooks(at, turn, track, "stop", stopHooks, metadata, -1, func(string) []byte { return nil })
 	}
 }
 
 // userStep 编码用户输入步骤：previous 非空时附上一次用户请求的配置
-func userStep(conversation Conversation, model CatalogModel, previous string, index, metadata int, execution string, created, done time.Time) []byte {
+func userStep(conversation Conversation, model CatalogModel, device Device, previous string, index, metadata int, execution string, created, done time.Time) []byte {
 	meta := appendTime(nil, 1, created)
 	meta = appendVarint(meta, 3, 4)
 	meta = appendString(meta, 12, execution)
@@ -526,11 +612,10 @@ func userStep(conversation Conversation, model CatalogModel, previous string, in
 	meta = appendString(meta, 35, contentID(conversation.TrajectoryID, index))
 	input := appendBytes(nil, 3, nil)
 	input = appendBytes(input, 4, nil)
-	input = appendBytes(input, 12, sessionOverride(model))
+	input = appendBytes(input, 12, sessionOverride(model, device))
 	if previous != "" {
-		input = appendBytes(input, 13, sessionOverride(CatalogModel{Model: previous}))
+		input = appendBytes(input, 13, sessionOverride(CatalogModel{Model: previous}, device))
 	}
-	input = appendBytes(input, 16, nil)
 	input = appendBytes(input, 18, pbGet(sessionFixed.Resolution, 1).raw)
 	input = appendString(input, 19, uuid.NewString())
 	step := appendVarint(nil, 1, stepUser)
@@ -543,11 +628,12 @@ func userStep(conversation Conversation, model CatalogModel, previous string, in
 func usagePayload(conversation Conversation, model CatalogModel, reply SessionReply, index int) []byte {
 	usage := appendVarint(nil, 1, uint64(sessionFixed.Models[model.Model]))
 	usage = appendSome(usage, 2, reply.Usage.InputTokens-reply.Usage.CachedTokens)
-	usage = appendSome(usage, 3, reply.Usage.OutputTokens)
+	usage = appendSome(usage, 3, reply.Usage.OutputTokens+reply.Usage.ReasoningTokens)
 	usage = appendSome(usage, 5, reply.Usage.CachedTokens)
 	usage = appendVarint(usage, 6, uint64(sessionFixed.Providers[model.APIProvider]))
 	usage = appendString(usage, 7, botID(conversation.TrajectoryID, index))
 	usage = appendBytes(usage, 8, appendString(appendString(nil, 1, "sessionID"), 2, sessionID))
+	usage = appendSome(usage, 9, reply.Usage.ReasoningTokens)
 	usage = appendSome(usage, 10, reply.Usage.OutputTokens)
 	return appendString(usage, 11, reply.ResponseID)
 }
@@ -599,7 +685,6 @@ func commandStep(conversation Conversation, model CatalogModel, device Device, c
 	meta = appendBytes(meta, 20, stepInfo(conversation, index, metadata))
 	meta = appendBytes(meta, 26, transitions(1, finished, 2, started, stepDone, completed))
 	meta = appendTime(meta, 32, started)
-	meta = appendBytes(meta, 34, appendString(nil, 4, "allow"))
 	meta = appendString(meta, 35, contentID(conversation.TrajectoryID, index))
 	meta = appendVarint(meta, 38, 1)
 	render := appendString(nil, 6, "terminal")
@@ -651,21 +736,29 @@ func (s companionState) generatorPayloads(turn SessionTurn, device Device, steps
 	child := func(name string, tokens int64) []byte {
 		return appendBytes(nil, 5, appendVarint(appendString(nil, 1, name), 3, uint64(tokens)))
 	}
-	var systemChildren, toolChildren, chatChildren []byte
-	var systemTotal, toolTotal, chatTotal int64
+	var systemChildren, toolChildren, chatChildren, grouped []byte
+	var systemTotal, toolTotal, chatTotal, groupedTotal int64
 	for i, name := range sessionFixed.Sections {
 		tokens := int64(turn.Sections[i])
+		if own, ok := sectionGroups[name]; ok {
+			grouped, groupedTotal = appendBytes(grouped, 1, group(own.name, own.kind, true, child(name, tokens), tokens)), groupedTotal+tokens
+			continue
+		}
 		systemChildren, systemTotal = append(systemChildren, child(name, tokens)...), systemTotal+tokens
 	}
 	for i, name := range sessionFixed.Tools {
 		tokens := int64(sessionFixed.ToolTokens[family][i])
+		if name == "run_command" {
+			tokens += shellToolTokens[device.OS]
+		}
 		toolChildren, toolTotal = append(toolChildren, child(name, tokens)...), toolTotal+tokens
 	}
 	for index, step := range steps {
 		chatChildren, chatTotal = append(chatChildren, child(strconv.Itoa(index)+": "+names[step.kind], step.tokens)...), chatTotal+step.tokens
 	}
-	total := systemTotal + toolTotal + chatTotal
+	total := systemTotal + groupedTotal + toolTotal + chatTotal
 	breakdown := appendBytes(nil, 1, group("System Prompt", 1, true, systemChildren, systemTotal))
+	breakdown = append(breakdown, grouped...)
 	breakdown = appendBytes(breakdown, 1, group("Tools", 2, true, toolChildren, toolTotal))
 	breakdown = appendBytes(breakdown, 1, group("Chat Messages", 7, false, chatChildren, chatTotal))
 	breakdown = appendVarint(breakdown, 2, uint64(total))
@@ -724,7 +817,7 @@ func (s companionState) generatorPayloads(turn SessionTurn, device Device, steps
 		chat = appendBytes(chat, 10, appendVarint(appendSome(nil, 1, int64(planner-1)), 2, 1))
 		chat = appendDuration(chat, 11, reply.First.Sub(invoked))
 		chat = appendDuration(chat, 12, reply.Done.Sub(reply.First))
-		chat = append(chat, sessionFixed.PromptSections...)
+		chat = append(chat, promptSections(model)...)
 		chat = appendBytes(chat, 17, appendString(appendBytes(nil, 2, usage), 4, reply.TraceID))
 		chat = appendString(chat, 19, reply.Model)
 		chat = appendString(chat, 21, model.DisplayName)
@@ -762,7 +855,7 @@ func (s companionState) executionPayload(turn SessionTurn, device Device, invoca
 		metadata = appendVarint(metadata, 13, 1)
 	}
 	metadata = appendBytes(metadata, 16, sessionFixed.Resolution)
-	metadata = appendBytes(metadata, 17, sessionOverride(model))
+	metadata = appendBytes(metadata, 17, sessionOverride(model, device))
 	metadata = appendBytes(metadata, 18, sessionFixed.Customizations)
 	payload := appendString(nil, 2, execution)
 	payload = appendString(payload, 3, conversation.CascadeID)
@@ -827,8 +920,9 @@ func completed(steps []sessionStep) int {
 	return count
 }
 
-// SessionSend 在生成请求发出前按官方会话的先后记录 clearcut 事件：用户请求记录发送事件、用户输入步骤与调用前钩子，新会话另记新建会话、项目、trajectory、首次加载与标题事件，发送事件前后按 sendErrors 记录解析会话配置时被抽中的查询失败（新会话的界面解析在发送前 381–841 ms），发送事件之后记 sidecar 的两次受限调用与 sidecar 事件，模型与上次不同时记录切换模型；带回工具结果的请求按工具依次记录工具前钩子（第一个工具除外）、工具后钩子与工具步骤，再记调用后钩子与调用前钩子；本轮读取过插件市场目录时，读取事件记在用户输入步骤或工具步骤之前，发送事件及更早的事件改以读取开始时刻为基准
+// SessionSend 在生成请求发出前按官方会话的先后记录 clearcut 事件并按 touchSidebar 记下发送：用户请求记录发送事件、用户输入步骤与调用前钩子，新会话另记新建会话、项目、trajectory、首次加载与标题事件，发送事件之后记 sidecar 的两次受限调用与 sidecar 事件，模型与上次不同时记录切换模型；带回工具结果的请求按工具依次记录工具前钩子（第一个工具除外）、工具后钩子与工具步骤，再记调用后钩子与调用前钩子；本轮读取过插件市场目录时，读取事件记在用户输入步骤或工具步骤之前，发送事件及更早的事件改以读取开始时刻为基准
 func (c *Client) SessionSend(turn SessionTurn) {
+	c.touchSidebar()
 	now := time.Now()
 	conversation, model := turn.Conversation, turn.Model
 	execution := conversation.ExecutionID(conversation.Execution)
@@ -892,7 +986,6 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		opened := early(3300, 3800)
 		c.sessionUI(opened, "conversation_new", map[string]any{"ui_location": "new_conversation_button", "trigger_type": "click"})
 		c.sessionUI(opened, "AGENT_MANAGER_NEW_WORKSPACE_CONVERSATION", map[string]any{})
-		c.sessionUI(opened.Add(time.Millisecond), "SWITCH_CONVERSATION", map[string]any{"cascadeId": ""})
 	}
 	if changed {
 		c.sessionUI(early(1400, 1900), "model_changed", map[string]any{"ui_location": "model_selector_button", "trigger_type": "click", "name": model.DisplayName})
@@ -924,17 +1017,12 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		"total_latency_ms": latency, "cascade_send_latency_ms": latency, "hydrate_slash_commands_latency_ms": 0, "active_user_state_latency_ms": 0, "load_trajectory_latency_ms": 0,
 		"resolve_agent_config_latency_ms": 0, "save_media_latency_ms": 0, "media_summaries_latency_ms": 0, "media_count": media, "saved_media_count": media,
 	})
-	opened := time.Time{}
+	delay, intent := between(8, 11), "follow_up"
 	if turn.New {
-		opened = early(381, 841)
-	}
-	c.sendErrors(sent, opened)
-	delay := between(8, 11)
-	if turn.New {
-		delay = between(10, 47)
+		delay, intent = between(10, 47), "new_conversation"
 	}
 	c.sessionUI(sent.Add(time.Duration(delay)*time.Millisecond), "CASCADE_MESSAGE_SENT", map[string]any{
-		"is_new_conversation": strconv.FormatBool(turn.New), "model": model.DisplayName, "num_images": images, "num_audio": audio, "num_videos": video, "project_type": "normal",
+		"is_new_conversation": strconv.FormatBool(turn.New), "intent_type": intent, "model": model.DisplayName, "num_images": images, "num_audio": audio, "num_videos": video, "project_type": "normal", "send_source": "composer",
 	})
 	if turn.New {
 		accessed := started.Add(time.Duration(between(440, 700)) * time.Millisecond)
@@ -949,19 +1037,19 @@ func (c *Client) SessionSend(turn SessionTurn) {
 		previous = cmp.Or(track.model, model.Model)
 	}
 	c.logMarketplace()
-	c.sessionEvent(ago(6, 9), 11, 12, stepPayload(conversation, userStep(conversation, model, previous, index, metadata, execution, created, ago(10, 12)), index, metadata, execution))
+	c.sessionEvent(ago(6, 9), 11, 12, stepPayload(conversation, userStep(conversation, model, c.device, previous, index, metadata, execution, created, ago(10, 12)), index, metadata, execution))
 	hooked := ago(3, 5)
 	track.seq, track.sent, track.invoked, track.model = 0, sent, hooked, model.Model
 	c.preInvocation(hooked, turn, track, metadata)
 }
 
-// promptLatency 返回 prompt_latency 事件的参数与界面量得的首 token 耗时：sent 为发送时刻，invoked 为模型调用开始时刻，first 为首个事件时刻，steps 为回复与其第一个工具步骤在内的步骤数；界面比 language_server 晚 26–86 ms 看到首个事件，新会话另有 166–295 ms 的会话准备耗时
-func promptLatency(turn SessionTurn, sent, invoked, first time.Time, steps int) (map[string]any, int) {
+// promptLatency 返回 prompt_latency 事件的参数：sent 为发送时刻，invoked 为模型调用开始时刻，first 为首个事件时刻，steps 为回复与其第一个工具步骤在内的步骤数；界面比 language_server 晚 26–86 ms 看到首个事件，新会话另有 166–295 ms 的会话准备耗时
+func promptLatency(turn SessionTurn, sent, invoked, first time.Time, steps int) map[string]any {
 	before, chunk := int(invoked.Sub(sent).Milliseconds()), int(first.Sub(invoked).Milliseconds())
 	token := before + chunk + between(26, 86)
 	dispatch, paint := between(8, 52), between(12, 33)
 	params := map[string]any{
-		"kind": "follow_up", "outcome": "completed", "queued": "false", "pageHidden": "false", "modelId": strings.TrimPrefix(turn.Model.Model, "MODEL_"),
+		"kind": "follow_up", "outcome": "completed", "queued": "false", "pageHidden": "false", "remote": "false", "modelId": strings.TrimPrefix(turn.Model.Model, "MODEL_"),
 		"stepCount": steps, "workspaceCount": 0, "preDispatch": dispatch, "submitToDispatch": dispatch, "dispatchToUserInputVisible": before + between(6, 61),
 		"lsPreModel": before, "lsModelFirstChunk": chunk, "dispatchToFirstToken": token, "firstTokenToPaint": paint,
 	}
@@ -972,10 +1060,10 @@ func promptLatency(turn SessionTurn, sent, invoked, first time.Time, steps int) 
 	} else {
 		params["followUpTtftMs"] = dispatch + token + paint
 	}
-	return params, token + between(0, 23)
+	return params
 }
 
-// SessionReply 在模型调用完成后记录回复事件：模型回复步骤；每个用户请求的第一次回复记录 prompt_latency；有工具调用时记录码 2 与第一个调用的工具前钩子，否则记录首 token 耗时、码 2、调用后与结束钩子和码 1
+// SessionReply 在模型调用完成后记录回复事件：模型回复步骤；每个用户请求的第一次回复记录 prompt_latency；有工具调用时记录码 2 与第一个调用的工具前钩子，否则记录码 2、调用后与结束钩子和码 1
 func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 	conversation, model := turn.Conversation, turn.Model
 	execution := conversation.ExecutionID(conversation.Execution)
@@ -994,11 +1082,9 @@ func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 	state := c.state
 	c.mu.Unlock()
 	generators := state.generatorPayloads(turn, c.device, steps, reply, metadata, invoked)
-	latency := int(reply.First.Sub(sent).Milliseconds())
 	prompted := func() {}
 	if steps[planner-1].kind == stepUser {
-		var params map[string]any
-		params, latency = promptLatency(turn, sent, invoked, reply.First, planner+1+min(len(reply.Calls), 1))
+		params := promptLatency(turn, sent, invoked, reply.First, planner+1+min(len(reply.Calls), 1))
 		prompted = func() { c.sessionUI(time.Now(), "prompt_latency", params) }
 	}
 	if len(reply.Calls) > 0 {
@@ -1011,24 +1097,12 @@ func (c *Client) SessionReply(turn SessionTurn, reply SessionReply) {
 		prompted()
 		return
 	}
-	turns, tools, invocations := 0, 0, 1
-	for _, step := range steps {
-		switch step.kind {
-		case stepUser:
-			turns++
-		case stepCommand:
-			tools++
-		}
-	}
+	invocations := 1
 	for index := planner - 1; index >= 0 && steps[index].kind != stepUser; index-- {
 		if steps[index].kind == stepPlanner {
 			invocations++
 		}
 	}
-	c.hubEvent("ttft_completed", eventShape{flags: true, ui: true}, map[string]any{
-		"latencyMs": latency, "turnCount": turns - 1, "toolCallCount": tools, "stepCount": planner + 1, "workspaceCount": 0,
-		"modelId": strings.TrimPrefix(model.Model, "MODEL_"),
-	})
 	prompted()
 	c.sessionEvent(time.Now(), 11, 12, stepPayload(conversation, plannerStep(conversation, model, reply, planner, metadata, execution, invoked), planner, metadata, execution))
 	hooked := time.Now()
