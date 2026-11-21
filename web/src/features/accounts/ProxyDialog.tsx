@@ -97,6 +97,8 @@ export function ProxyDialog({
               placeholder="socks5://127.0.0.1:1080"
               spellCheck={false}
               autoComplete="off"
+              data-1p-ignore
+              data-lpignore="true"
               aria-invalid={valid ? undefined : true}
               aria-describedby={valid ? 'account-proxy-description' : 'account-proxy-error'}
               className="font-mono"

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -106,6 +107,9 @@ func Serve(ctx context.Context, live *atomic.Pointer[config.Config], deps Deps) 
 	s.updater.removeReplaced()
 	for _, invalid := range boot.Invalid {
 		slog.Warn(fmt.Sprintf("配置项取值无效，按默认值运行 | 配置项=%s | 原因=%s", invalid.Key, invalid.Reason), "source", "service")
+	}
+	if crashed := deps.Logger.Crashed(); crashed != "" {
+		slog.Error(fmt.Sprintf("上次运行异常退出 | 原因=%s | 记录=%s", crashed, deps.Logger.CrashPath()), "source", "service")
 	}
 	s.ledger.SetBodyCapture(boot.RequestLogBodies)
 	states, err := statedb.Open(filepath.Join(boot.RuntimeDir, "states.db"))
@@ -226,6 +230,13 @@ func (s *server) access(next http.Handler) http.Handler {
 func clientIP(r *http.Request) string {
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return host
+}
+
+// httpClient 返回按实时代理配置发出请求的标准 HTTP 客户端
+func (s *server) httpClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = func(r *http.Request) (*url.URL, error) { return s.live.Load().ProxyURL(r) }
+	return &http.Client{Transport: transport}
 }
 
 // refreshLater 请求后台刷新账户池，刷新进行中时合并为下一次

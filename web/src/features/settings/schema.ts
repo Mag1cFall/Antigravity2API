@@ -134,41 +134,41 @@ export function parseMapping(value: string) {
     })
 }
 
-// toForm 把 .env 文本值换成表单初值，缺少的项取 internal/config 的默认值
+// toForm 把服务端返回的 .env 文本值换成表单初值
 export function toForm(settings: Settings): SettingsForm {
-  const v = (key: string, fallback: string) => settings.values[key] ?? fallback
-  const list = (key: string, fallback: string) => splitList(v(key, fallback))
-  const bool = (key: string, fallback: string) => v(key, fallback) === 'true'
-  const num = (key: string, fallback: string) => Number(v(key, fallback))
+  const v = (key: string) => settings.values[key] ?? ''
+  const list = (key: string) => splitList(v(key))
+  const bool = (key: string) => v(key) === 'true'
+  const num = (key: string) => Number(v(key))
   return {
-    LISTEN: v('LISTEN', '127.0.0.1:8017'),
-    AUTH_DIR: v('AUTH_DIR', 'auth'),
-    RUNTIME_DIR: v('RUNTIME_DIR', 'runtime'),
-    MEDIA_OUTPUT: v('MEDIA_OUTPUT', 'inline') as SettingsForm['MEDIA_OUTPUT'],
-    MEDIA_BASE_URL: v('MEDIA_BASE_URL', ''),
-    PROXY: list('PROXY', '').join('\n'),
-    SYSTEM_PROMPT: v('SYSTEM_PROMPT', 'full') as SettingsForm['SYSTEM_PROMPT'],
-    SYSTEM_PROMPT_TEMPLATE: v('SYSTEM_PROMPT_TEMPLATE', ''),
-    SYSTEM_PROMPT_USER_TEMPLATE: v('SYSTEM_PROMPT_USER_TEMPLATE', ''),
-    REJECTED_RULES: v('REJECTED_RULES', ''),
-    ACCOUNT_CONCURRENCY: num('ACCOUNT_CONCURRENCY', '2'),
-    ROUTING_STRATEGY: v('ROUTING_STRATEGY', 'round-robin') as SettingsForm['ROUTING_STRATEGY'],
-    PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS', ''),
-    REQUEST_TIMEOUT: v('REQUEST_TIMEOUT', '5m'),
-    FIRST_EVENT_HEDGE: v('FIRST_EVENT_HEDGE', 'auto'),
-    FIRST_EVENT_HEDGE_MODELS: list('FIRST_EVENT_HEDGE_MODELS', 'gemini-4-argon'),
-    NONSTREAM_KEEPALIVE: bool('NONSTREAM_KEEPALIVE', 'true'),
-    FAKE_STREAM: bool('FAKE_STREAM', 'false'),
-    QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL', '15m'),
-    QUOTA_RESERVE_PERCENT: num('QUOTA_RESERVE_PERCENT', '0'),
-    WEEKLY_QUOTA_WARMUP: bool('WEEKLY_QUOTA_WARMUP', 'false'),
-    LOG_LEVEL: v('LOG_LEVEL', 'info') as SettingsForm['LOG_LEVEL'],
-    LOG_FORMAT: v('LOG_FORMAT', 'json') as SettingsForm['LOG_FORMAT'],
-    LOG_FILE: bool('LOG_FILE', 'true'),
-    LOG_MAX_TOTAL_MB: num('LOG_MAX_TOTAL_MB', '500'),
-    REQUEST_LOG_BODIES: bool('REQUEST_LOG_BODIES', 'false'),
-    ADMIN_AUTH_ENABLED: bool('ADMIN_AUTH_ENABLED', 'false'),
-    ADMIN_USERNAME: v('ADMIN_USERNAME', 'admin'),
+    LISTEN: v('LISTEN'),
+    AUTH_DIR: v('AUTH_DIR'),
+    RUNTIME_DIR: v('RUNTIME_DIR'),
+    MEDIA_OUTPUT: v('MEDIA_OUTPUT') as SettingsForm['MEDIA_OUTPUT'],
+    MEDIA_BASE_URL: v('MEDIA_BASE_URL'),
+    PROXY: list('PROXY').join('\n'),
+    SYSTEM_PROMPT: v('SYSTEM_PROMPT') as SettingsForm['SYSTEM_PROMPT'],
+    SYSTEM_PROMPT_TEMPLATE: v('SYSTEM_PROMPT_TEMPLATE'),
+    SYSTEM_PROMPT_USER_TEMPLATE: v('SYSTEM_PROMPT_USER_TEMPLATE'),
+    REJECTED_RULES: v('REJECTED_RULES'),
+    ACCOUNT_CONCURRENCY: num('ACCOUNT_CONCURRENCY'),
+    ROUTING_STRATEGY: v('ROUTING_STRATEGY') as SettingsForm['ROUTING_STRATEGY'],
+    PREFER_LOWER_TIER_MODELS: list('PREFER_LOWER_TIER_MODELS'),
+    REQUEST_TIMEOUT: v('REQUEST_TIMEOUT'),
+    FIRST_EVENT_HEDGE: v('FIRST_EVENT_HEDGE'),
+    FIRST_EVENT_HEDGE_MODELS: list('FIRST_EVENT_HEDGE_MODELS'),
+    NONSTREAM_KEEPALIVE: bool('NONSTREAM_KEEPALIVE'),
+    FAKE_STREAM: bool('FAKE_STREAM'),
+    QUOTA_REFRESH_INTERVAL: v('QUOTA_REFRESH_INTERVAL'),
+    QUOTA_RESERVE_PERCENT: num('QUOTA_RESERVE_PERCENT'),
+    WEEKLY_QUOTA_WARMUP: bool('WEEKLY_QUOTA_WARMUP'),
+    LOG_LEVEL: v('LOG_LEVEL') as SettingsForm['LOG_LEVEL'],
+    LOG_FORMAT: v('LOG_FORMAT') as SettingsForm['LOG_FORMAT'],
+    LOG_FILE: bool('LOG_FILE'),
+    LOG_MAX_TOTAL_MB: num('LOG_MAX_TOTAL_MB'),
+    REQUEST_LOG_BODIES: bool('REQUEST_LOG_BODIES'),
+    ADMIN_AUTH_ENABLED: bool('ADMIN_AUTH_ENABLED'),
+    ADMIN_USERNAME: v('ADMIN_USERNAME'),
     ADMIN_PASSWORD: '',
   }
 }

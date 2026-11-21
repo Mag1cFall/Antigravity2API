@@ -61,7 +61,7 @@ var ErrResponseCancelled = errors.New("客户端取消了后台响应")
 // traceKey 是 Trace 在 context 中的键
 type traceKey struct{}
 
-// Trace 收集一次公开请求在各层产生的记录字段，除 Watch、Snapshot 与 Finish 外的方法都可在 nil 上调用
+// Trace 收集一次公开请求在各层产生的记录字段，除 Watch 与 Finish 外的方法都可在 nil 上调用
 type Trace struct {
 	mu      sync.Mutex
 	started time.Time
@@ -276,8 +276,11 @@ func (t *Trace) Cancel(cause error) {
 	t.cancelled = cause
 }
 
-// Snapshot 返回进行中的记录副本
+// Snapshot 返回进行中的记录副本，t 为 nil 时返回空记录
 func (t *Trace) Snapshot() Row {
+	if t == nil {
+		return Row{}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	row := t.row

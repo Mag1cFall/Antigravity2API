@@ -338,39 +338,23 @@ func (s *server) handleGeminiFileDelete(w http.ResponseWriter, r *http.Request) 
 
 // handleGeminiFileList 按创建时间从新到旧分页列出文件，pageToken 为下一页的起始位置
 func (s *server) handleGeminiFileList(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	size, offset := 10, 0
-	if value := firstQueryValue(query, "pageSize", "page_size"); value != "" {
-		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed < 0 {
-			writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "pageSize must be a non-negative integer")
-			return
-		}
-		if parsed > 0 {
-			size = min(parsed, 100)
-		}
-	}
-	if value := firstQueryValue(query, "pageToken", "page_token"); value != "" {
-		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed < 0 {
-			writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "pageToken is invalid")
-			return
-		}
-		offset = parsed
-	}
 	files, err := s.files.list()
 	if err != nil {
 		writeGeminiFileError(w, r, err)
 		return
 	}
-	page := files[min(offset, len(files)):min(offset+size, len(files))]
+	page, next, err := geminiPage(r.URL.Query(), files, 10, 100)
+	if err != nil {
+		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
 	objects := make([]map[string]any, 0, len(page))
 	for _, file := range page {
 		objects = append(objects, geminiFileObject(file))
 	}
 	body := map[string]any{"files": objects}
-	if offset+size < len(files) {
-		body["nextPageToken"] = strconv.Itoa(offset + size)
+	if next != "" {
+		body["nextPageToken"] = next
 	}
 	writeJSON(w, http.StatusOK, body)
 }

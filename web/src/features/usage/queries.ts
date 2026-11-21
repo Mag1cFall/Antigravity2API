@@ -8,14 +8,13 @@ import { api } from '@/lib/api'
 type UsageBucketSize = 'auto' | '86400'
 
 // UsageSpan 是用量的时间范围：截止到当前时间的毫秒数，或自定义的起止时刻
-export type UsageSpan = number | CustomRange
+type UsageSpan = number | CustomRange
 
-// rangeQuery 是时间范围的 from 与 to，毫秒数时截止到当前时间
-export function rangeQuery(span: UsageSpan) {
+// rangeQuery 是时间范围的 from 与 to，毫秒数时截止到 now
+export function rangeQuery(span: UsageSpan, now = Date.now()) {
   if (typeof span !== 'number') {
     return new URLSearchParams({ from: span.from.toISOString(), to: span.to.toISOString() })
   }
-  const now = Date.now()
   return new URLSearchParams({
     from: new Date(now - span).toISOString(),
     to: new Date(now + 1000).toISOString(),

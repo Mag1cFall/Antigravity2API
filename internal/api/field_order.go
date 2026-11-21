@@ -22,7 +22,6 @@ type fieldOrder struct {
 	Opaque    []string            `json:"opaque"`
 	global    map[string]int
 	kinds     map[string]map[string]int
-	protocol  string
 }
 
 // fieldOrders 是 gemini、chat、responses、anthropic 与 interactions 输出的字段顺序
@@ -34,8 +33,7 @@ func loadFieldOrders() map[string]*fieldOrder {
 	if err := json.Unmarshal(fieldOrderJSON, &orders); err != nil {
 		panic(err)
 	}
-	for protocol, order := range orders {
-		order.protocol = protocol
+	for _, order := range orders {
 		order.global = fieldRanks(order.Global)
 		order.kinds = make(map[string]map[string]int, len(order.Kinds))
 		for kind, keys := range order.Kinds {
@@ -57,7 +55,7 @@ func fieldRanks(keys []string) map[string]int {
 	return ranks
 }
 
-// officialOrder 将响应投影为固定字段结构与动态字段对象
+// officialOrder 按官方字段顺序包装响应对象，供 JSON 编码使用
 func officialOrder(protocol string, value any) any {
 	return fieldOrders[protocol].value(value, "")
 }
@@ -85,7 +83,7 @@ func (order *fieldOrder) value(value any, parent string) any {
 		for key, item := range value {
 			fields[key] = order.value(item, key)
 		}
-		return order.object(fields, parent)
+		return orderedJSON{fields: fields, order: order, parent: parent}
 	case map[string]string:
 		if value == nil {
 			return value
@@ -94,7 +92,7 @@ func (order *fieldOrder) value(value any, parent string) any {
 		for key, item := range value {
 			fields[key] = item
 		}
-		return order.object(fields, parent)
+		return orderedJSON{fields: fields, order: order, parent: parent}
 	case map[string]json.RawMessage:
 		if value == nil {
 			return value
@@ -103,7 +101,7 @@ func (order *fieldOrder) value(value any, parent string) any {
 		for key, item := range value {
 			fields[key] = item
 		}
-		return order.object(fields, parent)
+		return orderedJSON{fields: fields, order: order, parent: parent}
 	case []map[string]any:
 		if value == nil {
 			return value
@@ -148,292 +146,6 @@ func (o orderedJSON) MarshalJSON() ([]byte, error) {
 	}
 	buffer.WriteByte('}')
 	return buffer.Bytes(), nil
-}
-
-// object 返回固定响应的具名结构体或动态字段对象
-func (order *fieldOrder) object(fields map[string]any, parent string) any {
-	switch order.protocol {
-	case "chat":
-		if mapString(fields, "object") == "chat.completion" {
-			return chatCompletionJSON{
-				ID:                fields["id"],
-				Object:            fields["object"],
-				Created:           fields["created"],
-				Model:             fields["model"],
-				Choices:           fields["choices"],
-				Usage:             fields["usage"],
-				ServiceTier:       fields["service_tier"],
-				ProviderModel:     fields["provider_model"],
-				SystemFingerprint: fields["system_fingerprint"],
-			}
-		}
-		if mapString(fields, "object") == "chat.completion.chunk" {
-			return chatChunkJSON{
-				ID:                fields["id"],
-				Object:            fields["object"],
-				Created:           fields["created"],
-				Model:             fields["model"],
-				SystemFingerprint: fields["system_fingerprint"],
-				Choices:           fields["choices"],
-				ProviderModel:     fields["provider_model"],
-				Usage:             fields["usage"],
-			}
-		}
-	case "gemini":
-		if fields["modelVersion"] != nil || fields["candidates"] != nil || fields["promptFeedback"] != nil {
-			return geminiGenerationJSON{
-				Candidates:     fields["candidates"],
-				PromptFeedback: fields["promptFeedback"],
-				UsageMetadata:  fields["usageMetadata"],
-				ModelVersion:   fields["modelVersion"],
-				ResponseID:     fields["responseId"],
-				TurnToken:      fields["turnToken"],
-				DebugInfo:      fields["debugInfo"],
-			}
-		}
-		if parent == "candidates" {
-			return geminiCandidateJSON{
-				Content:              fields["content"],
-				FinishReason:         fields["finishReason"],
-				Index:                fields["index"],
-				FinishMessage:        fields["finishMessage"],
-				SafetyRatings:        fields["safetyRatings"],
-				CitationMetadata:     fields["citationMetadata"],
-				GroundingMetadata:    fields["groundingMetadata"],
-				DetailedFinishReason: fields["detailedFinishReason"],
-				URLContextMetadata:   fields["urlContextMetadata"],
-			}
-		}
-	case "anthropic":
-		if mapString(fields, "type") == "message" && mapString(fields, "role") == "assistant" {
-			return anthropicMessageJSON{
-				ID:                   fields["id"],
-				Type:                 fields["type"],
-				Role:                 fields["role"],
-				Content:              fields["content"],
-				Model:                fields["model"],
-				StopReason:           fields["stop_reason"],
-				StopSequence:         fields["stop_sequence"],
-				StopDetails:          fields["stop_details"],
-				Usage:                fields["usage"],
-				Container:            fields["container"],
-				ContextManagement:    fields["context_management"],
-				ProviderFinishReason: fields["provider_finish_reason"],
-				ProviderModel:        fields["provider_model"],
-			}
-		}
-	case "responses":
-		if mapString(fields, "object") == "response" {
-			return responsesJSON{
-				ID:                   fields["id"],
-				Object:               fields["object"],
-				CreatedAt:            fields["created_at"],
-				Status:               fields["status"],
-				CompletedAt:          fields["completed_at"],
-				Background:           fields["background"],
-				Error:                fields["error"],
-				IncompleteDetails:    fields["incomplete_details"],
-				Instructions:         fields["instructions"],
-				MaxOutputTokens:      fields["max_output_tokens"],
-				MaxToolCalls:         fields["max_tool_calls"],
-				Model:                fields["model"],
-				Output:               fields["output"],
-				ParallelToolCalls:    fields["parallel_tool_calls"],
-				PreviousResponseID:   fields["previous_response_id"],
-				Reasoning:            fields["reasoning"],
-				ServiceTier:          fields["service_tier"],
-				Temperature:          fields["temperature"],
-				Text:                 fields["text"],
-				ToolChoice:           fields["tool_choice"],
-				Tools:                fields["tools"],
-				TopP:                 fields["top_p"],
-				Truncation:           fields["truncation"],
-				Usage:                fields["usage"],
-				Metadata:             fields["metadata"],
-				OutputText:           fields["output_text"],
-				ProviderFinishReason: fields["provider_finish_reason"],
-				ProviderModel:        fields["provider_model"],
-			}
-		}
-	case "interactions":
-		if mapString(fields, "object") == "interaction" {
-			return interactionJSON{
-				Created:               fields["created"],
-				EnvironmentID:         fields["environment_id"],
-				ID:                    fields["id"],
-				Model:                 fields["model"],
-				Object:                fields["object"],
-				PreviousInteractionID: fields["previous_interaction_id"],
-				Status:                fields["status"],
-				Steps:                 fields["steps"],
-				Updated:               fields["updated"],
-				Usage:                 fields["usage"],
-			}
-		}
-	case "openai":
-		if mapString(fields, "object") == "model" {
-			return openAIModelJSON{
-				ID:                         fields["id"],
-				Object:                     fields["object"],
-				Created:                    fields["created"],
-				OwnedBy:                    fields["owned_by"],
-				ShutdownDate:               fields["shutdown_date"],
-				AccessModes:                fields["access_modes"],
-				Capabilities:               fields["capabilities"],
-				CapabilityOptions:          fields["capability_options"],
-				Channels:                   fields["channels"],
-				ContextLength:              fields["context_length"],
-				DefaultReasoningLevel:      fields["default_reasoning_level"],
-				Description:                fields["description"],
-				InputModalities:            fields["input_modalities"],
-				InputTokenLimit:            fields["input_token_limit"],
-				MaxCompletionTokens:        fields["max_completion_tokens"],
-				Name:                       fields["name"],
-				OutputTokenLimit:           fields["output_token_limit"],
-				Paid:                       fields["paid"],
-				SupportedGenerationMethods: fields["supported_generation_methods"],
-				SupportedReasoningLevels:   fields["supported_reasoning_levels"],
-			}
-		}
-	}
-	return orderedJSON{fields: fields, order: order, parent: parent}
-}
-
-// chatCompletionJSON 是 Chat 非流式响应
-type chatCompletionJSON struct {
-	ID                any `json:"id,omitempty"`
-	Object            any `json:"object,omitempty"`
-	Created           any `json:"created,omitempty"`
-	Model             any `json:"model,omitempty"`
-	Choices           any `json:"choices,omitempty"`
-	Usage             any `json:"usage,omitempty"`
-	ServiceTier       any `json:"service_tier,omitempty"`
-	ProviderModel     any `json:"provider_model,omitempty"`
-	SystemFingerprint any `json:"system_fingerprint,omitempty"`
-}
-
-// chatChunkJSON 是 Chat 流式响应块
-type chatChunkJSON struct {
-	ID                any `json:"id,omitempty"`
-	Object            any `json:"object,omitempty"`
-	Created           any `json:"created,omitempty"`
-	Model             any `json:"model,omitempty"`
-	SystemFingerprint any `json:"system_fingerprint,omitempty"`
-	Choices           any `json:"choices,omitempty"`
-	ProviderModel     any `json:"provider_model,omitempty"`
-	Usage             any `json:"usage,omitempty"`
-}
-
-// geminiGenerationJSON 是 Gemini 生成响应
-type geminiGenerationJSON struct {
-	Candidates     any `json:"candidates,omitempty"`
-	PromptFeedback any `json:"promptFeedback,omitempty"`
-	UsageMetadata  any `json:"usageMetadata,omitempty"`
-	ModelVersion   any `json:"modelVersion,omitempty"`
-	ResponseID     any `json:"responseId,omitempty"`
-	TurnToken      any `json:"turnToken,omitempty"`
-	DebugInfo      any `json:"debugInfo,omitempty"`
-}
-
-// geminiCandidateJSON 是 Gemini 候选响应
-type geminiCandidateJSON struct {
-	Content              any `json:"content,omitempty"`
-	FinishReason         any `json:"finishReason,omitempty"`
-	Index                any `json:"index,omitempty"`
-	FinishMessage        any `json:"finishMessage,omitempty"`
-	SafetyRatings        any `json:"safetyRatings,omitempty"`
-	CitationMetadata     any `json:"citationMetadata,omitempty"`
-	GroundingMetadata    any `json:"groundingMetadata,omitempty"`
-	DetailedFinishReason any `json:"detailedFinishReason,omitempty"`
-	URLContextMetadata   any `json:"urlContextMetadata,omitempty"`
-}
-
-// anthropicMessageJSON 是 Anthropic Message 响应
-type anthropicMessageJSON struct {
-	ID                   any `json:"id,omitempty"`
-	Type                 any `json:"type,omitempty"`
-	Role                 any `json:"role,omitempty"`
-	Content              any `json:"content,omitempty"`
-	Model                any `json:"model,omitempty"`
-	StopReason           any `json:"stop_reason,omitempty"`
-	StopSequence         any `json:"stop_sequence,omitempty"`
-	StopDetails          any `json:"stop_details,omitempty"`
-	Usage                any `json:"usage,omitempty"`
-	Container            any `json:"container,omitempty"`
-	ContextManagement    any `json:"context_management,omitempty"`
-	ProviderFinishReason any `json:"provider_finish_reason,omitempty"`
-	ProviderModel        any `json:"provider_model,omitempty"`
-}
-
-// responsesJSON 是 Responses 响应资源
-type responsesJSON struct {
-	ID                   any `json:"id,omitempty"`
-	Object               any `json:"object,omitempty"`
-	CreatedAt            any `json:"created_at,omitempty"`
-	Status               any `json:"status,omitempty"`
-	CompletedAt          any `json:"completed_at,omitempty"`
-	Background           any `json:"background,omitempty"`
-	Error                any `json:"error,omitempty"`
-	IncompleteDetails    any `json:"incomplete_details,omitempty"`
-	Instructions         any `json:"instructions,omitempty"`
-	MaxOutputTokens      any `json:"max_output_tokens,omitempty"`
-	MaxToolCalls         any `json:"max_tool_calls,omitempty"`
-	Model                any `json:"model,omitempty"`
-	Output               any `json:"output,omitempty"`
-	ParallelToolCalls    any `json:"parallel_tool_calls,omitempty"`
-	PreviousResponseID   any `json:"previous_response_id,omitempty"`
-	Reasoning            any `json:"reasoning,omitempty"`
-	ServiceTier          any `json:"service_tier,omitempty"`
-	Temperature          any `json:"temperature,omitempty"`
-	Text                 any `json:"text,omitempty"`
-	ToolChoice           any `json:"tool_choice,omitempty"`
-	Tools                any `json:"tools,omitempty"`
-	TopP                 any `json:"top_p,omitempty"`
-	Truncation           any `json:"truncation,omitempty"`
-	Usage                any `json:"usage,omitempty"`
-	Metadata             any `json:"metadata,omitempty"`
-	OutputText           any `json:"output_text,omitempty"`
-	ProviderFinishReason any `json:"provider_finish_reason,omitempty"`
-	ProviderModel        any `json:"provider_model,omitempty"`
-}
-
-// interactionJSON 是 Interactions 响应资源
-type interactionJSON struct {
-	Created       any `json:"created,omitempty"`
-	EnvironmentID any `json:"environment_id,omitempty"`
-	ID            any `json:"id,omitempty"`
-	Model         any `json:"model,omitempty"`
-	Object        any `json:"object,omitempty"`
-	// PreviousInteractionID 是续接的前序交互
-	PreviousInteractionID any `json:"previous_interaction_id,omitempty"`
-	Status                any `json:"status,omitempty"`
-	Steps                 any `json:"steps,omitempty"`
-	Updated               any `json:"updated,omitempty"`
-	Usage                 any `json:"usage,omitempty"`
-}
-
-// openAIModelJSON 是 OpenAI 模型资源
-type openAIModelJSON struct {
-	ID                         any `json:"id,omitempty"`
-	Object                     any `json:"object,omitempty"`
-	Created                    any `json:"created,omitempty"`
-	OwnedBy                    any `json:"owned_by,omitempty"`
-	ShutdownDate               any `json:"shutdown_date,omitempty"`
-	AccessModes                any `json:"access_modes,omitempty"`
-	Capabilities               any `json:"capabilities,omitempty"`
-	CapabilityOptions          any `json:"capability_options,omitempty"`
-	Channels                   any `json:"channels,omitempty"`
-	ContextLength              any `json:"context_length,omitempty"`
-	DefaultReasoningLevel      any `json:"default_reasoning_level,omitempty"`
-	Description                any `json:"description,omitempty"`
-	InputModalities            any `json:"input_modalities,omitempty"`
-	InputTokenLimit            any `json:"input_token_limit,omitempty"`
-	MaxCompletionTokens        any `json:"max_completion_tokens,omitempty"`
-	Name                       any `json:"name,omitempty"`
-	OutputTokenLimit           any `json:"output_token_limit,omitempty"`
-	Paid                       any `json:"paid,omitempty"`
-	SupportedGenerationMethods any `json:"supported_generation_methods,omitempty"`
-	SupportedReasoningLevels   any `json:"supported_reasoning_levels,omitempty"`
 }
 
 // ranksFor 返回对象所属种类的字段先后：Global 优先，否则按 type、object 或所在字段名查 Kinds

@@ -37,11 +37,11 @@ var wrappers = []string{": ", "："}
 var halfWidth = map[string]string{"；": "; ", "：": ": "}
 
 // entry 是一条格式串的匹配规则与译文
+// 约束：格式串没有占位符时 pattern 为 nil，以 anchor 与原文整句比较
 type entry struct {
 	pattern *regexp.Regexp
 	anchor  string
 	weight  int
-	plain   bool
 	text    string
 }
 
@@ -63,44 +63,43 @@ func Messages(locale string) ([]byte, bool) {
 }
 
 // Translate 返回 text 在 locale 下的译文，简体中文、不含汉字或没有匹配的文案原样返回
+// locale 必须是 Locales 成员
 func Translate(locale, text string) string {
 	if locale == Source || !hasHan(text) {
 		return text
 	}
-	current := load(locale)
-	if current == nil {
-		return text
-	}
-	return current.translate(text)
+	return load(locale).translate(text)
 }
 
-// load 读取并编译 locale 的翻译表，不支持的语言返回 nil
+// load 读取并编译 locale 的翻译表
 func load(locale string) *catalog {
 	catalogMu.Lock()
 	defer catalogMu.Unlock()
 	if current, ok := catalogs[locale]; ok {
 		return current
 	}
-	data, ok := Messages(locale)
+	data, err := messages.ReadFile("messages/" + locale + ".json")
+	if err != nil {
+		panic(err)
+	}
 	var table map[string]string
-	if !ok || json.Unmarshal(data, &table) != nil {
-		catalogs[locale] = nil
-		return nil
+	if err := json.Unmarshal(data, &table); err != nil {
+		panic(err)
 	}
 	current := &catalog{entries: make([]entry, 0, len(table)), wide: locale == "zh-TW" || locale == "ja"}
 	for template, text := range table {
 		pattern, anchor, weight := compile(template)
-		current.entries = append(current.entries, entry{pattern: pattern, anchor: anchor, weight: weight, plain: pattern.NumSubexp() == 0, text: text})
+		current.entries = append(current.entries, entry{pattern: pattern, anchor: anchor, weight: weight, text: text})
 	}
 	slices.SortFunc(current.entries, func(a, b entry) int { return b.weight - a.weight })
 	catalogs[locale] = current
 	return current
 }
 
-// compile 把格式串编译为整句匹配的正则，开头的格式动词取最长匹配，返回最长的字面片段与字面字符数
+// compile 把格式串编译为整句匹配的正则，开头的格式动词取最长匹配，返回最长的字面片段与字面字符数；格式串没有取值的格式动词时正则为 nil，最长的字面片段即整句
 func compile(template string) (*regexp.Regexp, string, int) {
 	var pattern, literal strings.Builder
-	anchor, weight := "", 0
+	anchor, weight, groups := "", 0, 0
 	flush := func() {
 		text := literal.String()
 		if len([]rune(text)) > len([]rune(anchor)) {
@@ -121,6 +120,7 @@ func compile(template string) (*regexp.Regexp, string, int) {
 			continue
 		}
 		flush()
+		groups++
 		switch token[len(token)-1] {
 		case 'd':
 			pattern.WriteString(`(-?\d+)`)
@@ -138,6 +138,9 @@ func compile(template string) (*regexp.Regexp, string, int) {
 	}
 	literal.WriteString(template[last:])
 	flush()
+	if groups == 0 {
+		return nil, anchor, weight
+	}
 	pattern.WriteString(`$`)
 	return regexp.MustCompile(pattern.String()), anchor, weight
 }
@@ -148,6 +151,12 @@ func (current *catalog) translate(text string) string {
 		return text
 	}
 	for _, item := range current.entries {
+		if item.pattern == nil {
+			if text == item.anchor {
+				return item.text
+			}
+			continue
+		}
 		if !strings.Contains(text, item.anchor) {
 			continue
 		}
@@ -178,7 +187,7 @@ func (current *catalog) translate(text string) string {
 		}
 	}
 	for _, item := range current.entries {
-		if item.plain && strings.HasPrefix(text, item.anchor+" ") {
+		if item.pattern == nil && strings.HasPrefix(text, item.anchor+" ") {
 			return item.text + " " + current.translate(text[len(item.anchor)+1:])
 		}
 	}

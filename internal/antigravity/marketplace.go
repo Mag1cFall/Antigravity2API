@@ -76,7 +76,9 @@ func marketplaceEnabled(flags []experimentFlag) bool {
 	return ok && flag.BoolValue != nil && *flag.BoolValue
 }
 
-// LoadMarketplace 按官方 language_server 在虚拟进程第一次生成前读取各插件市场目录：每个虚拟进程只读一次，读取在后台进行，还没有保存过目录时等这次读取结束或 ctx 结束；本次发起了读取且实验开关打开时返回发起时刻，否则返回零值
+// LoadMarketplace 在虚拟进程第一次生成前于后台读取插件市场目录
+// 还没有保存过目录时等本次读取或 ctx 结束；本次发起读取且开关打开时返回发起时刻，否则返回零值
+// 发送时机与缓存见 docs/protocol.md“插件市场目录”
 func (c *Client) LoadMarketplace(ctx context.Context) time.Time {
 	c.mu.Lock()
 	reading, saved := c.hub.reading, len(c.hub.state.Marketplaces) != 0
@@ -167,7 +169,7 @@ func (c *Client) readMarketplaces(ctx context.Context) bool {
 	state, save := c.hub.state, c.hub.save
 	c.mu.Unlock()
 	written := true
-	if changed && save != nil {
+	if changed {
 		if err := save(state); err != nil {
 			written = false
 			slog.Warn("保存虚拟 Hub 状态失败 | 错误="+err.Error(), "source", c.account)
@@ -283,7 +285,8 @@ func (c *Client) Plugins() string {
 	return featuredPlugins(flag.value(), names, catalogs)
 }
 
-// featuredPlugins 生成推荐插件段的货架正文：货架按 position 排序，未列入任何货架的目录插件按 names 的目录顺序组成末尾的 moreShelf 货架；各货架逐轮各取下一个目录中找得到的插件，合计 featuredTotal 个；每个货架一行“名称: 说明”，其后为取到的插件“- 名称 (ID): 说明”，货架后空一行；没有取到插件的货架略去
+// featuredPlugins 按货架配置与目录生成推荐插件段的货架正文
+// 排序、轮询取样与截断规则见 docs/protocol.md“插件市场目录”
 func featuredPlugins(shelves string, names []string, catalogs map[string]marketplaceCatalog) string {
 	var parsed struct {
 		Shelves []marketplaceShelf `json:"shelves"`

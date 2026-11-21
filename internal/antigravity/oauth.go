@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,19 +56,50 @@ var OAuthConfigCloud = oauth2.Config{
 	},
 }
 
-// exchangeContext 返回换取 token 的上下文，请求经 http1Transport 与代理发出
+// exchangeContext 返回换取 token 的上下文，请求经 http1Transport 与代理发出，没有收到响应时重发
 func exchangeContext(ctx context.Context, proxy Proxy) context.Context {
-	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: newProxyTransport(proxy, http1Transport)})
+	return context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: retryTransport{newProxyTransport(proxy, http1Transport)}})
+}
+
+// tokenAttempts 为一次换取或刷新 token 在没有收到响应时最多发出的请求数
+const tokenAttempts = 3
+
+// retryTransport 在没有收到响应（代理关闭了空闲连接、连接被重置）时重发 token 请求，第 n 次重发前等待 n × 250 ms；收到任何响应即返回
+type retryTransport struct{ base http.RoundTripper }
+
+// RoundTrip 发出请求，没有收到响应时以重新取得的请求正文重发，最多 tokenAttempts 次
+func (t retryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	for attempt := 1; ; attempt++ {
+		response, err := t.base.RoundTrip(request)
+		if err == nil || attempt == tokenAttempts || request.GetBody == nil {
+			return response, err
+		}
+		select {
+		case <-request.Context().Done():
+			return nil, err
+		case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
+		}
+		body, bodyErr := request.GetBody()
+		if bodyErr != nil {
+			return nil, err
+		}
+		request = request.Clone(request.Context())
+		request.Body = body
+	}
 }
 
 // LoginBrowser 在本机回环端口等待授权回调，open 负责打开授权链接，授权码经 proxy 换取 token
 func LoginBrowser(ctx context.Context, proxy Proxy, open func(url string) error) (*oauth2.Token, error) {
+	return loginLoopback(ctx, OAuthConfig, proxy, open, oauth2.ApprovalForce)
+}
+
+// loginLoopback 在本机回环端口等待授权回调并换取 token，extra 附加到授权链接参数
+func loginLoopback(ctx context.Context, config oauth2.Config, proxy Proxy, open func(url string) error, extra ...oauth2.AuthCodeOption) (*oauth2.Token, error) {
 	listener, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return nil, err
 	}
 	defer listener.Close()
-	config := OAuthConfig
 	config.RedirectURL = fmt.Sprintf("http://localhost:%d/auth/callback", listener.Addr().(*net.TCPAddr).Port)
 	verifier := oauth2.GenerateVerifier()
 	state := randomState()
@@ -74,7 +107,8 @@ func LoginBrowser(ctx context.Context, proxy Proxy, open func(url string) error)
 	server := &http.Server{Handler: callbackHandler(state, callbacks)}
 	go server.Serve(listener)
 	defer server.Close()
-	if err := open(config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce, oauth2.S256ChallengeOption(verifier))); err != nil {
+	options := append([]oauth2.AuthCodeOption{oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(verifier)}, extra...)
+	if err := open(config.AuthCodeURL(state, options...)); err != nil {
 		return nil, err
 	}
 	select {
@@ -115,19 +149,32 @@ func callbackHandler(state string, callbacks chan<- callback) http.Handler {
 	return mux
 }
 
-// LoginTerminal 打印授权链接并从 prompt 取回用户粘贴的授权码，授权码经 proxy 换取 token
+// LoginTerminal 打印授权链接并从 prompt 取回用户粘贴的授权码（见 pastedCode），授权码经 proxy 换取 token
 func LoginTerminal(ctx context.Context, proxy Proxy, prompt func(url string) (string, error)) (*oauth2.Token, error) {
 	config := OAuthConfig
 	config.RedirectURL = terminalRedirectURL
 	verifier := oauth2.GenerateVerifier()
-	code, err := prompt(config.AuthCodeURL(randomState(), oauth2.AccessTypeOffline, oauth2.ApprovalForce, oauth2.S256ChallengeOption(verifier)))
+	pasted, err := prompt(config.AuthCodeURL(randomState(), oauth2.AccessTypeOffline, oauth2.ApprovalForce, oauth2.S256ChallengeOption(verifier)))
 	if err != nil {
 		return nil, err
 	}
+	code := pastedCode(pasted)
 	if code == "" {
 		return nil, errors.New("授权码为空")
 	}
 	return config.Exchange(exchangeContext(ctx, proxy), code, oauth2.VerifierOption(verifier))
+}
+
+// pastedCode 从用户粘贴的内容中取出授权码：带 code 参数的回调地址取该参数，从地址栏复制的 URL 编码授权码（4%2F…）解码
+func pastedCode(value string) string {
+	value = strings.TrimSpace(value)
+	if parsed, err := url.Parse(value); err == nil && parsed.Query().Get("code") != "" {
+		return parsed.Query().Get("code")
+	}
+	if decoded, err := url.PathUnescape(value); err == nil {
+		return decoded
+	}
+	return value
 }
 
 // refreshAhead 为官方客户端刷新 access token 时的剩余有效期阈值
@@ -143,7 +190,8 @@ type TokenSource struct {
 	token  *oauth2.Token
 }
 
-// NewTokenSource 以已保存的 token 创建 token 源，OAuth 客户端的选择与官方客户端相同：provider 非空时经 OAuthConfigWIF 的 STS 刷新，认证方式为 AuthMethodEnterprise 时经 OAuthConfigCloud 刷新，其余经 OAuthConfig 刷新；刷新请求经克隆的 http.DefaultTransport 与账户代理发出
+// NewTokenSource 以已保存的 token 创建自动刷新的 token 源
+// OAuth 客户端按 method 与 provider 选择，规则见 docs/protocol.md“token 刷新”
 func NewTokenSource(token *oauth2.Token, method, provider string, proxy Proxy, save func(*oauth2.Token) error) *TokenSource {
 	config := OAuthConfig
 	switch {

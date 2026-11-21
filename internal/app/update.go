@@ -15,7 +15,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,6 +34,9 @@ const releaseAPI = "https://api.github.com/repos/Mag1cFall/Antigravity2API/relea
 
 // releaseCheckInterval 是最新发行版本的缓存时长
 const releaseCheckInterval = time.Hour
+
+// releaseCheckTimeout 是读取一次最新发行版本的总时限
+const releaseCheckTimeout = 10 * time.Second
 
 // Version 返回构建时记录的模块版本，标签构建为发行版本号
 func Version() string {
@@ -73,6 +75,8 @@ type updateStatus struct {
 	Error       string          `json:"error,omitempty"`
 	Updating    bool            `json:"updating"`
 	Progress    *updateProgress `json:"progress,omitempty"`
+	// LogDir 是服务日志目录的绝对路径
+	LogDir string `json:"log_dir"`
 }
 
 // updateProgress 是在线更新的阶段（download、verify、install、restart）与发行包的已下载和总字节数，总字节数未知时为 0
@@ -133,6 +137,9 @@ func (u *selfUpdater) status(ctx context.Context, refresh bool) (updateStatus, e
 		if ctx.Err() != nil {
 			return updateStatus{}, ctx.Err()
 		}
+		if err != nil {
+			slog.Warn("检查更新失败 | 错误="+err.Error(), "source", "service")
+		}
 		u.mu.Lock()
 		u.checked, u.checkErr = time.Now(), err
 		if err == nil {
@@ -188,6 +195,7 @@ func (u *selfUpdater) apply(ctx context.Context) (updateStatus, error) {
 // statusLocked 在持有锁时生成更新状态
 func (u *selfUpdater) statusLocked() updateStatus {
 	status := updateStatus{Current: u.version, Mode: u.mode, CheckedAt: u.checked, Updating: u.updating}
+	status.LogDir, _ = filepath.Abs(filepath.Join(u.server.boot.RuntimeDir, "logs"))
 	if u.updating {
 		progress := u.progress
 		status.Progress = &progress
@@ -202,10 +210,15 @@ func (u *selfUpdater) statusLocked() updateStatus {
 	return status
 }
 
-// fetchRelease 读取 GitHub 最新发行版本
+// fetchRelease 读取 GitHub 最新发行版本，总时限 releaseCheckTimeout
 func (u *selfUpdater) fetchRelease(ctx context.Context) (*githubRelease, error) {
+	ctx, cancel := context.WithTimeout(ctx, releaseCheckTimeout)
+	defer cancel()
 	response, err := u.get(ctx, u.releaseURL, "application/vnd.github+json")
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("GitHub 在 %d 秒内没有响应", int(releaseCheckTimeout/time.Second))
+		}
 		return nil, fmt.Errorf("读取最新发行版本: %w", err)
 	}
 	defer response.Body.Close()
@@ -267,14 +280,12 @@ func (c downloadCounter) Write(p []byte) (int, error) {
 
 // get 按实时代理配置发出 GET，非 200 响应返回错误
 func (u *selfUpdater) get(ctx context.Context, address string, accept string) (*http.Response, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = func(r *http.Request) (*url.URL, error) { return u.server.live.Load().ProxyURL(r) }
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Accept", accept)
-	response, err := (&http.Client{Transport: transport}).Do(request)
+	response, err := u.server.httpClient().Do(request)
 	if err != nil {
 		return nil, err
 	}

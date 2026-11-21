@@ -241,7 +241,7 @@ func TestUsageMatchesRecords(t *testing.T) {
 	}
 	store = reopen(t, store, path)
 	defer store.Close()
-	report, err := store.Usage(context.Background(), UsageQuery{From: start, To: end, Bucket: time.Hour, Stack: "model"})
+	report, err := store.Usage(context.Background(), UsageQuery{From: start, To: end, Bucket: time.Hour, Location: time.UTC, Stack: "model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestUsageMatchesRecords(t *testing.T) {
 	if math.Abs(totals.Duration.P95MS-float64(exact))/float64(exact) > 0.01 {
 		t.Fatalf("p95=%v 精确值=%d", totals.Duration.P95MS, exact)
 	}
-	filtered, err := store.Usage(context.Background(), UsageQuery{From: start, To: end, Bucket: 24 * time.Hour, Stack: "account", Filters: map[string][]string{"quota_group": {"3p"}}})
+	filtered, err := store.Usage(context.Background(), UsageQuery{From: start, To: end, Bucket: 24 * time.Hour, Location: time.UTC, Stack: "account", Filters: map[string][]string{"quota_group": {"3p"}}})
 	if err != nil || filtered.Totals.Requests != 150 || len(filtered.Options["model"]) != 2 {
 		t.Fatalf("筛选报告 %+v err=%v", filtered.Totals, err)
 	}
@@ -450,6 +450,7 @@ func TestUpstreamErrorFormats(t *testing.T) {
 	}
 }
 
+// TestCost 验证各模型族单价、生效日期分段、无单价模型与生图模型的费用估算
 func TestCost(t *testing.T) {
 	for _, test := range []struct {
 		model                 string

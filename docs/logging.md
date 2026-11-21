@@ -22,7 +22,7 @@
 
 - 日志文件由 `natefinch/lumberjack` v2 管理
 - 旧文件名中的时间为服务器本地时间，格式为 `2006-01-02T15-04-05.000`；保留 `LOG_MAX_TOTAL_MB / 10 − 1`（整数除法）个，超出时删除最旧的
-- `crash.log` 在服务启动时以追加方式打开，经 Go `debug.SetCrashOutput` 接收未恢复的 panic 与致命错误的消息及全部 goroutine 栈，内容与标准错误上的崩溃输出相同
+- `crash.log` 在服务启动时以追加方式打开，经 Go `debug.SetCrashOutput` 接收未恢复的 panic 与致命错误的消息及全部 goroutine 栈，内容与标准错误上的崩溃输出相同；每次启动在末尾写一行 `=== start <启动时刻> ===`，上次运行崩溃时启动后写一条 ERROR 日志 `上次运行异常退出`，带崩溃的第一行与文件路径
 
 ## 日志结构
 
@@ -246,7 +246,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 
 ## 请求账本
 
-`RUNTIME_DIR/requests.db` 是 SQLite（WAL）账本。每个公开 POST 请求（API key 与配置的某个 key 相同，或未配置 key）与每次管理端手动预热结束后写入一行请求记录，入账条件见 [开发文档](development.md) “目录、组件与依赖”的处理链；写入由后台协程按批提交，响应先于写入完成，等待写入的条目超过 4096 条时丢弃新条目。
+`RUNTIME_DIR/requests.db` 是 SQLite（WAL）账本。每个公开 POST 请求与 `/ws/` 下的 Live WebSocket 请求（API key 与配置的某个 key 相同，或未配置 key）与每次管理端手动预热结束后写入一行请求记录，入账条件见 [开发文档](development.md) “目录、组件与依赖”的处理链；写入由后台协程按批提交，响应先于写入完成，等待写入的条目超过 4096 条时丢弃新条目。
 
 | 字段 | 内容 |
 | --- | --- |
@@ -332,7 +332,7 @@ INFO  account@example.com  事件流恢复 | 模型=gemini-3.8-flash-high | 停�
 7. 其余：`completed`
 
 - 响应状态码：处理链写出的第一个状态码，没有写出时为 200
-- 取消原因：请求 context 结束的原因（客户端断开、管理端停止、`REQUEST_TIMEOUT`），或 Responses 后台请求经 cancel 接口终止；后台请求不随客户端断开而取消
+- 取消原因：请求 context 结束的原因（客户端断开、管理端停止、`REQUEST_TIMEOUT`），或 Responses 与 Interactions 后台请求经 cancel 接口终止；后台请求不随客户端断开而取消
 - 生成错误：同一请求最近一次生成未能开始的错误，或事件流中的错误事件
 - 终止事件：上游的 finish 事件，终止原因为其中的 `finishReason`；该事件到达后，客户端断开与超时不改变结果
 

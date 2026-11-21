@@ -74,15 +74,13 @@ func (f TabFile) target() (window, before, after string) {
 	return strings.Trim(window, "\n"), trimmed, strings.TrimRight(after, "\n")
 }
 
-// BuildTabEnvelope 按编辑器版 language_server 的 Tab 补全请求组装信封：查看文件的步骤与文件全文、带光标标记的用户请求，以及写到 ReplacementContent 的 replace_file_content 预填
-func BuildTabEnvelope(project string, model CatalogModel, file TabFile, now time.Time) (Envelope, error) {
+// BuildTabEnvelope 按编辑器版 language_server 的 Tab 补全请求组装信封
+// 协议格式见 docs/protocol.md“Tab 补全请求”
+func BuildTabEnvelope(project string, model CatalogModel, file TabFile, now time.Time) Envelope {
 	content := file.Prefix + file.Suffix
 	lines := len(strings.Split(content, "\n"))
 	window, _, _ := file.target()
-	prefill, err := tabPrefill(file.Path, window)
-	if err != nil {
-		return Envelope{}, err
-	}
+	prefill := tabPrefill(file.Path, window)
 	texts := []string{
 		fmt.Sprintf("Step Id: 0\nThe USER performed the following action:\nShow the contents of file %s from lines 1 to %d", file.Path, lines+1),
 		fmt.Sprintf("Step Id: 0\nFile Path: `%s`\nTotal Lines: 0\nTotal Bytes: 0\nShowing lines 1 to %d\n%s\n\n", file.URI, lines+1, content),
@@ -107,20 +105,17 @@ func BuildTabEnvelope(project string, model CatalogModel, file TabFile, now time
 		Model:       model.ID,
 		UserAgent:   envelopeUserAgent,
 		RequestType: requestTypeTab,
-	}, nil
+	}
 }
 
 // tabPrefill 返回模型续写前的 replace_file_content 预填，写到 ReplacementContent 键名为止
-func tabPrefill(file, window string) (string, error) {
+func tabPrefill(file, window string) string {
 	quoted := make([]string, 0, 3)
 	for _, value := range []string{file, tabInstruction, window} {
-		encoded, err := marshal(value)
-		if err != nil {
-			return "", err
-		}
+		encoded, _ := marshal(value)
 		quoted = append(quoted, string(encoded))
 	}
-	return "<replace_file_content>\n{\n\t\"TargetFile\": " + quoted[0] + ",\n\t\"CodeMarkdownLanguage\": \"plaintext\",\n\t\"Instruction\": " + quoted[1] + ",\n\t\"ReplacementChunks\": [\n\t\t{\n\t\t\t\"TargetContent\": " + quoted[2] + ",\n\t\t\t\"ReplacementContent", nil
+	return "<replace_file_content>\n{\n\t\"TargetFile\": " + quoted[0] + ",\n\t\"CodeMarkdownLanguage\": \"plaintext\",\n\t\"Instruction\": " + quoted[1] + ",\n\t\"ReplacementChunks\": [\n\t\t{\n\t\t\t\"TargetContent\": " + quoted[2] + ",\n\t\t\t\"ReplacementContent"
 }
 
 // TabInsertion 从模型在预填之后的续写中取出 ReplacementContent，返回它在光标处插入的文字；替换内容改动了光标前后的原文时返回空串

@@ -1,5 +1,6 @@
 import { type CustomRange, parseCustom } from '@/features/requests/RangePicker'
 import type { RequestState } from '@/features/requests/types'
+import { rangeQuery } from '@/features/usage/queries'
 
 // ranges 是时间范围的取值与对应毫秒数
 export const ranges = {
@@ -69,14 +70,7 @@ export function parseFilter(params: URLSearchParams): RequestFilter {
 
 // apiQuery 把筛选条件换成 GET /api/usage/records 与 records.csv 的查询参数，预设范围截止到 now
 export function apiQuery(filter: RequestFilter, now: Date) {
-  const query = new URLSearchParams(
-    filter.custom
-      ? { from: filter.custom.from.toISOString(), to: filter.custom.to.toISOString() }
-      : {
-          from: new Date(now.getTime() - ranges[filter.range]).toISOString(),
-          to: new Date(now.getTime() + 1000).toISOString(),
-        },
-  )
+  const query = rangeQuery(filter.custom ?? ranges[filter.range], now.getTime())
   if (filter.state) query.set('state', filter.state)
   if (filter.protocol) query.set('protocol', filter.protocol)
   if (filter.model) query.set('model', filter.model)

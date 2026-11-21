@@ -18,6 +18,8 @@ import (
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/Mag1cFall/Antigravity2API/internal/auth"
+	"github.com/Mag1cFall/Antigravity2API/internal/config"
+	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
 )
 
 // loginTimeout 是一次登录等待回调或授权码的时长
@@ -49,6 +51,8 @@ type login struct {
 	callback *url.URL
 	// device 是登录开始时生成的设备档案，登录前虚拟进程与登录成功后的账户共用它
 	device antigravity.Device
+	// proxy 是本次登录指定的代理（URL 或 direct），为空时用全局代理
+	proxy string
 }
 
 // logins 保存进行中的登录
@@ -58,16 +62,22 @@ type logins struct {
 	items  map[string]*login
 }
 
-// createLogin 开始一次登录并返回授权链接
+// createLogin 开始一次登录并返回授权链接，proxy 非空时登录、读取邮箱与之后的账户请求都经该代理
 func (s *server) createLogin(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Mode string `json:"mode"`
+		Mode  string `json:"mode"`
+		Proxy string `json:"proxy"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	state, err := s.logins.start(r.Context(), input.Mode)
+	input.Proxy = strings.TrimSpace(input.Proxy)
+	if err := config.ValidateProxy(input.Proxy); err != nil && input.Proxy != proxypool.Direct {
+		writeError(w, http.StatusBadRequest, "invalid_proxy", err.Error())
+		return
+	}
+	state, err := s.logins.start(r.Context(), input.Mode, input.Proxy)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "login_failed", err.Error())
 		return
@@ -115,7 +125,7 @@ func (s *server) submitLoginCode(w http.ResponseWriter, r *http.Request) {
 	value := strings.TrimSpace(input.Code)
 	if item.callback == nil {
 		select {
-		case item.codes <- authorizationCode(value):
+		case item.codes <- value:
 		default:
 			writeError(w, http.StatusConflict, "login_code_submitted", "授权码已提交，正在完成登录")
 			return
@@ -132,10 +142,10 @@ func (s *server) submitLoginCode(w http.ResponseWriter, r *http.Request) {
 }
 
 // start 在后台运行登录，取得授权链接后登记并返回
-func (l *logins) start(ctx context.Context, mode string) (loginState, error) {
+func (l *logins) start(ctx context.Context, mode, proxy string) (loginState, error) {
 	s := l.server
 	flow, cancel := context.WithTimeout(s.ctx, loginTimeout)
-	item := &login{cancel: cancel, codes: make(chan string, 1), done: make(chan struct{}), device: antigravity.NewLoginDevice()}
+	item := &login{cancel: cancel, codes: make(chan string, 1), done: make(chan struct{}), device: antigravity.NewLoginDevice(), proxy: proxy}
 	item.state = loginState{ID: strings.ToLower(rand.Text()), Mode: mode, State: "pending", ExpiresAt: time.Now().Add(loginTimeout).UTC()}
 	links := make(chan string, 1)
 	go l.run(flow, item, mode, links)
@@ -166,7 +176,10 @@ func (l *logins) run(ctx context.Context, item *login, mode string, links chan<-
 	defer item.cancel()
 	var token *oauth2.Token
 	var err error
-	proxy := func(request *http.Request) (*url.URL, error) { return l.server.live.Load().ProxyURL(request) }
+	var proxy antigravity.Proxy = func(request *http.Request) (*url.URL, error) { return l.server.live.Load().ProxyURL(request) }
+	if item.proxy != "" {
+		proxy = proxypool.Fixed(item.proxy)
+	}
 	prelogin, stop := context.WithCancel(ctx)
 	defer stop()
 	go antigravity.NewPrelogin(item.device, proxy).Run(prelogin)
@@ -190,7 +203,7 @@ func (l *logins) run(ctx context.Context, item *login, mode string, links chan<-
 	id := ""
 	if err == nil {
 		var added *auth.Account
-		if added, err = l.server.deps.Store.AddWithDevice(l.server.ctx, token, item.device); err == nil {
+		if added, err = l.server.deps.Store.AddWithDevice(l.server.ctx, token, item.device, item.proxy); err == nil {
 			id = added.ID
 		}
 	}
@@ -238,14 +251,6 @@ func (l *logins) snapshot(item *login) loginState {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return item.state
-}
-
-// authorizationCode 从授权码或带 code 参数的回调地址中取出授权码
-func authorizationCode(value string) string {
-	if parsed, err := url.Parse(value); err == nil && parsed.Query().Get("code") != "" {
-		return parsed.Query().Get("code")
-	}
-	return value
 }
 
 // forwardCallback 把浏览器地址栏中回调地址的查询参数转交本机回环监听，监听没有接受时返回带其应答正文的错误

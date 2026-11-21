@@ -94,7 +94,7 @@ func (embeddedLoader) LoadTiktokenBpe(file string) (map[string]int, error) {
 	return ranks, scanner.Err()
 }
 
-// factors 为各模型族 promptTokenCount 与分词计数之比：Text 为系统指令与消息，Tools 为函数声明 JSON；Gemini 以 Gemma 3 分词，Text 按 token-count runner 只含文本的样本拟合，Tools 与每个声明的固定开销按官方现场 agent 请求与 token-count runner 的工具声明样本拟合；Claude 以 cl100k_base 分词，两项与 Claude 的固定开销一起按官方现场 agent 请求、各系统提示档位、工具声明与函数调用历史样本拟合
+// factors 为各模型族 promptTokenCount 与分词计数之比：Text 为系统指令与消息，Tools 为函数声明 JSON；Gemini 以 Gemma 3 分词，Claude 以 cl100k_base 分词，计数方法见 docs/protocol.md「非流式与计数」
 var factors = map[string]struct{ Text, Tools float64 }{
 	antigravity.ProviderGoogle:    {Text: 0.9985, Tools: 1.0295},
 	antigravity.ProviderAnthropic: {Text: 1.5787, Tools: 1.624},
@@ -137,7 +137,7 @@ func Text(provider, value string) int64 {
 	return int64(len(processor().Encode(value)))
 }
 
-// Prompt 估算上游请求计入 promptTokenCount 的 token 数：GPT-OSS 族为按 gpt-oss 聊天模板渲染的 harmony 提示的 o200k_base token 数；其余模型族的系统指令与各 part 的文本、函数名、参数和输出按模型族分词计数后乘以模型族的文本系数，各函数声明的 JSON 乘以工具系数，图片与 PDF 另按模型族计数，Gemini 族另加每个函数声明的固定开销与各思考签名的 Signature，Claude 族另加工具说明、每个函数声明与每个函数调用和结果 part 的固定开销，未知模型族系数为 1
+// Prompt 估算上游请求计入 promptTokenCount 的 token 数，各模型族的计数规则见 docs/protocol.md「非流式与计数」
 func Prompt(provider string, request antigravity.WireRequest) int64 {
 	if provider == antigravity.ProviderOpenAI {
 		return harmonyTokens(harmonyPrompt(request))
@@ -199,7 +199,8 @@ func Signature(provider, signature string) int64 {
 	return int64(float64(len(signature)-geminiSignatureBase)/geminiSignatureChars + 0.5)
 }
 
-// Media 返回一个内联媒体计入 promptTokenCount 的 token 数：Gemini 族每张图片 geminiImageTokens、PDF 每页 geminiPDFPage；Claude 族图片长边缩到 claudeImageEdge 以内后每 28×28 像素块 1 个，PDF 每个文件 claudePDFFile 加每页 claudePDFPage；其余媒体与模型族不计，无法读取尺寸的图片不计
+// Media 返回一个内联媒体计入 promptTokenCount 的 token 数，各模型族的图片与 PDF 计数规则见 docs/protocol.md「非流式与计数」
+// 不支持的媒体类型、模型族或无法读取尺寸的图片返回 0
 func Media(provider string, blob antigravity.WireBlob) int64 {
 	pdf := blob.MIMEType == "application/pdf"
 	pages := int64(max(1, len(pdfPage.FindAll(blob.Data, -1))))

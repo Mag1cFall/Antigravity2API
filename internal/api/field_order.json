@@ -1059,6 +1059,7 @@
     "model",
     "stop_reason",
     "stop_sequence",
+    "stop_details",
     "usage"
    ],
    "key:usage": [

@@ -14,6 +14,7 @@ import { DotList } from '@/components/ui/stats'
 import { Table, Td, Th } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip } from '@/components/ui/tooltip'
+import { useKeyName } from '@/features/connect/ApiKeys'
 import { nameOf } from '@/features/quota/quota'
 import { protocolName } from '@/features/requests/filters'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
@@ -85,6 +86,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
   const q = useMessages('quota')
   const s = useMessages('settings')
   const { locale } = useI18n()
+  const keyName = useKeyName()
   const record = detail.record
   const n = (value: number) => formatNumber(value, locale)
   const typeNames: Record<string, string> = {
@@ -247,7 +249,7 @@ function DetailBody({ detail }: { detail: RequestDetail }) {
           </Row>
         )}
         <Row label={m.apiKey}>
-          <span className="font-mono">{record.api_key || m.none}</span>
+          <span className="font-mono">{record.api_key ? keyName(record.api_key) : m.none}</span>
         </Row>
         <Row label={m.client}>
           <span className="font-mono">{record.client_ip}</span>

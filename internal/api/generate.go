@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"slices"
 	"strings"
@@ -58,9 +57,6 @@ func (result *generationResult) apply(event antigravity.Event) error {
 		if len(call.Arguments) == 0 {
 			call.Arguments = json.RawMessage(`{}`)
 		}
-		if !json.Valid(call.Arguments) {
-			return fmt.Errorf("upstream tool call %q arguments are not JSON", call.Name)
-		}
 		event.ToolCall = &call
 		result.toolCalls = append(result.toolCalls, call)
 	case antigravity.EventMedia:
@@ -76,7 +72,8 @@ func (result *generationResult) apply(event antigravity.Event) error {
 	return nil
 }
 
-// startGeneration 开始一次生成：非流式时直接调用 generate；流式时在后台调用 generate，写出流式响应头前等待首个用量以外的事件，generate 失败或这样的事件为错误时返回该错误，从调用起心跳间隔内没有这样的事件时返回事件流，此后 generate 的失败为流中的错误事件；先到的用量与返回的首个事件在事件流中仍会重放
+// startGeneration 发起一次生成并返回事件流与首个非用量事件
+// 流式请求在写出响应头前最多等待 streamHeartbeatInterval，先到的事件仍在流中重放；规则见 docs/protocol.md「错误」
 func startGeneration(ctx context.Context, stream bool, generate func() (<-chan antigravity.Event, error)) (<-chan antigravity.Event, antigravity.Event, error) {
 	if !stream {
 		events, err := generate()
@@ -237,21 +234,28 @@ func clientSession(r *http.Request, values ...string) string {
 	return requestAPIKey(r) + "\x00"
 }
 
+// headerSessions 返回客户端以请求头给出的会话标识：Claude Code 的 X-Claude-Code-Session-Id 与 X-Session-Id、OpenCode 的 x-opencode-session 与 x-opencode-session-id
+func headerSessions(r *http.Request) []string {
+	return []string{r.Header.Get("X-Claude-Code-Session-Id"), r.Header.Get("X-Session-Id"), r.Header.Get("X-Opencode-Session"), r.Header.Get("X-Opencode-Session-Id")}
+}
+
 // headerSession 返回 Images 与 Audio 请求的会话分区，客户端会话标识只取 session_id 与 conversation_id 请求头
 func headerSession(r *http.Request) string {
 	return clientSession(r, r.Header.Get("session_id"), r.Header.Get("conversation_id"))
 }
 
-// functionResultContent 把工具结果转成函数结果内容与媒体：字符串与其他 JSON 原样保留；内容块数组中带 text 的块与 parse 转出的文本以换行相连写成 JSON 字符串，其余块由 parse 转成函数结果的媒体 part
+// functionResultContent 把工具结果转成函数结果内容与媒体：字符串与其他 JSON 原样保留，type 以 input_ 开头的单个内容块对象按只有它的数组处理；内容块数组中带 text 的块与 parse 转出的文本以换行相连写成 JSON 字符串，其余块由 parse 转成函数结果的媒体 part
 func functionResultContent(raw json.RawMessage, parse func(json.RawMessage) ([]antigravity.Part, error)) (json.RawMessage, []antigravity.Part, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return json.RawMessage(`""`), nil, nil
 	}
-	if !json.Valid(raw) {
-		return nil, nil, fmt.Errorf("function result must be JSON")
-	}
 	var blocks []json.RawMessage
-	if json.Unmarshal(raw, &blocks) != nil {
+	var single struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &single) == nil && strings.HasPrefix(single.Type, "input_") {
+		blocks = []json.RawMessage{raw}
+	} else if json.Unmarshal(raw, &blocks) != nil {
 		return raw, nil, nil
 	}
 	var texts []string

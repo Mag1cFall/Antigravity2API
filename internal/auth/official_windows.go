@@ -5,6 +5,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -30,7 +32,26 @@ func officialApp() (string, error) {
 	return app, nil
 }
 
-// stopOfficial 结束可执行文件位于官方客户端安装目录内的全部进程并等待其退出，返回主进程的启动参数
+// wmClose 为请求窗口关闭的 WM_CLOSE 消息
+const wmClose = 0x0010
+
+var (
+	// postMessage 为 user32 的 PostMessageW
+	postMessage = windows.NewLazySystemDLL("user32.dll").NewProc("PostMessageW")
+	// closing 为本次要关闭窗口的进程 ID，由 closeMu 保护
+	closing map[uint32]bool
+	closeMu sync.Mutex
+	// closeWindow 为 EnumWindows 的回调，向 closing 中进程的可见顶层窗口发送 WM_CLOSE
+	closeWindow = windows.NewCallback(func(window windows.HWND, _ uintptr) uintptr {
+		var pid uint32
+		if _, err := windows.GetWindowThreadProcessId(window, &pid); err == nil && closing[pid] && windows.IsWindowVisible(window) {
+			postMessage.Call(uintptr(window), wmClose, 0, 0)
+		}
+		return 1
+	})
+)
+
+// stopOfficial 让可执行文件位于官方客户端安装目录内的全部进程退出并等待，返回主进程的启动参数：先向它们的可见顶层窗口发送 WM_CLOSE，closeTimeout 内没有退出的进程被结束
 func stopOfficial(app string) ([]string, error) {
 	dir := strings.ToLower(filepath.Dir(app)) + `\`
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
@@ -39,6 +60,12 @@ func stopOfficial(app string) ([]string, error) {
 	}
 	defer windows.CloseHandle(snapshot)
 	var args []string
+	processes := map[uint32]windows.Handle{}
+	defer func() {
+		for _, process := range processes {
+			windows.CloseHandle(process)
+		}
+	}()
 	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
 	for next := windows.Process32First(snapshot, &entry); next == nil; next = windows.Process32Next(snapshot, &entry) {
 		process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, entry.ProcessID)
@@ -52,14 +79,28 @@ func stopOfficial(app string) ([]string, error) {
 				if main, ok := mainArgs(process, path, app); ok {
 					args = main
 				}
-				if err := windows.TerminateProcess(process, 1); err != nil && err != windows.ERROR_ACCESS_DENIED {
-					windows.CloseHandle(process)
-					return nil, fmt.Errorf("结束官方客户端进程 %d: %w", entry.ProcessID, err)
-				}
-				windows.WaitForSingleObject(process, windows.INFINITE)
+				processes[entry.ProcessID] = process
+				continue
 			}
 		}
 		windows.CloseHandle(process)
+	}
+	closeMu.Lock()
+	closing = map[uint32]bool{}
+	for pid := range processes {
+		closing[pid] = true
+	}
+	windows.EnumWindows(closeWindow, nil)
+	closeMu.Unlock()
+	deadline := time.Now().Add(closeTimeout)
+	for pid, process := range processes {
+		if event, _ := windows.WaitForSingleObject(process, uint32(max(time.Until(deadline), 0).Milliseconds())); event == windows.WAIT_OBJECT_0 {
+			continue
+		}
+		if err := windows.TerminateProcess(process, 1); err != nil && err != windows.ERROR_ACCESS_DENIED {
+			return nil, fmt.Errorf("结束官方客户端进程 %d: %w", pid, err)
+		}
+		windows.WaitForSingleObject(process, windows.INFINITE)
 	}
 	return args, nil
 }

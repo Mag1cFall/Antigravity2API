@@ -87,7 +87,7 @@ func writeSSEHeartbeat(w http.ResponseWriter) error {
 	return http.NewResponseController(w).Flush()
 }
 
-// statusFromError 返回错误对应的 HTTP 状态：客户端取消为 503，超时为 504，上游错误与带状态的错误取其 4xx、5xx 状态，其余为 502
+// statusFromError 返回错误对应的 HTTP 状态：客户端取消为 503，超时为 504，上游按请求内容拒绝的 429 为 400，上游错误与带状态的错误取其 4xx、5xx 状态，其余为 502
 func statusFromError(err error) int {
 	if errors.Is(err, context.Canceled) {
 		return http.StatusServiceUnavailable
@@ -96,6 +96,9 @@ func statusFromError(err error) int {
 		return http.StatusGatewayTimeout
 	}
 	var upstream *antigravity.UpstreamError
+	if errors.As(err, &upstream) && upstream.ContentRejected() {
+		return http.StatusBadRequest
+	}
 	if errors.As(err, &upstream) {
 		return validHTTPStatus(upstream.Status)
 	}
@@ -247,7 +250,7 @@ type accountStates interface {
 	AccountStates() []string
 }
 
-// publicReason 返回请求失败写给 API 客户端的英文原因：账户都不可调度时按状态给出账户数，内容策略结束时另写拦截时间与已输出的内容，其余错误取完整原因
+// publicReason 返回请求失败写给 API 客户端的英文原因：账户都不可调度时按状态给出账户数，内容策略结束时另写拦截时间与已输出的内容，上游按请求内容拒绝时先说明不是额度或限速，其余错误取完整原因
 func publicReason(err error) string {
 	var states accountStates
 	var filtered *FilteredError
@@ -257,8 +260,14 @@ func publicReason(err error) string {
 	case errors.As(err, &filtered):
 		return filteredReason(filtered)
 	}
+	if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok && upstream.ContentRejected() {
+		return contentRejectedPrefix + publicText(err.Error())
+	}
 	return publicText(err.Error())
 }
+
+// contentRejectedPrefix 为上游按请求内容拒绝时公开消息的开头，说明这不是额度或限速
+const contentRejectedPrefix = "Upstream rejected the request content (usually a phrase in the system prompt); this is not a quota or rate limit and retrying the same request fails again: "
 
 // FilteredError 是上游以内容策略结束的生成，After 为请求开始到被拦截的时长，Produced 为此前已交给客户端的内容种类，隐藏的思考不计
 type FilteredError struct {
@@ -450,7 +459,7 @@ func openAIErrorCode(err error) string {
 		return "context_length_exceeded"
 	}
 	var feedback *antigravity.PromptFeedbackError
-	if errors.As(err, &feedback) {
+	if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); errors.As(err, &feedback) || ok && upstream.ContentRejected() {
 		return "invalid_prompt"
 	}
 	switch statusFromError(err) {
@@ -479,6 +488,16 @@ func anthropicErrorType(err error) string {
 		return upstream.AnthropicType()
 	}
 	return anthropicStatusErrorType(statusFromError(err))
+}
+
+// anthropicStreamErrorType 返回流内 error 事件的类型：上游给出 Anthropic 类型时用它，5xx 为官方流内与 529 对应的 overloaded_error，其余同 anthropicErrorType
+// 依据见 docs/protocol.md 的错误映射
+func anthropicStreamErrorType(err error) string {
+	var upstream *antigravity.UpstreamError
+	if !(errors.As(err, &upstream) && upstream.AnthropicType() != "") && statusFromError(err) >= http.StatusInternalServerError {
+		return "overloaded_error"
+	}
+	return anthropicErrorType(err)
 }
 
 // anthropicErrorMessage 返回 Anthropic 错误消息，上下文超限为 prompt is too long 开头的上游原因，其余按 publicReason
@@ -518,10 +537,10 @@ func anthropicStatusErrorType(status int) string {
 	}
 }
 
-// geminiErrorStatus 返回 Gemini 错误的 status：上游错误取其 status，其余按 HTTP 状态
+// geminiErrorStatus 返回 Gemini 错误的 status：上游按请求内容拒绝时为 INVALID_ARGUMENT，其余上游错误取其 status，其余按 HTTP 状态
 func geminiErrorStatus(err error) string {
 	var upstream *antigravity.UpstreamError
-	if errors.As(err, &upstream) {
+	if errors.As(err, &upstream) && !upstream.ContentRejected() {
 		if status, _ := upstream.Message(); status != "" {
 			return status
 		}

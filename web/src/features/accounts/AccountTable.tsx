@@ -17,7 +17,7 @@ import { memo, type ReactNode, useRef } from 'react'
 
 import { Tag } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
+import { Checkbox, SelectAllCheckbox } from '@/components/ui/checkbox'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -425,12 +425,14 @@ const AccountRow = memo(function AccountRow({
               <button
                 type="button"
                 aria-label={fill(m.errorOf, { email: account.id })}
-                className="line-clamp-2 max-w-full min-w-0 rounded-sm text-left text-xs max-sm:line-clamp-1 max-sm:flex-1"
+                className="max-w-full min-w-0 rounded-sm text-left text-xs max-sm:flex-1"
                 onClick={() => {
                   actions.onDetails(account)
                 }}
               >
-                <AccountReason account={account} now={now} />
+                <span className="line-clamp-2 max-sm:line-clamp-1">
+                  <AccountReason account={account} now={now} />
+                </span>
               </button>
             </Tooltip>
           ) : statusOf(account) === 'verify' && !phone ? (
@@ -539,13 +541,14 @@ export function AccountTable({
         <tr>
           <Th data-stack>
             <span className="flex items-center gap-3">
-              <Checkbox
-                checked={picked === 0 ? false : picked === accounts.length ? true : 'indeterminate'}
+              <SelectAllCheckbox
+                selected={picked}
+                total={accounts.length}
                 aria-label={m.selectPage}
                 onCheckedChange={(checked) => {
                   actions.onSelect(
                     accounts.map((account) => account.id),
-                    checked === true,
+                    checked,
                   )
                 }}
               />

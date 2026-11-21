@@ -302,12 +302,12 @@ export function TrendChart({
           )}
         </div>
       </div>
-      <div className="ml-10 flex justify-between gap-2 text-xs text-foreground-muted tabular-nums">
+      <div className="ml-[40px] flex justify-between gap-2 text-xs text-foreground-muted tabular-nums">
         <span>{axisFormat.format(Date.parse(data.from))}</span>
         <span className="max-sm:hidden">{axisFormat.format(middle)}</span>
         <span>{endsNow ? m.trendNow : axisFormat.format(Date.parse(data.to))}</span>
       </div>
-      <p id="trend-hint" className="ml-10 text-xs text-foreground-subtle">
+      <p id="trend-hint" className="ml-[40px] text-xs text-foreground-subtle">
         {m.trendHint}
       </p>
     </div>

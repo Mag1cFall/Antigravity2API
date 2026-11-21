@@ -6,6 +6,7 @@ import (
 	"testing"
 )
 
+// TestAuthMiddlewarePriorityAndMatching 验证四种 key 来源任一与配置的 key 相符即放行，查询参数中的无效 key 不影响请求头中的有效 key
 func TestAuthMiddlewarePriorityAndMatching(t *testing.T) {
 	requiredKey := "secret-123"
 	handler := authMiddleware(func() []string { return []string{requiredKey} }, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

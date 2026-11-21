@@ -6,6 +6,13 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { ExportDialog } from '@/features/files/ExportDialog'
 import { useMessages } from '@/lib/i18n'
 
+// records 读取请求记录接口导出的 CSV 文件，search 是时间范围与筛选参数
+async function records(search: string): Promise<Blob> {
+  const response = await fetch('/api/usage/records.csv?' + search, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error(response.statusText)
+  return response.blob()
+}
+
 // RecordsExport 是导出请求记录 CSV 的按钮与对话框：query 是请求记录接口的时间范围与筛选参数，disabledReason 非空时按钮停用并在悬停时说明原因
 export function RecordsExport({
   label,
@@ -39,13 +46,10 @@ export function RecordsExport({
         title={m.exportTitle}
         description={m.exportDescription}
         path={'/api/usage/records.csv?' + search}
-        copy={async () => {
-          const response = await fetch('/api/usage/records.csv?' + search, {
-            credentials: 'same-origin',
-          })
-          if (!response.ok) throw new Error(response.statusText)
-          return (await response.text()).replace(/^\uFEFF/, '')
-        }}
+        copy={async () =>
+          (await records(search).then((file) => file.text())).replace(/^\uFEFF/, '')
+        }
+        download={{ name: 'antigravity2api-requests.csv', file: () => records(search) }}
       />
     </>
   )

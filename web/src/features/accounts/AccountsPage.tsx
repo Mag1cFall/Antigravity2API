@@ -46,7 +46,7 @@ const sorts = ['added', 'reset', 'used'] as const
 // Sort 是账户列表的排序方式
 type Sort = (typeof sorts)[number]
 
-// matches 判断账户是否符合状态筛选与搜索词，搜索匹配邮箱、备注名与项目
+// matches 判断账户是否符合状态筛选与搜索词，搜索匹配邮箱、备注名、项目与错误信息
 function matches(account: Account, filter: Status | 'all', query: string) {
   if (filter !== 'all' && statusOf(account) !== filter) return false
   const needle = query.trim().toLowerCase()
@@ -54,7 +54,8 @@ function matches(account: Account, filter: Status | 'all', query: string) {
     !needle ||
     account.id.toLowerCase().includes(needle) ||
     (account.label ?? '').toLowerCase().includes(needle) ||
-    account.project.toLowerCase().includes(needle)
+    account.project.toLowerCase().includes(needle) ||
+    (account.error ?? '').toLowerCase().includes(needle)
   )
 }
 

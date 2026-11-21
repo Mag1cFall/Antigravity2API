@@ -402,7 +402,7 @@ func (store *Store) write(batch []write) (err error) {
 		if inserted {
 			value := rowEntry(&item.entry.Row)
 			day, _ := localDay(value.time)
-			collect(hours, keyOf(floorDiv(value.time, hourMS)*hourMS, value), value)
+			collect(hours, keyOf(value.time/hourMS*hourMS, value), value)
 			collect(days, keyOf(day, value), value)
 		}
 		row := item.entry.Row
@@ -520,7 +520,7 @@ func decompress(data []byte) (string, error) {
 // prune 删除超过保留期的数据并把空闲页交还文件系统，记录与汇总都从截止时间所在本地日的起点开始保留，使三层数据覆盖同一范围
 func (store *Store) prune() {
 	day, _ := localDay(time.Now().Add(-Retention).UnixMilli())
-	hour := floorDiv(day, hourMS) * hourMS
+	hour := day / hourMS * hourMS
 	var errs []error
 	for _, statement := range []string{
 		`DELETE FROM requests WHERE time < ?`, `DELETE FROM hours WHERE start < ?`, `DELETE FROM request_bodies WHERE time < ?`,
@@ -590,13 +590,4 @@ func (store *Store) alignDays() (err error) {
 	}
 	slog.Info(fmt.Sprintf("请求账本已按服务器时区重建本地日汇总 | 天数=%d", rebuilt), "source", "service")
 	return nil
-}
-
-// floorDiv 返回向负无穷取整的整数除法结果
-func floorDiv(value, divisor int64) int64 {
-	quotient := value / divisor
-	if value%divisor != 0 && (value < 0) != (divisor < 0) {
-		quotient--
-	}
-	return quotient
 }

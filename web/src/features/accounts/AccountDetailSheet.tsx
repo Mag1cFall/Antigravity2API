@@ -241,7 +241,7 @@ function ModelsBlock({ account }: { account: Account }) {
   const q = useMessages('quota')
   const mm = useMessages('models')
   const models = useAccountModels(account.id)
-  const list = (models.data?.models ?? []).map((model) => ({ ...model, accounts: 0 }))
+  const list = models.data?.models ?? []
   const chat = list.filter((model) => kindOf(model) === 'chat')
   const chatGroups = [...new Set(chat.map((model) => model.quota_group ?? 'gemini'))].sort(
     (a, b) =>

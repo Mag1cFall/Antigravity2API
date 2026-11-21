@@ -31,13 +31,6 @@ func models(ids ...string) []antigravity.CatalogModel {
 	return catalog
 }
 
-// remaining 生成带 quotaInfo 剩余比例的目录条目
-func remaining(id string, fraction float64, reset time.Time) antigravity.CatalogModel {
-	model := models(id)[0]
-	model.QuotaInfo = antigravity.QuotaInfo{RemainingFraction: fraction, ResetTime: reset.Format(time.RFC3339)}
-	return model
-}
-
 // quota 生成两组各 5 小时与每周桶的额度摘要
 func quota(reset time.Time, gemini5h, geminiWeekly, thirdParty5h, thirdPartyWeekly float64) antigravity.QuotaSummary {
 	bucket := func(id string, fraction float64) antigravity.QuotaBucket {
@@ -59,6 +52,7 @@ func acquire(t *testing.T, pool *Pool, model, session string, exclude map[string
 	return lease
 }
 
+// TestAcquireUsesAccountsWhoseCatalogHasModel 验证调度只选用目录含该模型的账户，不在目录中的模型返回无截止时间的 CooldownError
 func TestAcquireUsesAccountsWhoseCatalogHasModel(t *testing.T) {
 	pool, _ := testPool(2)
 	pool.Set("gemini-only", models("gemini-4-argon-high"))
@@ -73,6 +67,7 @@ func TestAcquireUsesAccountsWhoseCatalogHasModel(t *testing.T) {
 	}
 }
 
+// TestAcquireRotatesLeastRecentlyUsed 验证无并发压力时按最久未被选中顺序轮换账户
 func TestAcquireRotatesLeastRecentlyUsed(t *testing.T) {
 	pool, _ := testPool(2)
 	for _, id := range []string{"a", "b", "c"} {
@@ -89,6 +84,7 @@ func TestAcquireRotatesLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
+// TestAcquireWaitsForFreeSlot 验证并发槽位满时等待至超时，槽位释放后立即取得租约
 func TestAcquireWaitsForFreeSlot(t *testing.T) {
 	pool, _ := testPool(1)
 	pool.Set("a", models("claude-opus-5-5-high"))
@@ -114,6 +110,7 @@ func TestAcquireWaitsForFreeSlot(t *testing.T) {
 	}
 }
 
+// TestLimitCoolsOnlyThatGroupUntilCooldownEnds 验证 Limit 只冷却指定额度组并在冷却到期后恢复
 func TestLimitCoolsOnlyThatGroupUntilCooldownEnds(t *testing.T) {
 	pool, now := testPool(2)
 	pool.Set("a", models("gemini-4-argon-high", "claude-opus-5-5-high"))
@@ -127,6 +124,7 @@ func TestLimitCoolsOnlyThatGroupUntilCooldownEnds(t *testing.T) {
 	acquire(t, pool, "claude-opus-5-5-high", "", nil)
 }
 
+// TestExhaustedBucketCoolsGroupUntilReset 验证耗尽的额度桶冷却对应额度组直至重置时间
 func TestExhaustedBucketCoolsGroupUntilReset(t *testing.T) {
 	pool, now := testPool(2)
 	reset := now.Add(30 * time.Minute)
@@ -184,6 +182,7 @@ func TestSessionSticksToLastSuccessfulAccount(t *testing.T) {
 	}
 }
 
+// TestAcquireSkipsExcludedAccounts 验证调度跳过被排除的账户，全部排除时返回 CooldownError
 func TestAcquireSkipsExcludedAccounts(t *testing.T) {
 	pool, _ := testPool(2)
 	pool.Set("a", models("claude-opus-5-5-high"))
@@ -197,6 +196,7 @@ func TestAcquireSkipsExcludedAccounts(t *testing.T) {
 	}
 }
 
+// TestModelsMergesCatalogsInOrder 验证 Models 按账户顺序合并目录并按模型 ID 去重
 func TestModelsMergesCatalogsInOrder(t *testing.T) {
 	pool, _ := testPool(2)
 	pool.Set("a", models("gemini-4-argon-high", "claude-opus-5-5-high"))

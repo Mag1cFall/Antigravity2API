@@ -14,10 +14,26 @@ import { useUsage } from '@/features/usage/queries'
 import type { UsageStats } from '@/features/usage/types'
 import { api, errorMessage } from '@/lib/api'
 import { fill, useI18n, useMessages } from '@/lib/i18n'
+import type { Catalog } from '@/locales/zh-CN'
 
 // accountPath 返回账户的管理 API 路径
 export function accountPath(id: string) {
   return '/api/accounts/' + encodeURIComponent(id)
+}
+
+// patchAccount 修改账户的一项属性
+function patchAccount(id: string, body: Record<string, unknown>) {
+  return api<Account>(accountPath(id), { method: 'PATCH', json: body })
+}
+
+// verifyAccount 重新初始化账户
+function verifyAccount(id: string) {
+  return api<Account>(accountPath(id) + '/verify', { method: 'POST' })
+}
+
+// refreshAccountQuota 实时读取账户额度
+function refreshAccountQuota(id: string) {
+  return api<Account>(accountPath(id) + '/quota', { method: 'POST' })
 }
 
 // replaceAccount 用接口返回的账户替换缓存中的同一账户
@@ -59,7 +75,7 @@ export function useToggleAccount() {
   const client = useQueryClient()
   return useMutation({
     mutationFn: ({ account, enabled }: { account: Account; enabled: boolean }) =>
-      api<Account>(accountPath(account.id), { method: 'PATCH', json: { enabled } }),
+      patchAccount(account.id, { enabled }),
     onMutate: async ({ account, enabled }) => {
       await client.cancelQueries({ queryKey: accountsKey })
       const previous = client.getQueryData<{ accounts: Account[] }>(accountsKey)
@@ -76,95 +92,73 @@ export function useToggleAccount() {
   })
 }
 
-// useSetPriority 设置账户的调度优先级
-export function useSetPriority() {
+// useAccountAction 调用修改单账户的接口，成功后更新列表并提示，失败时提示原因
+function useAccountAction<T extends { account: Account }>(
+  request: (variables: T) => Promise<Account>,
+  success: (m: Catalog['accounts'], result: Account) => string,
+  failed: keyof Catalog['accounts'],
+) {
   const m = useMessages('accounts')
   const client = useQueryClient()
   return useMutation({
-    mutationFn: ({ account, priority }: { account: Account; priority: number }) =>
-      api<Account>(accountPath(account.id), { method: 'PATCH', json: { priority } }),
+    mutationFn: request,
     onSuccess: (result) => {
       replaceAccount(client, result)
-      toast({
-        tone: 'success',
-        title: fill(m.prioritySaved, { email: result.id, priority: result.priority }),
-      })
+      toast({ tone: 'success', title: success(m, result) })
     },
     onError: (error, { account }) => {
       toast({
         tone: 'error',
-        title: fill(m.priorityFailed, { email: account.id, message: error.message }),
+        title: fill(m[failed], { email: account.id, message: error.message }),
       })
     },
   })
+}
+
+// useSetPriority 设置账户的调度优先级
+export function useSetPriority() {
+  return useAccountAction(
+    ({ account, priority }: { account: Account; priority: number }) =>
+      patchAccount(account.id, { priority }),
+    (m, result) => fill(m.prioritySaved, { email: result.id, priority: result.priority }),
+    'priorityFailed',
+  )
 }
 
 // useSetLabel 设置账户的备注名，空串时清除
 export function useSetLabel() {
-  const m = useMessages('accounts')
-  const client = useQueryClient()
-  return useMutation({
-    mutationFn: ({ account, label }: { account: Account; label: string }) =>
-      api<Account>(accountPath(account.id), { method: 'PATCH', json: { label } }),
-    onSuccess: (result) => {
-      replaceAccount(client, result)
-      toast({ tone: 'success', title: fill(m.labelSaved, { email: result.id }) })
-    },
-    onError: (error, { account }) => {
-      toast({
-        tone: 'error',
-        title: fill(m.labelFailed, { email: account.id, message: error.message }),
-      })
-    },
-  })
+  return useAccountAction(
+    ({ account, label }: { account: Account; label: string }) =>
+      patchAccount(account.id, { label }),
+    (m, result) => fill(m.labelSaved, { email: result.id }),
+    'labelFailed',
+  )
 }
 
 // useClearCooldown 清除账户在一个额度组或模型上的冷却
 export function useClearCooldown() {
-  const m = useMessages('accounts')
-  const client = useQueryClient()
-  return useMutation({
-    mutationFn: ({ account, scope }: { account: Account; scope: string }) =>
+  return useAccountAction(
+    ({ account, scope }: { account: Account; scope: string }) =>
       api<Account>(accountPath(account.id) + '/cooldowns/' + encodeURIComponent(scope), {
         method: 'DELETE',
       }),
-    onSuccess: (result) => {
-      replaceAccount(client, result)
-      toast({ tone: 'success', title: fill(m.cooldownCleared, { email: result.id }) })
-    },
-    onError: (error, { account }) => {
-      toast({
-        tone: 'error',
-        title: fill(m.cooldownClearFailed, { email: account.id, message: error.message }),
-      })
-    },
-  })
+    (m, result) => fill(m.cooldownCleared, { email: result.id }),
+    'cooldownClearFailed',
+  )
 }
 
 // useSetCredits 开启或关闭账户的 AI 积分超额使用
 export function useSetCredits() {
-  const m = useMessages('accounts')
-  const client = useQueryClient()
-  return useMutation({
-    mutationFn: ({ account, enabled }: { account: Account; enabled: boolean }) =>
-      api<Account>(accountPath(account.id), { method: 'PATCH', json: { ai_credits: enabled } }),
-    onSuccess: (result) => {
-      replaceAccount(client, result)
-      toast({
-        tone: 'success',
-        title: fill(m.creditsSaved, {
-          email: result.id,
-          state: result.ai_credits ? m.creditsOn : m.creditsOff,
-        }),
-      })
-    },
-    onError: (error, { account }) => {
-      toast({
-        tone: 'error',
-        title: fill(m.creditsFailed, { email: account.id, message: error.message }),
-      })
-    },
-  })
+  return useAccountAction(
+    ({ account, enabled }: { account: Account; enabled: boolean }) =>
+      patchAccount(account.id, { ai_credits: enabled }),
+    (m, result) =>
+      fill(m.creditsSaved, {
+        email: result.id,
+        state: result.ai_credits ? m.creditsOn : m.creditsOff,
+      }),
+    'creditsFailed',
+  )
 }
 
 // BatchKind 是批量操作：启用、停用、刷新额度与重新初始化
@@ -173,13 +167,8 @@ export type BatchKind = 'enable' | 'disable' | 'quota' | 'verify'
 // batchRequest 返回一个账户在批量操作中调用的单账户接口
 function batchRequest(kind: BatchKind, account: Account) {
   if (kind === 'enable' || kind === 'disable')
-    return api<Account>(accountPath(account.id), {
-      method: 'PATCH',
-      json: { enabled: kind === 'enable' },
-    })
-  return api<Account>(accountPath(account.id) + (kind === 'quota' ? '/quota' : '/verify'), {
-    method: 'POST',
-  })
+    return patchAccount(account.id, { enabled: kind === 'enable' })
+  return kind === 'quota' ? refreshAccountQuota(account.id) : verifyAccount(account.id)
 }
 
 // useBatchAccounts 对多个账户逐个调用单账户接口，每个账户完成后更新列表，结束后汇总结果
@@ -225,8 +214,7 @@ export function useVerifyAccount() {
   const client = useQueryClient()
   return useMutation({
     mutationKey: verifyKey,
-    mutationFn: (account: Account) =>
-      api<Account>(accountPath(account.id) + '/verify', { method: 'POST' }),
+    mutationFn: (account: Account) => verifyAccount(account.id),
     onSuccess: (result) => {
       replaceAccount(client, result)
       toast({ tone: 'success', title: fill(m.verified, { email: result.id }) })
@@ -324,8 +312,7 @@ export function useRefreshQuota() {
   const client = useQueryClient()
   return useMutation({
     mutationKey: quotaKey,
-    mutationFn: (account: Account) =>
-      api<Account>(accountPath(account.id) + '/quota', { method: 'POST' }),
+    mutationFn: (account: Account) => refreshAccountQuota(account.id),
     onSuccess: (result, account) => {
       recordQuotaResult(client, account, { account: result })
       toast({ tone: 'success', title: fill(m.quotaRefreshed, { email: result.id }) })
@@ -384,9 +371,8 @@ export function useRefreshAll() {
             running: new Set(current.running).add(id),
           }))
           try {
-            if (account.state === 'error')
-              await api(accountPath(id) + '/verify', { method: 'POST' })
-            const result = await api<Account>(accountPath(id) + '/quota', { method: 'POST' })
+            if (account.state === 'error') await verifyAccount(id)
+            const result = await refreshAccountQuota(id)
             recordQuotaResult(client, account, { account: result })
           } catch (error) {
             const message = errorMessage(error)

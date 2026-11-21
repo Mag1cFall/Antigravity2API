@@ -61,7 +61,7 @@ export const messages: Catalog = {
     refreshQuotaOf: 'Kontingent von {email} aktualisieren',
     quotaRefreshed: 'Kontingent von {email} aktualisiert',
     quotaRefreshFailed: 'Kontingent von {email} konnte nicht abgefragt werden: {message}',
-    search: 'E-Mail, Bezeichnung oder Projekt suchen',
+    search: 'E-Mail, Bezeichnung, Projekt oder Fehler suchen',
     filter: 'Nach Status filtern',
     all: 'Alle',
     ready: 'Bereit',
@@ -130,6 +130,7 @@ export const messages: Catalog = {
     proxyDescription:
       'Token-, Profil-, Generierungs- und Begleitanfragen dieses Kontos laufen über diesen Proxy. Nach dem Speichern wird das Konto neu initialisiert.',
     proxyLabel: 'Proxy-URL',
+    loginProxyLabel: 'Proxy für diese Anmeldung und das Konto',
     proxyHint:
       'HTTP, HTTPS oder SOCKS5, optional mit user:pass@, z. B. socks5://user:pass@127.0.0.1:1080. Mit direct ohne Proxy verbinden; leer lassen, um den Upstream-Proxy aus den Einstellungen zu nutzen. Passwörter erscheinen als xxxxx.',
     proxyInvalid:
@@ -483,6 +484,10 @@ export const messages: Catalog = {
     editKeyHint:
       'Geben Sie einen eigenen Key ein oder nutzen Sie den zufälligen. Nach einer Änderung brauchen Clients mit dem alten Wert den neuen.',
     keyValue: 'Key',
+    keyName: 'Name',
+    keyNameHint:
+      'Wird auf den Seiten Anbindung, Nutzung und Anfragen neben dem Key angezeigt, um Keys zu unterscheiden.',
+    errKeyName: 'Der Name darf keine Kommas oder Doppelpunkte enthalten',
     keyAccounts: 'Konten',
     keyAccountsHint:
       'Nur die markierten Konten bearbeiten Anfragen mit diesem Key. Ohne Markierung werden alle Konten genutzt.',
@@ -508,6 +513,7 @@ export const messages: Catalog = {
       'Client und Modell wählen, Konfiguration kopieren und loslegen; die Modelle stammen aus dem Live-Katalog Ihrer Konten',
     clientLabel: 'Client',
     model: 'Modell',
+    tierFable: 'Modell für Fable',
     tierOpus: 'Modell für Opus',
     tierSonnet: 'Modell für Sonnet',
     tierHaiku: 'Modell für Haiku',
@@ -529,7 +535,7 @@ export const messages: Catalog = {
       'Der Modellkatalog ist leer. Fügen Sie Konten hinzu, um Modelle zu wählen; bis dahin nutzt die Konfiguration <model-id>',
     modelPlaceholder: '<model-id>',
     clientClaude:
-      'Terminal-Coding-Agent von Anthropic, angebunden über Anthropic Messages, mit eigenem Modell für die Stufen Opus, Sonnet und Haiku',
+      'Terminal-Coding-Agent von Anthropic, angebunden über Anthropic Messages, mit eigenem Modell für die Stufen Fable, Opus, Sonnet und Haiku',
     clientCodex: 'Terminal-Coding-Agent von OpenAI, angebunden über OpenAI Responses',
     clientOpencode:
       'Open-Source-Coding-Agent für das Terminal, mit allen Chat-Modellen in der Konfiguration',
@@ -757,6 +763,13 @@ export const messages: Catalog = {
     now: 'Jetzt',
   },
   requests: {
+    failCapacity:
+      'Google hat für dieses Modell gerade keine Kapazität; später erneut versuchen oder ein anderes Modell wählen',
+    failQuota: 'Das Kontingent des Kontos ist aufgebraucht; nach dem Zurücksetzen wieder nutzbar',
+    failVerify: 'Das Konto muss zuerst bei Google verifiziert werden',
+    failRejected:
+      'Upstream hat den Anfrageinhalt abgelehnt, meist wegen eines Satzes im Systemprompt; kein Kontingentproblem',
+    failTried: '{count} Konten versucht',
     pageTitle: 'Anfragen',
     tabs: 'Anfrageansichten',
     tabRecords: 'Verlauf',
@@ -776,7 +789,7 @@ export const messages: Catalog = {
     allModels: 'Alle Modelle',
     account: 'Konto',
     allAccounts: 'Alle Konten',
-    search: 'Anfrage-ID, Antwort-ID, cascade oder Fehler suchen',
+    search: 'Anfrage-ID, Antwort-ID, Unterhaltungs-ID oder Fehler suchen',
     export: 'CSV exportieren',
     exportEmpty: 'Keine Anfragen zum Exportieren',
     exportFailed:
@@ -838,7 +851,7 @@ export const messages: Catalog = {
     typeTab: 'Code-Vervollständigung',
     typeCheckpoint: 'Checkpoint',
     tokenUsage: 'Tokens',
-    cascade: 'Cascade',
+    cascade: 'Unterhaltung',
     stepOf: 'Schritt {step}',
     phaseRequest: 'Anfrageprüfung',
     phaseInternal: 'Intern',
@@ -961,7 +974,7 @@ export const messages: Catalog = {
     view: 'Text ansehen',
     viewTitle: 'Text des System-Prompts',
     viewDescription:
-      'Die Systemanweisung und erste User-Nachricht, die jede Stufe upstream sendet. Platzhalter in spitzen Klammern werden in echten Anfragen durch System-Prompt des Clients, User-Nachricht, Konversations-ID und Modellnamen ersetzt.',
+      'Die Systemanweisung und erste User-Nachricht, die jede Stufe upstream sendet. Platzhalter in spitzen Klammern werden in echten Anfragen durch System-Prompt des Clients, User-Nachricht, Unterhaltungs-ID und Modellnamen ersetzt.',
     viewSystem: 'Systemanweisung · {count} Zeichen',
     viewUser: 'Erste User-Nachricht',
     viewFailed: 'Text konnte nicht geladen werden',
@@ -977,7 +990,6 @@ export const messages: Catalog = {
       'Jede User-Nachricht wird in diesem Format gesendet, die Nachricht steht an der Stelle {{.Text}}. Leer werden Nachrichten unverändert gesendet.',
     templateLoad: 'Vorlage laden',
     templateInsert: 'Einfügen',
-    templateSections: 'Offizielle Abschnitte',
     templateVariables: 'Variablen',
     templateChars: '{chars} Zeichen mit Beispieldaten',
     templateError: 'Vorlagenfehler: {message}',
@@ -996,8 +1008,8 @@ export const messages: Catalog = {
     secIdentityHint:
       'Stellt sich als Antigravity vor, ein Coding-Assistent, der mit dem Nutzer im Pair Programming arbeitet.',
     secArtifactsHint:
-      'Regeln und Formatierung für Markdown-Dokumente wie Pläne und Aufgabenlisten im Gesprächsverzeichnis.',
-    secTranscriptHint: 'Wie der Verlauf transcript.jsonl im Gesprächsverzeichnis gelesen wird.',
+      'Regeln und Formatierung für Markdown-Dokumente wie Pläne und Aufgabenlisten im Unterhaltungsverzeichnis.',
+    secTranscriptHint: 'Wie der Verlauf transcript.jsonl im Unterhaltungsverzeichnis gelesen wird.',
     secGuidelinesHint:
       'Kommentare ohne Bezug zur Änderung beibehalten und niemals Berechtigungsprüfungen, Proxy-Beschränkungen oder Bot-Prüfungen umgehen.',
     secStyleHint:
@@ -1010,10 +1022,10 @@ export const messages: Catalog = {
     secFeaturedHint:
       'Beispiel-Plugins aus den Regalen des Marktplatzes, dem Nutzer bei Bedarf empfohlen; wird ohne empfohlene Plugins nicht gesendet.',
     secUserHint:
-      'Betriebssystem des Nutzers, Standard-Projektverzeichnis, Gesprächs-ID und Artefaktverzeichnis.',
+      'Betriebssystem des Nutzers, Standard-Projektverzeichnis, Unterhaltungs-ID und Artefaktverzeichnis.',
     secIdentity: 'Identität',
     secArtifacts: 'Artefakte',
-    secTranscript: 'Gesprächsverlauf',
+    secTranscript: 'Unterhaltungsverlauf',
     secGuidelines: 'Richtlinien',
     secStyle: 'Kommunikationsstil',
     secSlash: 'Slash-Befehle',
@@ -1023,7 +1035,7 @@ export const messages: Catalog = {
     secFeatured: 'Empfohlene Plugins',
     secUser: 'Nutzerinformationen',
     varClient: 'System-Prompt des Clients',
-    varConversation: 'Konversations-ID',
+    varConversation: 'Unterhaltungs-ID',
     varAppData: 'App-Datenverzeichnis',
     varSeparator: 'Pfadtrennzeichen',
     varOS: 'Betriebssystem',
@@ -1196,8 +1208,11 @@ export const messages: Catalog = {
     confirmHint:
       'Lädt das Paket {version} herunter, prüft dessen SHA-256, ersetzt das Programm und startet neu; die Seite lädt neu, sobald die neue Version bereit ist.',
     confirm: 'Aktualisieren',
+    releasePage: 'Release-Seite auf GitHub',
     cancel: 'Abbrechen',
     restarting: 'Neustart mit {version}; die Seite lädt neu, sobald die neue Version bereit ist',
+    restartStalled:
+      'Die neue Version ist nicht innerhalb von 1 Minute gestartet. Öffnen Sie Antigravity2API erneut; diese Seite lädt neu, sobald es läuft. Startet es weiterhin nicht, sehen Sie sich die Protokolle in {path} an.',
     downloading: '{version} wird heruntergeladen',
     verifying: 'Paket von {version} wird geprüft',
     installing: 'Programm wird ersetzt',
@@ -1323,9 +1338,9 @@ export const messages: Catalog = {
     pickAll: 'Alle Dateien in diesem Ordner auswählen',
     pickNone: 'Auswahl in diesem Ordner aufheben',
     folder: 'In Ordner speichern',
-    folderRemote: 'In einem Ordner auf dem Computer speichern, auf dem der Dienst läuft',
-    folderRemoteHint:
-      'Sie verwenden die Verwaltung von einem anderen Computer aus, daher werden Dateien auf dem Computer gespeichert, auf dem Antigravity2API läuft. Um eine Kopie auf diesem Computer zu behalten, klicken Sie auf „Inhalt kopieren“ und fügen Sie ihn in eine Textdatei ein.',
+    download: 'Herunterladen',
+    downloadHint:
+      'Sie verwenden die Verwaltung von einem anderen Computer aus; der Browser lädt {name} auf diesen Computer herunter.',
     save: 'Speichern',
     copy: 'Inhalt kopieren',
     copied: 'Kopiert',

@@ -39,22 +39,59 @@ function parseBindings(value: string | undefined) {
   return bindings
 }
 
-// useApiKeys 返回 .env 中保存的 API key、各 key 绑定的账户、两者是否由进程环境变量决定与保存方法，保存时去掉已不存在的 key 的绑定
+// parseNames 解析 API_KEY_NAMES 的 API key:备注名，以最后一个冒号分隔
+function parseNames(value: string | undefined) {
+  const names: Record<string, string> = {}
+  for (const item of splitList(value)) {
+    const index = item.lastIndexOf(':')
+    if (index > 0) names[item.slice(0, index)] = item.slice(index + 1)
+  }
+  return names
+}
+
+// recordedKey 返回请求记录与用量中 key 的写法，与 internal/app 的 maskKey 相同
+function recordedKey(key: string) {
+  const size = Math.floor(key.length / 4)
+  return key.slice(0, Math.min(3, size)) + '…' + key.slice(key.length - Math.min(4, size))
+}
+
+// useKeyName 返回把请求记录与用量中的 key 换成显示文本的函数：key 有备注名时为“备注名 · 原文”，否则为原文
+export function useKeyName() {
+  const values = useSettings().data?.values
+  const names = parseNames(values?.API_KEY_NAMES)
+  const byRecord = new Map(
+    splitList(values?.API_KEYS)
+      .filter((key) => names[key])
+      .map((key) => [recordedKey(key), names[key]]),
+  )
+  return (recorded: string) => {
+    const name = byRecord.get(recorded)
+    return name ? name + ' · ' + recorded : recorded
+  }
+}
+
+// useApiKeys 返回 .env 中保存的 API key、各 key 绑定的账户与备注名、三者是否由进程环境变量决定与保存方法，保存时去掉已不存在的 key 的绑定与备注名
 export function useApiKeys() {
   const m = useMessages('connect')
   const settings = useSettings()
   const save = useSaveSettings()
   const keys = splitList(settings.data?.values.API_KEYS)
   const bindings = parseBindings(settings.data?.values.API_KEY_ACCOUNTS)
+  const names = parseNames(settings.data?.values.API_KEY_NAMES)
   const keysLocked = settings.data?.environment.includes('API_KEYS') ?? false
   const bindingsLocked = settings.data?.environment.includes('API_KEY_ACCOUNTS') ?? false
-  const write = (next: string[], done?: () => void, nextBindings = bindings) => {
+  const namesLocked = settings.data?.environment.includes('API_KEY_NAMES') ?? false
+  const write = (next: string[], done?: () => void, nextBindings = bindings, nextNames = names) => {
     save.mutate(
       {
         API_KEYS: next.join(','),
         API_KEY_ACCOUNTS: next
           .filter((key) => nextBindings[key]?.length)
           .map((key) => key + ':' + (nextBindings[key] ?? []).join('|'))
+          .join(','),
+        API_KEY_NAMES: next
+          .filter((key) => nextNames[key])
+          .map((key) => key + ':' + (nextNames[key] ?? ''))
           .join(','),
       },
       {
@@ -65,10 +102,20 @@ export function useApiKeys() {
       },
     )
   }
-  return { settings, keys, bindings, keysLocked, bindingsLocked, write, saving: save.isPending }
+  return {
+    settings,
+    keys,
+    bindings,
+    names,
+    keysLocked,
+    bindingsLocked,
+    namesLocked,
+    write,
+    saving: save.isPending,
+  }
 }
 
-// KeyDialog 是添加或修改一个 API key 的对话框：可填写自定义值，也可随机生成；index 为空时添加，tooltip 是触发按钮的提示
+// KeyDialog 是添加或修改一个 API key 的对话框：可填写自定义值，也可随机生成，可填备注名与绑定账户；index 为空时添加，tooltip 是触发按钮的提示
 function KeyDialog({
   index,
   trigger,
@@ -80,10 +127,13 @@ function KeyDialog({
 }) {
   const m = useMessages('connect')
   const app = useMessages('app')
-  const { keys, bindings, keysLocked, bindingsLocked, write, saving } = useApiKeys()
+  const { keys, bindings, names, keysLocked, bindingsLocked, namesLocked, write, saving } =
+    useApiKeys()
   const accounts = useAccounts()
   const [open, setOpen] = useState(false)
   const [value, setValue] = useState('')
+  const [name, setName] = useState('')
+  const [nameError, setNameError] = useState<string>()
   const [bound, setBound] = useState<string[]>([])
   const [query, setQuery] = useState('')
   const needle = query.trim().toLowerCase()
@@ -102,6 +152,10 @@ function KeyDialog({
       setError(m.errKeyDuplicate)
       return
     }
+    if (/[,:]/.test(name)) {
+      setNameError(m.errKeyName)
+      return
+    }
     const next = editing
       ? keys.map((item, position) => (position === index ? key : item))
       : [...keys, key]
@@ -109,6 +163,10 @@ function KeyDialog({
       Object.entries(bindings).filter(([item]) => !editing || item !== keys[index]),
     )
     nextBindings[key] = bound
+    const nextNames = Object.fromEntries(
+      Object.entries(names).filter(([item]) => !editing || item !== keys[index]),
+    )
+    nextNames[key] = name.trim()
     write(
       next,
       () => {
@@ -116,6 +174,7 @@ function KeyDialog({
         toast({ tone: 'success', title: editing ? m.keyUpdated : m.keyAdded })
       },
       nextBindings,
+      nextNames,
     )
   }
   return (
@@ -125,8 +184,10 @@ function KeyDialog({
         if (next) {
           setValue(editing ? (keys[index] ?? '') : generateKey())
           setBound(editing ? (bindings[keys[index] ?? ''] ?? []) : [])
+          setName(editing ? (names[keys[index] ?? ''] ?? '') : '')
           setQuery('')
           setError(undefined)
+          setNameError(undefined)
         }
         setOpen(next)
       }}
@@ -171,6 +232,8 @@ function KeyDialog({
                 disabled={keysLocked}
                 spellCheck={false}
                 autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
                 aria-invalid={error ? true : undefined}
                 aria-describedby={error ? 'api-key-value-error' : undefined}
                 className="font-mono"
@@ -194,6 +257,29 @@ function KeyDialog({
               </Tooltip>
             </div>
           </Field>
+          <div className="mt-4">
+            <Field
+              id="api-key-name"
+              label={m.keyName}
+              description={m.keyNameHint}
+              error={nameError}
+            >
+              <Input
+                id="api-key-name"
+                value={name}
+                disabled={namesLocked}
+                autoComplete="off"
+                data-1p-ignore
+                data-lpignore="true"
+                aria-invalid={nameError ? true : undefined}
+                aria-describedby={nameError ? 'api-key-name-error' : 'api-key-name-description'}
+                onChange={(event) => {
+                  setName(event.target.value)
+                  setNameError(undefined)
+                }}
+              />
+            </Field>
+          </div>
           {accounts.data && accounts.data.accounts.length > 0 && (
             <fieldset className="mt-4 flex flex-col gap-2">
               <legend className="text-sm font-medium">{m.keyAccounts}</legend>
@@ -259,12 +345,12 @@ export function AddKeyButton({ primary = false }: { primary?: boolean }) {
   )
 }
 
-// ApiKeyList 列出 API key，可复制、修改与删除，删除后 5 秒内可撤销；API_KEYS 由进程环境变量决定时只能修改绑定的账户
+// ApiKeyList 列出 API key 与备注名，可复制、修改与删除，删除后 5 秒内可撤销；API_KEYS 由进程环境变量决定时只能修改绑定的账户与备注名
 export function ApiKeyList() {
   const m = useMessages('connect')
   const app = useMessages('app')
   const settingsText = useMessages('settings')
-  const { settings, keys, bindings, keysLocked, write } = useApiKeys()
+  const { settings, keys, bindings, names, keysLocked, write } = useApiKeys()
   if (settings.isPending) return <Loading label={app.loading} rows={2} />
   if (settings.isError) {
     return (
@@ -293,6 +379,11 @@ export function ApiKeyList() {
             className="flex items-center gap-1 border-t border-border py-2 pr-2 pl-4 first:border-t-0"
           >
             <KeyRound size={16} aria-hidden className="mr-2 shrink-0 text-foreground-muted" />
+            {names[key] && (
+              <span className="mr-2 max-w-[40%] shrink-0 truncate text-sm font-medium">
+                {names[key]}
+              </span>
+            )}
             <code
               aria-label={fill(m.keyLabel, { index: index + 1 })}
               className="min-w-0 flex-1 truncate font-mono text-sm select-all"
@@ -336,6 +427,7 @@ export function ApiKeyList() {
                 onClick={() => {
                   const before = keys
                   const beforeBindings = bindings
+                  const beforeNames = names
                   write(
                     keys.filter((item) => item !== key),
                     () => {
@@ -345,7 +437,7 @@ export function ApiKeyList() {
                         action: {
                           label: m.undo,
                           onClick: () => {
-                            write(before, undefined, beforeBindings)
+                            write(before, undefined, beforeBindings, beforeNames)
                           },
                         },
                       })

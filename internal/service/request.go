@@ -1,15 +1,20 @@
 package service
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"net/http"
 	"regexp"
 	"slices"
 	"strings"
+
+	"golang.org/x/image/draw"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
@@ -31,21 +36,37 @@ const billingPrefix = "x-anthropic-billing-header:"
 // claudeFunctionName 为 Claude 族接受的函数名
 var claudeFunctionName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
+// base64Signature 匹配 Base64 与 URL 安全 Base64 文本，上游的思考签名都是这种形式
+var base64Signature = regexp.MustCompile(`^[A-Za-z0-9+/_-]+={0,2}$`)
+
+// levelSuffix 匹配目录 ID 末尾的思考档位
+var levelSuffix = regexp.MustCompile(`-(?:minimal|low|medium|high|xhigh|max)$`)
+
+// claudeCallID 为 Claude 族接受的函数调用 ID
+var claudeCallID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
 // functionName 为其他模型族接受的函数名：字母或下划线开头，只含字母、数字、下划线、点、冒号与连字符
 var functionName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.:-]{0,127}$`)
 
-// prepare 把客户端请求改写为上游接受的形状并返回输出处理：目录条目不支持图片的模型收到图片时返回 400，去掉其他模型族生成的签名并补回会话保存的函数调用签名，末尾 assistant 轮与只有系统提示的请求按模型族改写，工具选择与单调用写入系统指令、结构化输出写入最后一个用户轮，并在输出中核对，模型族不接受的函数名可逆改名
+// prepare 把客户端请求改写为上游接受的形状并返回对应的输出处理器
+// 涵盖图片检查与缩放、签名过滤补回、末尾 assistant 轮改写、函数与调用 ID 改名及工具与结构化输出约定
 func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel, signed signatureRecord) (antigravity.GenerateRequest, *output, error) {
 	if !model.SupportsImages && hasImage(request.Contents) {
 		return request, nil, &Error{Status: http.StatusBadRequest, Message: fmt.Sprintf("model %s does not support image input", model.ID)}
 	}
-	request.Contents = restoreSignatures(cloneContents(request.Contents), signed, model.ModelProvider)
+	request.Contents = restoreSignatures(cloneContents(request.Contents), signed, signatureOrigin(model))
 	var err error
+	if model.ModelProvider == antigravity.ProviderAnthropic {
+		fitClaudeImages(request.Contents)
+	}
 	if request, err = normalizeTurns(request, model); err != nil {
 		return request, nil, err
 	}
-	out := &output{hide: request.Config.HideThinking, limit: request.Config.MaxOutputTokens, stop: newStopMatcher(request.Config.StopSequences), provider: model.ModelProvider, signed: newSignatureRecord()}
+	out := &output{hide: request.Config.HideThinking, limit: request.Config.MaxOutputTokens, stop: newStopMatcher(request.Config.StopSequences), provider: model.ModelProvider, origin: signatureOrigin(model), signed: newSignatureRecord()}
 	request, out.names = renameFunctions(request, model.ModelProvider == antigravity.ProviderAnthropic)
+	if model.ModelProvider == antigravity.ProviderAnthropic {
+		renameCalls(request.Contents)
+	}
 	if request, out.tools, err = prepareTools(request, out.names); err != nil {
 		return request, nil, err
 	}
@@ -55,6 +76,51 @@ func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel
 	}
 	request, out.search = prepareSearch(request)
 	return request, out, nil
+}
+
+// claudeImageSide 是 Claude 族图片单边的像素上限，上限见 docs/protocol.md 的兼容改写表
+const claudeImageSide = 8000
+
+// fitClaudeImages 把消息与工具结果中单边超过 claudeImageSide 的图片按原宽高比缩小到该上限并编码为 JPEG；不能解码的图片原样保留
+func fitClaudeImages(contents []antigravity.Content) {
+	var fit func(parts []antigravity.Part) []antigravity.Part
+	fit = func(parts []antigravity.Part) []antigravity.Part {
+		for index, part := range parts {
+			if part.FunctionResult != nil && len(part.FunctionResult.Parts) > 0 {
+				result := *part.FunctionResult
+				result.Parts = fit(slices.Clone(result.Parts))
+				parts[index].FunctionResult = &result
+			}
+			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIME, "image/") {
+				parts[index].InlineData = fitImage(part.InlineData)
+			}
+		}
+		return parts
+	}
+	for index := range contents {
+		contents[index].Parts = fit(contents[index].Parts)
+	}
+}
+
+// fitImage 返回单边不超过 claudeImageSide 的图片：已满足时为原图，否则在白底上按原宽高比缩小后以 JPEG 编码
+func fitImage(blob *antigravity.Blob) *antigravity.Blob {
+	config, _, err := image.DecodeConfig(bytes.NewReader(blob.Data))
+	if err != nil || max(config.Width, config.Height) <= claudeImageSide {
+		return blob
+	}
+	decoded, _, err := image.Decode(bytes.NewReader(blob.Data))
+	if err != nil {
+		return blob
+	}
+	scale := float64(claudeImageSide) / float64(max(config.Width, config.Height))
+	scaled := image.NewRGBA(image.Rectangle{Max: image.Pt(max(1, int(float64(config.Width)*scale)), max(1, int(float64(config.Height)*scale)))})
+	draw.Draw(scaled, scaled.Bounds(), image.White, image.Point{}, draw.Src)
+	draw.CatmullRom.Scale(scaled, scaled.Bounds(), decoded, decoded.Bounds(), draw.Over, nil)
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, scaled, &jpeg.Options{Quality: 85}); err != nil {
+		return blob
+	}
+	return &antigravity.Blob{MIME: "image/jpeg", Data: encoded.Bytes()}
 }
 
 // hasImage 判断消息或工具结果中是否有图片
@@ -98,22 +164,22 @@ func cloneContents(contents []antigravity.Content) []antigravity.Content {
 	return cloned
 }
 
-// restoreSignatures 去掉会话中记为其他模型族生成的签名与占位签名，去掉后为空的 part 一并删除，再为客户端未回传签名的函数调用（按调用 ID）与没有签名的 assistant 轮补回会话保存的签名
-func restoreSignatures(contents []antigravity.Content, signed signatureRecord, provider string) []antigravity.Content {
+// restoreSignatures 去掉会话中按 signatureOrigin 判定为其他来源的签名与占位签名，去掉后为空的 part 一并删除，再为客户端未回传签名的函数调用（按调用 ID）与没有签名的 assistant 轮补回会话保存的签名
+func restoreSignatures(contents []antigravity.Content, signed signatureRecord, origin string) []antigravity.Content {
 	for index := range contents {
 		parts := contents[index].Parts[:0]
 		for _, part := range contents[index].Parts {
-			if signed.foreign(part.ThoughtSignature, provider) || sentinelSignatures[part.ThoughtSignature] {
+			if signed.foreign(part.ThoughtSignature, origin) || sentinelSignatures[part.ThoughtSignature] {
 				part.ThoughtSignature = ""
 				if part.Text == "" && part.InlineData == nil && part.File == nil && part.FunctionCall == nil && part.FunctionResult == nil {
 					continue
 				}
 			}
 			if call := part.FunctionCall; call != nil {
-				if signed.foreign(call.ThoughtSignature, provider) || sentinelSignatures[call.ThoughtSignature] {
+				if signed.foreign(call.ThoughtSignature, origin) || sentinelSignatures[call.ThoughtSignature] {
 					call.ThoughtSignature = ""
 				}
-				if restored := callSignature(signed.calls, call.ID); call.ThoughtSignature == "" && part.ThoughtSignature == "" && !signed.foreign(restored, provider) {
+				if restored := callSignature(signed.calls, call.ID); call.ThoughtSignature == "" && part.ThoughtSignature == "" && !signed.foreign(restored, origin) {
 					call.ThoughtSignature = restored
 				}
 			}
@@ -121,7 +187,7 @@ func restoreSignatures(contents []antigravity.Content, signed signatureRecord, p
 		}
 		contents[index].Parts = parts
 		if contents[index].Role == antigravity.RoleAssistant && !signedContent(contents[index]) {
-			if restored := signed.calls[replySignatureKey(answerKey(parts))]; restored != "" && !signed.foreign(restored, provider) {
+			if restored := signed.calls[replySignatureKey(answerKey(parts), index)]; restored != "" && !signed.foreign(restored, origin) {
 				contents[index].Parts = signReply(parts, restored)
 			}
 		}
@@ -129,8 +195,8 @@ func restoreSignatures(contents []antigravity.Content, signed signatureRecord, p
 	return contents
 }
 
-// sentinelSignatures 为 Gemini API 文档给出的跳过签名校验的占位签名，上游现场的签名不含这些值
-var sentinelSignatures = map[string]bool{"skip_thought_signature_validator": true, "context_engineering_is_the_way_to_go": true}
+// sentinelSignatures 为 Gemini API 文档给出的跳过签名校验的占位签名及其 Base64 形态，上游现场的签名不含这些值
+var sentinelSignatures = map[string]bool{"skip_thought_signature_validator": true, "context_engineering_is_the_way_to_go": true, "c2tpcF90aG91Z2h0X3NpZ25hdHVyZV92YWxpZGF0b3I=": true, "Y29udGV4dF9lbmdpbmVlcmluZ19pc190aGVfd2F5X3RvX2dv": true}
 
 // callSignature 返回函数调用 ID 的会话签名，没有同 ID 的记录时取只含字母与数字部分相同的 ID 的签名
 func callSignature(calls map[string]string, id string) string {
@@ -225,7 +291,8 @@ func joinInstruction(system, instruction string) string {
 	return system + "\n" + instruction
 }
 
-// prepareTools 按工具选择改写已改名的声明：none 不声明工具，指定函数与 allowed_tools 只声明所选函数，required 与单调用以上游函数名写入系统指令，strict 函数与 validated 模式在输出中校验参数，声明了必填参数的函数在输出中核对必填参数；original 为上游名到原名的映射，有声明的函数时返回在输出中按原名核对的约定，没有时为 nil
+// prepareTools 按工具选择筛选已改名的函数声明并写入系统指令，返回按原名核对的输出约定
+// 无声明函数或 mode 为 none 时返回 nil
 func prepareTools(request antigravity.GenerateRequest, original map[string]string) (antigravity.GenerateRequest, *toolContract, error) {
 	config := request.Tools.ToolConfig
 	if config.Mode == "none" {
@@ -348,7 +415,38 @@ func requireOutput(request antigravity.GenerateRequest, out *jsonOutput, instruc
 	return request, out, nil
 }
 
-// renameFunctions 把模型族不接受的函数名换成该族接受的名称：不允许的字符换成下划线，Claude 族只留字母、数字、下划线与连字符，其他族另留点与冒号并在非字母开头时加下划线，超长或重名时截断并加原名摘要；返回上游名到原名的映射
+// renameCalls 把 Claude 族不接受或重复的函数调用 ID 改写为合规 ID，并同步更新配对的函数结果
+// 不允许的字符替换为下划线，超过 64 字符或重复时截断并附原 ID 与序号摘要
+func renameCalls(contents []antigravity.Content) {
+	used, current := map[string]bool{}, map[string]string{}
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			if call := part.FunctionCall; call != nil && call.ID != "" {
+				id := call.ID
+				if !claudeCallID.MatchString(id) || used[id] {
+					id = strings.Map(func(char rune) rune {
+						if char == '_' || char == '-' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' {
+							return char
+						}
+						return '_'
+					}, id)
+					for occurrence := 0; len(id) > 64 || used[id]; occurrence++ {
+						sum := sha256.Sum256(fmt.Appendf(nil, "%d:%s", occurrence, call.ID))
+						id = id[:min(len(id), 55)] + "_" + hex.EncodeToString(sum[:4])
+					}
+				}
+				used[id], current[call.ID] = true, id
+				call.ID = id
+			}
+			if result := part.FunctionResult; result != nil && current[result.ID] != "" {
+				result.ID = current[result.ID]
+			}
+		}
+	}
+}
+
+// renameFunctions 把模型族不接受的函数名改写为合规名称，返回上游名到原名的映射
+// 字符集与前缀按模型族处理，超长或重名时截断并附原名摘要
 func renameFunctions(request antigravity.GenerateRequest, claude bool) (antigravity.GenerateRequest, map[string]string) {
 	used := map[string]bool{}
 	var names []string

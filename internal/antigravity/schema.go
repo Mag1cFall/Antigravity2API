@@ -51,13 +51,8 @@ func CleanFunctionDeclaration(declaration FunctionDeclaration) (FunctionDeclarat
 	parameters, encodingError := projector.project(resolved)
 	if encodingError != nil {
 		var schema any
-		if err := json.Unmarshal(resolved, &schema); err != nil {
-			return FunctionDeclaration{}, err
-		}
-		shape, err := json.Marshal(toolSchemaShape(schema))
-		if err != nil {
-			return FunctionDeclaration{}, err
-		}
+		_ = json.Unmarshal(resolved, &schema)
+		shape, _ := json.Marshal(toolSchemaShape(schema))
 		if parameters, err = (&schemaProjector{}).project(shape); err != nil {
 			return FunctionDeclaration{}, fmt.Errorf("parameters: %w", err)
 		}
@@ -115,9 +110,7 @@ func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 		}
 		schema["items"], schema["maxItems"] = json.RawMessage("true"), json.RawMessage("0")
 	}
-	if err := normalizeImplicitType(schema); err != nil {
-		return nil, err
-	}
+	normalizeImplicitType(schema)
 	allowed := map[string]bool{
 		"type": true, "format": true, "description": true, "nullable": true,
 		"enum": true, "items": true, "properties": true, "required": true,
@@ -320,11 +313,7 @@ func (p *schemaProjector) projectPrefixItems(schema map[string]json.RawMessage) 
 		schema["items"] = distinct[0]
 		return nil
 	}
-	items, err := json.Marshal(map[string][]json.RawMessage{"anyOf": distinct})
-	if err != nil {
-		return err
-	}
-	schema["items"] = items
+	schema["items"], _ = json.Marshal(map[string][]json.RawMessage{"anyOf": distinct})
 	return nil
 }
 
@@ -333,10 +322,8 @@ const maxSchemaRefExpansions = 500
 
 // resolveSchemaRefs 按根节点的 $defs 与 definitions 展开本地 $ref，递归引用与超过 maxSchemaRefExpansions 之后的引用只保留类型，无法解析的引用展开为不限制的 Schema，三者出现时返回 true
 func resolveSchemaRefs(raw json.RawMessage) (json.RawMessage, bool, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var root any
-	if err := decoder.Decode(&root); err != nil {
+	root, err := decodeSchemaValue(raw)
+	if err != nil {
 		return nil, false, err
 	}
 	object, ok := root.(map[string]any)
@@ -558,7 +545,8 @@ func untypeNullable(schema map[string]any) bool {
 	return true
 }
 
-// flattenUnions 逐层去掉 anyOf：只有一个分支时以该分支取代联合，分支都是 OBJECT 时合并为一个 OBJECT，其余只保留描述与 nullable，后两种返回 true
+// flattenUnions 逐层展开并移除 anyOf，返回是否丢弃了约束
+// 单分支取代联合，全为 OBJECT 时合并，其余保留描述与 nullable，见 docs/protocol.md“工具声明”
 func flattenUnions(schema map[string]any) bool {
 	lossy := false
 	if items, ok := schema["items"].(map[string]any); ok {
@@ -599,9 +587,23 @@ func flattenUnions(schema map[string]any) bool {
 			object := variant.(map[string]any)
 			branch, _ := object["properties"].(map[string]any)
 			for name, property := range branch {
-				if _, exists := properties[name]; !exists {
+				existing, exists := properties[name].(map[string]any)
+				if !exists {
 					properties[name] = property
+					continue
 				}
+				values, own := existing["enum"].([]any)
+				more, other := property.(map[string]any)["enum"].([]any)
+				if !own || !other {
+					delete(existing, "enum")
+					continue
+				}
+				for _, value := range more {
+					if !slices.Contains(values, value) {
+						values = append(values, value)
+					}
+				}
+				existing["enum"] = values
 			}
 			names, _ := object["required"].([]any)
 			if index == 0 {
@@ -790,7 +792,13 @@ func cleanSchemaInput(raw json.RawMessage, preserveCombinations bool) (json.RawM
 	return json.Marshal(schema)
 }
 
-// normalizeNullableVariants 将 JSON Schema null 联合映射为 nullable
+// typeKeywords 为只对数组或对象类型有意义的关键字，多类型 type 展开为 anyOf 时移入对应类型的分支
+var typeKeywords = map[string][]string{
+	"array":  {"items", "prefixItems", "minItems", "maxItems"},
+	"object": {"properties", "required", "additionalProperties", "minProperties", "maxProperties", "propertyNames"},
+}
+
+// normalizeNullableVariants 将 JSON Schema null 联合映射为 nullable，多类型 type 展开为各类型一个分支的 anyOf，数组与对象关键字随类型移入分支
 func normalizeNullableVariants(schema map[string]json.RawMessage) error {
 	if raw, ok := schema["type"]; ok {
 		var typeName string
@@ -811,22 +819,26 @@ func normalizeNullableVariants(schema map[string]json.RawMessage) error {
 			if len(nonNull) == 0 {
 				return fmt.Errorf("schema.type 必须包含非 null 类型")
 			}
-			encodedType, marshalErr := json.Marshal(nonNull[0])
-			if marshalErr != nil {
-				return marshalErr
-			}
-			schema["type"] = encodedType
+			schema["type"], _ = json.Marshal(nonNull[0])
 			if len(nonNull) > 1 {
 				delete(schema, "type")
-				variants := make([]map[string]string, 0, len(nonNull))
+				variants := make([]map[string]json.RawMessage, 0, len(nonNull))
 				for _, name := range nonNull {
-					variants = append(variants, map[string]string{"type": name})
+					encodedName, _ := json.Marshal(name)
+					variant := map[string]json.RawMessage{"type": encodedName}
+					for _, keyword := range typeKeywords[strings.ToLower(name)] {
+						if value, ok := schema[keyword]; ok {
+							variant[keyword] = value
+						}
+					}
+					variants = append(variants, variant)
 				}
-				encodedVariants, marshalErr := json.Marshal(variants)
-				if marshalErr != nil {
-					return marshalErr
+				for _, name := range nonNull {
+					for _, keyword := range typeKeywords[strings.ToLower(name)] {
+						delete(schema, keyword)
+					}
 				}
-				schema["anyOf"] = encodedVariants
+				schema["anyOf"], _ = json.Marshal(variants)
 			}
 			if nullable {
 				schema["nullable"] = json.RawMessage("true")
@@ -853,16 +865,9 @@ func normalizeNullableVariants(schema map[string]json.RawMessage) error {
 			if err := json.Unmarshal(variant, &value); err != nil || value == nil {
 				return fmt.Errorf("schema.%s 必须是 JSON object 数组", name)
 			}
-			typeValue, exists := value["type"]
-			if exists {
-				typeName, err := schemaString(typeValue, "type")
-				if err != nil {
-					return err
-				}
-				if strings.EqualFold(typeName, "null") {
-					nullable = true
-					continue
-				}
+			if typeName, err := schemaString(value["type"], "type"); err == nil && strings.EqualFold(typeName, "null") {
+				nullable = true
+				continue
 			}
 			filtered = append(filtered, variant)
 		}
@@ -872,21 +877,18 @@ func normalizeNullableVariants(schema map[string]json.RawMessage) error {
 		if len(filtered) == 0 {
 			return fmt.Errorf("schema.%s 必须包含非 null 类型", name)
 		}
-		encoded, err := json.Marshal(filtered)
-		if err != nil {
-			return err
-		}
-		schema[name] = encoded
+		schema[name], _ = json.Marshal(filtered)
 		schema["nullable"] = json.RawMessage("true")
 	}
 	return nil
 }
 
-// normalizeConstAndMetadata 将字符串常量和说明字段转换为可发送结构
+// normalizeConstAndMetadata 将字符串常量和说明字段转换为可发送结构，去掉 title、$id、$comment 与 deprecated
 func normalizeConstAndMetadata(schema map[string]json.RawMessage) error {
 	delete(schema, "title")
 	delete(schema, "$id")
 	delete(schema, "$comment")
+	delete(schema, "deprecated")
 	if raw, ok := schema["const"]; ok {
 		var decoded any
 		if err := json.Unmarshal(raw, &decoded); err != nil {
@@ -904,11 +906,7 @@ func normalizeConstAndMetadata(schema map[string]json.RawMessage) error {
 		} else {
 			schema["type"] = json.RawMessage(`"string"`)
 		}
-		enum, err := json.Marshal([]string{value})
-		if err != nil {
-			return err
-		}
-		schema["enum"] = enum
+		schema["enum"], _ = json.Marshal([]string{value})
 		delete(schema, "const")
 	}
 	for _, name := range []string{"anyOf", "oneOf", "allOf"} {
@@ -931,17 +929,9 @@ func normalizeConstAndMetadata(schema map[string]json.RawMessage) error {
 			if err := normalizeConstAndMetadata(subSchema); err != nil {
 				return fmt.Errorf("schema.%s[%d]: %w", name, index, err)
 			}
-			encoded, err := json.Marshal(subSchema)
-			if err != nil {
-				return err
-			}
-			variants[index] = encoded
+			variants[index], _ = json.Marshal(subSchema)
 		}
-		encoded, err := json.Marshal(variants)
-		if err != nil {
-			return err
-		}
-		schema[name] = encoded
+		schema[name], _ = json.Marshal(variants)
 	}
 	return nil
 }
@@ -986,7 +976,7 @@ func normalizeNotSchema(schema map[string]json.RawMessage) error {
 }
 
 // normalizeImplicitType 从节点约束推导类型并保留开放的数组元素
-func normalizeImplicitType(schema map[string]json.RawMessage) error {
+func normalizeImplicitType(schema map[string]json.RawMessage) {
 	if _, ok := schema["type"]; !ok {
 		var typed map[string]json.RawMessage
 		conflictingType, conflictingItems := false, false
@@ -1024,7 +1014,7 @@ func normalizeImplicitType(schema map[string]json.RawMessage) error {
 	}
 	var typeName string
 	if json.Unmarshal(schema["type"], &typeName) != nil || !strings.EqualFold(typeName, "array") || schema["items"] != nil || branchesHave(schema["allOf"], "items") {
-		return nil
+		return
 	}
 	schema["items"] = json.RawMessage(`true`)
 	var prefix []map[string]json.RawMessage
@@ -1036,14 +1026,9 @@ func normalizeImplicitType(schema map[string]json.RawMessage) error {
 			}
 		}
 		if len(typed) > 0 {
-			encoded, err := json.Marshal(map[string]any{"anyOf": typed})
-			if err != nil {
-				return err
-			}
-			schema["items"] = encoded
+			schema["items"], _ = json.Marshal(map[string]any{"anyOf": typed})
 		}
 	}
-	return nil
 }
 
 // branchesHave 判断 Schema 数组中是否有分支带 name 字段

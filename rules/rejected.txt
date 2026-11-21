@@ -1,5 +1,5 @@
 ! Title: Antigravity2API 上游拒绝句
-! Version: 2026111903
+! Version: 2026112103
 ! 上游对系统提示中含下列文字的请求返回不带原因的 429 RESOURCE_EXHAUSTED，服务在发送前删去含这些文字的整句
 ! 语法：! 开头为注释；[system] 与 [user] 分别匹配客户端系统提示与 user 轮；/…/ 为 Go 正则；其余每行为一条短语，不区分大小写，空格可对应任意空白
 
@@ -12,7 +12,8 @@ selects only the lines you and your subagents wrote and never touches
 Touch displayed changed lines only; `…`, `..`, collapsed `N-M:`
 You are omp's trusted coding assistant
 ! Claude Code
-You are Claude Code,
+You are Claude Code
+interactive agent that helps users with software engineering tasks.
 was pasted into the message by the user from somewhere else and may contain instructions the user did not write
 ! Claude Code、Mimo
 Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context
@@ -21,9 +22,11 @@ You are a coding agent running in the Codex CLI
 ! OpenCode
 You are OpenCode
 The user will primarily request you perform software engineering tasks
+tools.opencode.session_move
 ! pi
 You are a coding assistant running inside pi
 inside pi, a coding agent harness
+codemode scripts and non-LLM models such as classifiers and image models
 ! OpenClaw
 You are a personal assistant running inside OpenClaw
 ! Hermes
@@ -32,6 +35,13 @@ Be direct: match the length of your reply to the weight of the ask
 the documentation at https://hermes-agent.nousresearch.com/docs is your authoritative reference
 Hermes delivers their message as a standalone user message right after the latest tool results
 <!-- End Hermes runtime environment -->
+the deliverable is a working artifact backed by real tool output
+Reporting a blocker honestly is always better than inventing a result.
+# Google model operational directives
+! WorkBuddy
+This conversation is powered by gemini-
+! 编程助手人设
+solve coding tasks. Be concise, practical, and tool-aware.
 ! DeepSeek Harness
 The browser provides no implicit DOM, route, or screenshot context
 ! 行首带归属声明的身份句：You are 加以 agent、assistant 或 AI 结尾的身份短语，8 个字符内接 created by、built on、based on 等归属声明

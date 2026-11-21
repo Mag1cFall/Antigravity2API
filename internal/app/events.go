@@ -28,7 +28,7 @@ const (
 	pingInterval = 30 * time.Second
 )
 
-// event 是管理事件流中的一条事件，Type 为 accounts、log、request 或 login
+// event 是管理事件流中的一条事件，Type 为 accounts、log、request、login 或 ready
 type event struct {
 	Type string `json:"type"`
 	Data any    `json:"data"`

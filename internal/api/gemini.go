@@ -330,7 +330,7 @@ func (s *server) handleGeminiAction(w http.ResponseWriter, r *http.Request) {
 		writeGeminiError(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
-	generateRequest.Session = clientSession(r)
+	generateRequest.Session = clientSession(r, headerSessions(r)...)
 	switch method {
 	case "countTokens", "generateContent", "streamGenerateContent":
 	default:
@@ -536,7 +536,7 @@ func geminiJSONName(name string) string {
 	return builder.String()
 }
 
-// toGenerateRequest 把 Gemini 请求转换为生成请求，systemInstruction 中的媒体移到首个 user 消息开头
+// toGenerateRequest 把 Gemini 请求转换为生成请求，systemInstruction 中的媒体移到首个 user 消息开头；contents 中 system、developer 角色的文本在首个对话轮之前时接在系统指令之后，在对话中时作为 system-reminder 并入下一个 user 消息
 func (request geminiRequest) toGenerateRequest(id string, model string) (antigravity.GenerateRequest, error) {
 	if err := request.GenerationConfig.validate(); err != nil {
 		return antigravity.GenerateRequest{}, err
@@ -564,12 +564,34 @@ func (request geminiRequest) toGenerateRequest(id string, model string) (antigra
 		system = text.String()
 	}
 	contents := make([]antigravity.Content, 0, len(request.Contents))
+	var reminders []antigravity.Part
 	for _, content := range request.Contents {
 		parts, hasResult, err := mapGeminiParts(content.Parts)
 		if err != nil {
 			return antigravity.GenerateRequest{}, err
 		}
 		if len(parts) == 0 {
+			continue
+		}
+		if content.Role == "system" || content.Role == "developer" {
+			var text strings.Builder
+			for _, part := range parts {
+				if part.Text == "" && (part.InlineData != nil || part.File != nil) {
+					systemMedia = append(systemMedia, part)
+				}
+				if !part.Thought {
+					text.WriteString(part.Text)
+				}
+			}
+			switch {
+			case text.Len() == 0:
+			case len(contents) == 0 && system == "":
+				system = text.String()
+			case len(contents) == 0:
+				system += "\n" + text.String()
+			default:
+				reminders = append(reminders, systemReminder(text.String()))
+			}
 			continue
 		}
 		role, err := geminiRole(content.Role)
@@ -579,8 +601,9 @@ func (request geminiRequest) toGenerateRequest(id string, model string) (antigra
 		if hasResult {
 			role = antigravity.RoleTool
 		}
-		contents = append(contents, antigravity.Content{Role: role, Parts: parts})
+		contents, reminders = appendWithReminders(contents, antigravity.Content{Role: role, Parts: parts}, reminders)
 	}
+	contents = appendTrailingReminders(contents, reminders)
 	contents = prependSystemMedia(contents, systemMedia)
 	tools, err := mapGeminiTools(request.Tools, request.ToolConfig)
 	if err != nil {
@@ -835,7 +858,7 @@ func mapGeminiTools(groups []geminiToolGroup, config geminiToolConfig) (antigrav
 				parameters = declaration.ParametersJSONSchema
 			}
 			if len(parameters) == 0 {
-				parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+				parameters = emptyObjectParameters
 			}
 			mapped.Functions = append(mapped.Functions, antigravity.FunctionDeclaration{
 				Name: declaration.Name, Description: declaration.Description, Parameters: parameters,
@@ -1149,7 +1172,8 @@ func geminiUsage(usage *antigravity.Usage) map[string]any {
 	return metadata
 }
 
-// streamGemini 按到达顺序输出各候选的增量块，各块带所在上游块的累计用量；单个候选时最后一个内容块与终止原因、用量同在最后一块，多个候选时最后一块携带全部候选的终止原因与用量之和；alt=sse 时为 SSE，否则与官方一样为逐个对象写出的 JSON 数组
+// streamGemini 按 SSE（alt=sse）或流式 JSON 数组输出 Gemini 候选增量块
+// 单候选与多候选的终止块与用量规则见 docs/protocol.md「响应格式」
 func (s *server) streamGemini(w http.ResponseWriter, r *http.Request, request antigravity.GenerateRequest, candidates *chatChoices, output geminiOutput) {
 	sse := r.URL.Query().Get("alt") == "sse"
 	if sse {

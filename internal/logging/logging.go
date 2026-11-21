@@ -2,6 +2,7 @@
 package logging
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
@@ -23,6 +26,9 @@ const FileName = "antigravity2api.log"
 
 // CrashFileName 是日志目录中记录未恢复 panic 与致命错误的文件
 const CrashFileName = "crash.log"
+
+// crashMarker 是每次启动时写入崩溃文件的分隔行的开头，其后为启动时刻
+const crashMarker = "=== start "
 
 // requestIDKey 是请求 ID 在 context 中的键
 type requestIDKey struct{}
@@ -43,10 +49,12 @@ type Logger struct {
 	level slog.LevelVar
 	text  atomic.Bool
 	dir   string
-	mu    sync.Mutex
-	file  *lumberjack.Logger
-	json  slog.Handler
-	plain slog.Handler
+	// crashed 是上次运行写入崩溃文件的第一行，上次运行没有崩溃时为空
+	crashed string
+	mu      sync.Mutex
+	file    *lumberjack.Logger
+	json    slog.Handler
+	plain   slog.Handler
 }
 
 // New 创建写入标准错误的服务日志并把致命错误同时写入 dir 下的崩溃文件，参数取值已由 config.Validate 校验
@@ -60,11 +68,13 @@ func New(dir, level, format string, file bool, maxTotalMB int) (*Logger, error) 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建日志目录: %w", err)
 	}
-	crash, err := os.OpenFile(filepath.Join(dir, CrashFileName), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logger.crashed = lastCrash(logger.CrashPath())
+	crash, err := os.OpenFile(logger.CrashPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("打开崩溃文件: %w", err)
 	}
 	defer crash.Close()
+	fmt.Fprintf(crash, "%s%s ===\n", crashMarker, time.Now().Format(time.RFC3339))
 	if err := debug.SetCrashOutput(crash, debug.CrashOptions{}); err != nil {
 		return nil, fmt.Errorf("设置崩溃输出: %w", err)
 	}
@@ -72,6 +82,32 @@ func New(dir, level, format string, file bool, maxTotalMB int) (*Logger, error) 
 		return nil, err
 	}
 	return logger, nil
+}
+
+// CrashPath 返回崩溃文件的路径
+func (l *Logger) CrashPath() string {
+	return filepath.Join(l.dir, CrashFileName)
+}
+
+// Crashed 返回上次运行写入崩溃文件的第一行（panic 或 fatal error 的原因），上次运行没有崩溃时为空
+func (l *Logger) Crashed() string {
+	return l.crashed
+}
+
+// lastCrash 返回崩溃文件中最后一个启动分隔行之后的第一行非空内容，没有分隔行或分隔行之后没有内容时为空
+func lastCrash(path string) string {
+	data, err := os.ReadFile(path)
+	index := bytes.LastIndex(data, []byte(crashMarker))
+	if err != nil || index < 0 {
+		return ""
+	}
+	_, rest, _ := bytes.Cut(data[index:], []byte("\n"))
+	for line := range strings.Lines(string(rest)) {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // Handler 返回按当前格式输出并附带 context 中请求 ID 的 slog 处理器

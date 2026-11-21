@@ -3,7 +3,6 @@ import type { ReactNode } from 'react'
 
 export const Popover = Primitive.Root
 export const PopoverTrigger = Primitive.Trigger
-export const PopoverClose = Primitive.Close
 
 // PopoverContent 是贴着触发控件弹出的白底浮层，label 是读屏名称，超出可用高度时在浮层内滚动
 export function PopoverContent({

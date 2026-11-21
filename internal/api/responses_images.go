@@ -20,7 +20,8 @@ var imageToolDeclaration = antigravity.FunctionDeclaration{
 	Parameters:  json.RawMessage(`{"type":"object","properties":{"prompt":{"type":"string","description":"Detailed description of the image to generate or of the edit to apply"}},"required":["prompt"]}`),
 }
 
-// hostedImages 在请求带 image_generation 工具时把模型对它的调用换成目录中图像生成模型输出的图片事件；首个调用起的事件暂存到文本生成结束、账户槽位归还后再请求图像模型并按原顺序输出，暂存的事件中有错误时不请求图像模型
+// hostedImages 在请求带 image_generation 工具时将模型对该工具的调用替换为图像生成模型输出的图片事件
+// 从首个调用起暂存到文本生成结束且无错误后再请求图像模型；规则见 docs/protocol.md「API 投影」
 func (s *server) hostedImages(ctx context.Context, tools []responsesTool, session string, contents []antigravity.Content, events <-chan antigravity.Event) <-chan antigravity.Event {
 	index := slices.IndexFunc(tools, func(tool responsesTool) bool { return tool.Type == "image_generation" })
 	if index < 0 {
@@ -71,7 +72,7 @@ func (s *server) hostedImage(ctx context.Context, tool responsesTool, session st
 	if err != nil {
 		return []antigravity.Event{{Kind: antigravity.EventError, Err: err}}
 	}
-	config, err := openAIImageConfig(tool.Size, tool.Quality)
+	config, _, err := openAIImageConfig(tool.Size, tool.Quality)
 	if err != nil {
 		return []antigravity.Event{{Kind: antigravity.EventError, Err: fmt.Errorf("image_generation tool: %w", err)}}
 	}

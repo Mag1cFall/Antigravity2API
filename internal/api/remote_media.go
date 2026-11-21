@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -28,14 +27,8 @@ const (
 	geminiFilesURIPrefix = "https://generativelanguage.googleapis.com/v1beta/files/"
 )
 
-// remoteMediaClient 是下载外部媒体的 HTTP 客户端，每次重定向前检查目标主机
-var remoteMediaClient = &http.Client{Transport: remoteMediaRoundTripper{direct: remoteMediaTransport()}, CheckRedirect: func(request *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
-	}
-	_, err := checkRemoteMediaHost(request.Context(), request.URL.Hostname())
-	return err
-}}
+// remoteMediaClient 是下载外部媒体的 HTTP 客户端
+var remoteMediaClient = &http.Client{Transport: remoteMediaRoundTripper{direct: remoteMediaTransport()}}
 
 // remoteMediaTransport 返回直连的 Transport，在建立连接时拒绝实际连接的非公网地址
 func remoteMediaTransport() *http.Transport {
@@ -153,13 +146,10 @@ func checkRemoteMediaAddress(address netip.Addr) error {
 	return nil
 }
 
-// downloadRemoteMedia 在请求 context 内下载外部媒体，MIME 依次取响应 Content-Type、声明值与内容判断
+// downloadRemoteMedia 在请求 context 内下载外部媒体，MIME 依次取响应 Content-Type、声明值与内容判断，八位字节流与通配类型（image/*）跳到下一项
 func downloadRemoteMedia(ctx context.Context, url string, declared string) (*antigravity.Blob, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
-	}
-	if _, err := checkRemoteMediaHost(ctx, request.URL.Hostname()); err != nil {
 		return nil, err
 	}
 	request.Header.Set("User-Agent", remoteMediaUserAgent)
@@ -185,9 +175,9 @@ func downloadRemoteMedia(ctx context.Context, url string, declared string) (*ant
 		return nil, fmt.Errorf("response body is empty")
 	}
 	mimeType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mimeType == "application/octet-stream" || mimeType == "binary/octet-stream" {
+	if err != nil || mimeType == "application/octet-stream" || mimeType == "binary/octet-stream" || strings.HasSuffix(mimeType, "/*") {
 		mimeType = declared
-		if mimeType == "" {
+		if mimeType == "" || strings.HasSuffix(mimeType, "/*") {
 			mimeType = detectMediaType("", data)
 		}
 	}

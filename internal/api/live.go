@@ -141,7 +141,7 @@ func liveEnded(err error) bool {
 
 // publicLiveError 返回上游或服务错误的公开说明
 func publicLiveError(err error) string {
-	var local interface{ HTTPStatus() int }
+	var local httpStatusError
 	if errors.As(err, &local) {
 		return publicReason(err)
 	}
@@ -192,7 +192,7 @@ func (s *server) serveLive(ctx context.Context, conn *websocket.Conn, live antig
 		return voiceSetup(setup, catalog)
 	}})
 	if err != nil {
-		var local interface{ HTTPStatus() int }
+		var local httpStatusError
 		if errors.As(err, &local) && local.HTTPStatus() == http.StatusBadRequest {
 			return &liveError{code: websocket.StatusInvalidFramePayloadData, message: publicReason(err), cause: err}
 		}
@@ -229,7 +229,8 @@ func transcriptionSetup(raw json.RawMessage, model antigravity.CatalogModel) ([]
 	return [][]byte{message}, nil
 }
 
-// serveTranscription 把客户端消息与上游消息逐条互转：上游第一条消息为 setupComplete，realtimeInput.mediaChunks 的每一块按 MIME 换为一条 audio 或 video 消息；任一方向结束后关闭上游流并等上游方向退出，再按已发送的音频时长与转写词数估算用量记入账本
+// serveTranscription 在客户端 WebSocket 与上游转写双向流之间逐条互转消息，并在结束时估算用量记入账本
+// 消息映射与用量口径见 docs/protocol.md「Live」
 func serveTranscription(ctx context.Context, conn *websocket.Conn, session *antigravity.LiveSession) error {
 	trace := requestdb.TraceFrom(ctx)
 	var audioBytes, words atomic.Int64
@@ -396,7 +397,7 @@ func voiceSetup(setup liveSetup, model antigravity.CatalogModel) ([][]byte, erro
 	if setup.SessionResumption != nil && setup.SessionResumption.Handle != "" {
 		return nil, errors.New("voice sessions cannot be resumed; remove sessionResumption.handle")
 	}
-	if len(setup.Proactivity) > 0 && string(setup.Proactivity) != "null" {
+	if rawJSONConfigured(setup.Proactivity) {
 		return nil, errors.New("voice sessions do not support proactivity")
 	}
 	voice := defaultVoice
@@ -475,7 +476,8 @@ func (v *voiceSession) fail(err error) {
 	}
 }
 
-// serveVoice 运行语音会话：上游进入聆听状态后发出 setupComplete；麦克风音频按官方节奏每 40 ms 发送 1280 字节给语音流与转写模型流，客户端没有音频时补静音，转写模型的识别结果作为用户转写发给语音流；语音、转写、插话与回合结束换成 serverContent；服务端交给智能体的请求由该模型经 Generate 回答，函数调用经 toolCall 与客户端往返
+// serveVoice 运行官方语音模式双向流会话，桥接麦克风音频、识别转写、语音回复与智能体函数调用
+// 帧节奏与消息映射见 docs/protocol.md「语音模式双向流」与「Live」
 func (s *server) serveVoice(ctx context.Context, conn *websocket.Conn, session *antigravity.LiveSession, setup liveSetup) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

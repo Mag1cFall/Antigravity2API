@@ -30,6 +30,8 @@ const (
 	officialConsumer = "consumer"
 	// officialCloud 为官方客户端凭据中“Continue with Google Cloud”登录的 auth_method
 	officialCloud = "gcp"
+	// closeTimeout 为请求官方客户端正常退出后等待的时长，超时仍在运行的进程被强制结束
+	closeTimeout = 10 * time.Second
 )
 
 // officialCredential 表示官方客户端保存的凭据 JSON，字段与其 StoredToken 相同；企业账户的项目、地区与许可证由官方客户端选择许可证后写入
@@ -80,7 +82,7 @@ func SwitchOfficial(store *Store, id string) error {
 	return errors.Join(writeOfficial(account, token), startOfficial(app, args))
 }
 
-// writeOfficial 按官方客户端登录后保存的格式写入凭据，企业账户写 auth_method gcp、邮箱与 WIF provider：keyring 不可用标记 1 小时内有效时写 ~/.gemini/jetski-standalone-oauth-token，系统凭据库已有可读凭据时一并更新（官方客户端优先读取它），否则写系统凭据库；系统凭据库不可写时与官方客户端一样写入标记并改写该文件；agy CLI 的会话文件存在时同样改写
+// writeOfficial 按官方客户端登录后保存的格式写入账户凭据，格式与写入位置见 docs/development.md「切换官方客户端账户」
 func writeOfficial(account Account, token *oauth2.Token) error {
 	credential := officialCredential{
 		Token:      oauth2.Token{AccessToken: token.AccessToken, TokenType: token.Type(), RefreshToken: token.RefreshToken, Expiry: token.Expiry},
@@ -125,7 +127,7 @@ func writeOfficial(account Account, token *oauth2.Token) error {
 	return nil
 }
 
-// readOfficial 依次从系统凭据库与 ~/.gemini/jetski-standalone-oauth-token 读取官方客户端凭据
+// readOfficial 依次从系统凭据库、~/.gemini/jetski-standalone-oauth-token 与官方 agy CLI 的 ~/.gemini/antigravity-cli/antigravity-oauth-token 读取官方客户端凭据
 func readOfficial() ([]byte, error) {
 	secret, keyringErr := keyring.Get(officialService, officialUser)
 	if keyringErr == nil {
@@ -137,8 +139,13 @@ func readOfficial() ([]byte, error) {
 	}
 	path := filepath.Join(home, ".gemini", officialFile)
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("未找到官方客户端凭据: 系统凭据库 %s:%s: %v; %s: %w", officialService, officialUser, keyringErr, path, err)
+	if err == nil {
+		return data, nil
+	}
+	cli := filepath.Join(home, ".gemini", filepath.FromSlash(cliFile))
+	data, cliErr := os.ReadFile(cli)
+	if cliErr != nil {
+		return nil, fmt.Errorf("未找到官方客户端凭据: 系统凭据库 %s:%s: %v; %s: %v; %s: %w", officialService, officialUser, keyringErr, path, err, cli, cliErr)
 	}
 	return data, nil
 }

@@ -32,7 +32,7 @@ const (
 )
 
 // imageAspectRatios 为图像模型接受的宽高比
-var imageAspectRatios = []string{"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
+var imageAspectRatios = []string{"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9", "1:4", "4:1", "1:8", "8:1"}
 
 // openAIImageRequest 为 OpenAI Images 生成与编辑请求
 type openAIImageRequest struct {
@@ -138,12 +138,11 @@ func (s *server) writeOpenAIImages(w http.ResponseWriter, r *http.Request, reque
 		}
 		request.Model = catalogModel(models, "image_generation")
 	}
-	config, err := openAIImageConfig(request.Size, request.Quality)
+	config, target, err := openAIImageConfig(request.Size, request.Quality)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	target, _ := openAIImageSize(request.Size)
 	format, compression, err := openAIImageEncoding(request.OutputFormat, request.OutputCompression)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -280,12 +279,12 @@ var imageResolutions = []struct {
 	pixels int
 }{{"1K", 1024}, {"2K", 2048}, {"4K", 4096}}
 
-// openAIImageConfig 把 OpenAI size 换成最接近的宽高比与能覆盖该尺寸的最小分辨率，quality 换成 1K、2K 或 4K 分辨率，两者取较高的分辨率
-func openAIImageConfig(size string, quality string) (*antigravity.ImageConfig, error) {
+// openAIImageConfig 把 OpenAI size 换成最接近的宽高比与能覆盖该尺寸的最小分辨率，quality 换成 1K、2K 或 4K 分辨率，两者取较高的分辨率，并返回目标尺寸
+func openAIImageConfig(size string, quality string) (*antigravity.ImageConfig, image.Point, error) {
 	config := &antigravity.ImageConfig{}
 	target, err := openAIImageSize(size)
 	if err != nil {
-		return nil, err
+		return nil, image.Point{}, err
 	}
 	resolution := 0
 	if target != (image.Point{}) {
@@ -315,15 +314,15 @@ func openAIImageConfig(size string, quality string) (*antigravity.ImageConfig, e
 	case "high", "xhigh", "max":
 		requested = 2
 	default:
-		return nil, fmt.Errorf("quality must be auto, low, medium, high, xhigh, max, standard or hd")
+		return nil, image.Point{}, fmt.Errorf("quality must be auto, low, medium, high, xhigh, max, standard or hd")
 	}
 	if requested >= 0 && (config.ImageSize == "" || requested > resolution) {
 		config.ImageSize = imageResolutions[requested].name
 	}
 	if *config == (antigravity.ImageConfig{}) {
-		return nil, nil
+		return nil, target, nil
 	}
-	return config, nil
+	return config, target, nil
 }
 
 // openAIImageSize 解析 OpenAI size 的 WIDTHxHEIGHT，auto 或省略时为零
@@ -384,7 +383,7 @@ func openAIImageUsage(usage *antigravity.Usage) map[string]any {
 	return map[string]any{"input_tokens": usage.InputTokens, "output_tokens": outputTokens(usage), "total_tokens": usage.TotalTokens}
 }
 
-// fitImage 把图片居中裁切缩放为 size 并编码为 mimeType，返回实际尺寸；size 为零或图片任一边小于 size 时保持原尺寸，不放大；mimeType 为空时保持上游编码
+// fitImage 把图片居中裁切缩放为 size 并编码为 mimeType，返回实际尺寸；size 为零或图片任一边小于 size 时保持原尺寸，不放大
 func fitImage(media antigravity.Blob, size image.Point, mimeType string, quality int) (antigravity.Blob, image.Point, error) {
 	config, _, err := image.DecodeConfig(bytes.NewReader(media.Data))
 	if err != nil {
@@ -392,7 +391,6 @@ func fitImage(media antigravity.Blob, size image.Point, mimeType string, quality
 	}
 	bounds := image.Pt(config.Width, config.Height)
 	resize := size != (image.Point{}) && bounds != size && bounds.X >= size.X && bounds.Y >= size.Y
-	mimeType = cmp.Or(mimeType, media.MIME)
 	if !resize && media.MIME == mimeType && (mimeType == "image/png" || quality == 100) {
 		return media, bounds, nil
 	}
@@ -411,8 +409,6 @@ func fitImage(media antigravity.Blob, size image.Point, mimeType string, quality
 		err = jpeg.Encode(&encoded, decoded, &jpeg.Options{Quality: quality})
 	case "image/webp":
 		err = nativewebp.Encode(&encoded, decoded, nil)
-	default:
-		return media, bounds, nil
 	}
 	if err != nil {
 		return media, image.Point{}, fmt.Errorf("convert %s output to %s: %w", media.MIME, mimeType, err)

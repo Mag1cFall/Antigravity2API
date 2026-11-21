@@ -217,8 +217,7 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, age 
 
 // loopback 判断请求来自本机回环：对端与 Host 都是回环地址，且没有经过反向代理
 func loopback(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || !net.ParseIP(host).IsLoopback() || !api.LoopbackHost(r.Host) {
+	if !net.ParseIP(clientIP(r)).IsLoopback() || !api.LoopbackHost(r.Host) {
 		return false
 	}
 	return r.Header.Get("X-Forwarded-For") == "" && r.Header.Get("Forwarded") == "" && r.Header.Get("X-Real-IP") == ""

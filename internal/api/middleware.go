@@ -3,10 +3,15 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
 )
 
 // maxPublicBodyBytes 为公开接口请求体上限
@@ -70,11 +75,72 @@ func bodyLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// DecodeBody 把 gzip、x-gzip 与 zstd 编码的请求体换成解压后的正文并去掉 Content-Encoding 与 Content-Length，解压后的正文同样受 maxPublicBodyBytes 限制；没有编码或为 identity 时不变；其他编码返回 UnsupportedEncodingError，正文不是该编码时返回解压错误
+func DecodeBody(w http.ResponseWriter, r *http.Request) error {
+	var decoded io.ReadCloser
+	switch encoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))); encoding {
+	case "", "identity":
+		return nil
+	case "gzip", "x-gzip":
+		reader, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return err
+		}
+		decoded = reader
+	case "zstd":
+		reader, err := zstd.NewReader(r.Body, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return err
+		}
+		decoded = reader.IOReadCloser()
+	default:
+		return &UnsupportedEncodingError{Encoding: encoding}
+	}
+	r.Body = http.MaxBytesReader(w, decoded, maxPublicBodyBytes)
+	r.Header.Del("Content-Encoding")
+	r.Header.Del("Content-Length")
+	r.ContentLength = -1
+	return nil
+}
+
+// UnsupportedEncodingError 是请求体使用了不支持的 Content-Encoding
+type UnsupportedEncodingError struct {
+	Encoding string
+}
+
+func (e *UnsupportedEncodingError) Error() string {
+	return fmt.Sprintf("unsupported Content-Encoding %q (supported: gzip, zstd)", e.Encoding)
+}
+
+// decodeMiddleware 以 DecodeBody 解开请求体，不支持的编码返回 415，正文不是所写编码时返回 400，错误体按请求所属协议
+func decodeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := DecodeBody(w, r); err != nil {
+			status := http.StatusBadRequest
+			if _, unsupported := err.(*UnsupportedEncodingError); unsupported {
+				status = http.StatusUnsupportedMediaType
+			}
+			message := "request body: " + err.Error()
+			switch protocolForRequest(r) {
+			case "anthropic":
+				writeAnthropicError(w, status, "invalid_request_error", message)
+			case "gemini":
+				writeGeminiError(w, status, "INVALID_ARGUMENT", message)
+			default:
+				writeOpenAIError(w, status, "invalid_request", message)
+			}
+			return
+		}
+		defer r.Body.Close()
+		next.ServeHTTP(w, r)
+	})
+}
+
 // authMiddleware 在配置了 API key 时要求请求携带其中任一 key，并把通过校验的 key 放入请求上下文
 func authMiddleware(keys func() []string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if configured := keys(); len(configured) > 0 {
-			key, ok := matchedAPIKey(r, configured)
+			key, ok := MatchedAPIKey(r, configured)
 			if !ok {
 				writeAuthError(w, r)
 				return
@@ -91,8 +157,8 @@ func requestAPIKey(r *http.Request) string {
 	return key
 }
 
-// matchedAPIKey 返回请求头或 URL 中与配置相同的 API key
-func matchedAPIKey(r *http.Request, keys []string) (string, bool) {
+// MatchedAPIKey 返回请求头或 URL 中与配置相同的 API key，依次取 X-Goog-API-Key、X-API-Key、Authorization Bearer 与 key 查询参数
+func MatchedAPIKey(r *http.Request, keys []string) (string, bool) {
 	for _, candidate := range apiKeyCandidates(r) {
 		for _, key := range keys {
 			if subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
@@ -121,7 +187,7 @@ func apiKeyCandidates(r *http.Request) []string {
 func bearerToken(authorization string) string {
 	scheme, key, ok := strings.Cut(strings.TrimSpace(authorization), " ")
 	if ok && strings.EqualFold(scheme, "Bearer") {
-		return strings.TrimSpace(key)
+		return key
 	}
 	return ""
 }

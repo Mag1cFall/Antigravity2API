@@ -77,11 +77,16 @@ export function quotaTone(fraction: number): 'success' | 'warning' | 'error' {
   return 'success'
 }
 
+// quotaTextColors 是各额度语气对应的文字颜色
+const quotaTextColors = {
+  error: 'text-error-text',
+  warning: 'text-warning-text',
+  success: 'text-foreground',
+} as const
+
 // quotaText 是剩余比例文字的颜色
 export function quotaText(fraction: number) {
-  if (fraction < 0.1) return 'text-error-text'
-  if (fraction < 0.3) return 'text-warning-text'
-  return 'text-foreground'
+  return quotaTextColors[quotaTone(fraction)]
 }
 
 // formatCountdown 把剩余毫秒输出为 6d 15h、1h 16m、12m 这类紧凑写法，已过去时为空

@@ -26,7 +26,13 @@ interface ErrorBody {
   error?: { code?: string; message?: string }
 }
 
-// api 以 JSON 调用同源管理 API，非 2xx 响应抛出 ApiError
+// pageTitle 返回反向代理错误页（如 502 Bad Gateway）的 title 或第一个 h1，不是 HTML 时为空
+function pageTitle(text: string) {
+  const page = new DOMParser().parseFromString(text, 'text/html')
+  return (page.title || (page.querySelector('h1')?.textContent ?? '')).trim()
+}
+
+// api 以 JSON 调用同源管理 API，非 2xx 响应与不是 JSON 的响应抛出 ApiError，反向代理返回的 HTML 错误页取其标题
 export async function api<T>(
   path: string,
   init: RequestInit & { json?: unknown } = {},
@@ -48,7 +54,16 @@ export async function api<T>(
   }
   if (response.status === 204) return undefined as T
   const text = await response.text()
-  const body: unknown = text ? JSON.parse(text) : undefined
+  let body: unknown
+  try {
+    body = text ? JSON.parse(text) : undefined
+  } catch {
+    throw new ApiError(
+      response.status,
+      'http_' + String(response.status),
+      pageTitle(text) || `HTTP ${String(response.status)} ${response.statusText}`.trim(),
+    )
+  }
   if (!response.ok) {
     const detail = (body as ErrorBody | undefined)?.error
     throw new ApiError(

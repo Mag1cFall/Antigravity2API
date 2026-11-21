@@ -11,7 +11,7 @@ import {
   Server,
   ShieldCheck,
 } from 'lucide-react'
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useEffectEvent, useState } from 'react'
 import { Controller, type FieldErrors, useForm, useWatch } from 'react-hook-form'
 import { Link, NavLink, useNavigate, useParams } from 'react-router'
 
@@ -405,18 +405,22 @@ function SettingsEditor({
     })
   }, handleInvalid)
 
+  const saveShortcut = useEffectEvent(() => {
+    void submit()
+  })
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault()
-        void submit()
+        saveShortcut()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('keydown', onKey)
     }
-  }, [submit])
+  }, [])
 
   const environment = new Set(settings.environment)
   const restartTag = (key: string) =>
@@ -459,6 +463,8 @@ function SettingsEditor({
           {...form.register(key)}
           spellCheck={false}
           autoComplete={extra?.autoComplete ?? 'off'}
+          data-1p-ignore={extra?.autoComplete ? undefined : true}
+          data-lpignore={extra?.autoComplete ? undefined : 'true'}
           placeholder={extra?.placeholder}
           disabled={Boolean(extra?.disabledReason)}
           className="font-mono"
@@ -643,6 +649,8 @@ function SettingsEditor({
               rows={3}
               spellCheck={false}
               autoComplete="off"
+              data-1p-ignore
+              data-lpignore="true"
               placeholder="socks5://127.0.0.1:1080"
               className="font-mono"
             />

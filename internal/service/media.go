@@ -101,7 +101,7 @@ func (s *Service) transcribe(ctx context.Context, request antigravity.GenerateRe
 		if result.Text != "" {
 			events <- antigravity.Event{Kind: antigravity.EventText, Text: result.Text, ProviderModel: catalog.ID}
 		}
-		input, output := int64(len(pcm))*transcriptionTokens/(transcriptionRate*2), tokencount.Text(catalog.ModelProvider, result.Text)
+		input, output := int64(len(pcm))*transcriptionTokens/(antigravity.VoiceMicRate*2), tokencount.Text(catalog.ModelProvider, result.Text)
 		events <- antigravity.Event{Kind: antigravity.EventUsage, Usage: &antigravity.Usage{InputTokens: input, OutputTokens: output, TotalTokens: input + output}, ProviderModel: catalog.ID}
 		events <- antigravity.Event{Kind: antigravity.EventFinish, FinishReason: "STOP", ProviderModel: catalog.ID}
 		close(events)

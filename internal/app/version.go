@@ -105,8 +105,5 @@ func (s *server) stagingID() (string, error) {
 	seed := make([]byte, 4096)
 	rand.Read(seed)
 	id := uuid.NewSHA1(uuid.NameSpaceOID, seed).String()
-	if err := os.MkdirAll(s.boot.RuntimeDir, 0o755); err != nil {
-		return "", err
-	}
 	return id, os.WriteFile(path, []byte(id), 0o644)
 }

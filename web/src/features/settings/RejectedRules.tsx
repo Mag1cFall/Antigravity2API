@@ -23,7 +23,7 @@ interface RejectedStatus {
 }
 
 // rejectedKey 是上游拒绝句列表状态的查询键，保存设置后失效以更新自定义规则条数
-export const rejectedKey = ['prompt', 'rejected'] as const
+const rejectedKey = ['prompt', 'rejected'] as const
 
 // RejectedStatusRow 是上游拒绝句列表的状态：版本、条数、来源与上次检查的结果，“立即更新”马上检查一次，“查看列表”打开当前列表原文
 export function RejectedStatusRow() {

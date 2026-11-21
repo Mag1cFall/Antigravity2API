@@ -1,9 +1,7 @@
 // UsageLatency 对应 internal/requestdb 的 UsageLatency
 interface UsageLatency {
-  avg_ms: number
   p50_ms: number
   p95_ms: number
-  p99_ms: number
 }
 
 // UsageStats 对应 internal/requestdb 的 UsageStats，耗时只统计成功请求，unpriced 是消耗了 token 但模型没有单价的请求数
@@ -22,7 +20,6 @@ export interface UsageStats {
   unpriced: number
   duration: UsageLatency
   first_event: UsageLatency
-  queue_avg_ms: number
   last_at?: string
 }
 
@@ -49,7 +46,6 @@ export interface UsageReport {
   to: string
   bucket_seconds: number
   generated_at: string
-  latest_at?: string
   totals: UsageStats
   previous: UsageStats
   recent: UsageRecent

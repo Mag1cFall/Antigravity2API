@@ -61,7 +61,7 @@ export const messages: Catalog = {
     refreshQuotaOf: '{email} のクォータを更新',
     quotaRefreshed: '{email} のクォータを更新しました',
     quotaRefreshFailed: '{email} のクォータを読み込めませんでした：{message}',
-    search: 'メールアドレス、ラベル、プロジェクトを検索',
+    search: 'メールアドレス、ラベル、プロジェクト、エラーを検索',
     filter: '状態で絞り込み',
     all: 'すべて',
     ready: '利用可能',
@@ -131,6 +131,7 @@ export const messages: Catalog = {
     proxyDescription:
       'このアカウントの token、プロフィール、生成、付随リクエストはすべてこのプロキシを経由します。保存するとアカウントを再初期化します。',
     proxyLabel: 'プロキシ URL',
+    loginProxyLabel: 'このログインとアカウントで使うプロキシ',
     proxyHint:
       'HTTP、HTTPS、SOCKS5 に対応し、user:pass@ も指定できます（例：socks5://user:pass@127.0.0.1:1080）。direct と入力すると直接接続し、空欄のときは設定の上流プロキシを使います。パスワードは xxxxx と表示されます。',
     proxyInvalid:
@@ -485,6 +486,9 @@ export const messages: Catalog = {
     editKeyHint:
       '任意の key を入力するか、ランダムに生成した値を使います。変更後は、古い値を使っているクライアントを新しい値に変える必要があります。',
     keyValue: 'Key',
+    keyName: '名前',
+    keyNameHint: '接続、使用量、リクエストの各ページで key と並べて表示し、用途を見分けられます。',
+    errKeyName: '名前にカンマとコロンは使えません',
     keyAccounts: '利用アカウント',
     keyAccountsHint:
       'チェックしたアカウントだけがこの key のリクエストを処理します。どれもチェックしない場合はすべてのアカウントを使います。',
@@ -510,6 +514,7 @@ export const messages: Catalog = {
       'クライアントとモデルを選び、設定をコピーすればすぐに使えます。モデルはアカウントのリアルタイムのモデル一覧から取得します',
     clientLabel: 'クライアント',
     model: 'モデル',
+    tierFable: 'Fable のモデル',
     tierOpus: 'Opus のモデル',
     tierSonnet: 'Sonnet のモデル',
     tierHaiku: 'Haiku のモデル',
@@ -530,7 +535,7 @@ export const messages: Catalog = {
       'モデル一覧が空です。アカウントを追加するとモデルを選べます。設定ではひとまず <モデル ID> をプレースホルダーにしています',
     modelPlaceholder: '<モデル ID>',
     clientClaude:
-      'Anthropic のターミナル向けコーディングエージェント。Anthropic Messages で接続し、Opus・Sonnet・Haiku の各ティアに別々のモデルを指定できます',
+      'Anthropic のターミナル向けコーディングエージェント。Anthropic Messages で接続し、Fable・Opus・Sonnet・Haiku の各ティアに別々のモデルを指定できます',
     clientCodex: 'OpenAI のターミナル向けコーディングエージェント。OpenAI Responses で接続します',
     clientOpencode:
       'オープンソースのターミナル向けコーディングエージェント。設定にすべてのチャットモデルを列挙します',
@@ -752,6 +757,13 @@ export const messages: Catalog = {
     now: '現在',
   },
   requests: {
+    failCapacity:
+      'Google にこのモデルの空き容量が今ありません。時間をおいて再試行するか別のモデルを使ってください',
+    failQuota: 'アカウントの割り当てを使い切りました。リセット後に再び使えます',
+    failVerify: 'アカウントは先に Google で確認が必要です',
+    failRejected:
+      '上流がリクエスト内容を拒否しました。多くはシステムプロンプト中の一文が原因で、割り当ての問題ではありません',
+    failTried: '{count} 個のアカウントを試行',
     pageTitle: 'リクエスト',
     tabs: 'リクエストの表示',
     tabRecords: '記録',
@@ -771,7 +783,7 @@ export const messages: Catalog = {
     allModels: 'すべてのモデル',
     account: 'アカウント',
     allAccounts: 'すべてのアカウント',
-    search: 'リクエスト ID、レスポンス ID、cascade、エラーを検索',
+    search: 'リクエスト ID、レスポンス ID、会話 ID、エラーを検索',
     export: 'CSV をエクスポート',
     exportEmpty: 'エクスポートするリクエストはありません',
     exportFailed: 'リクエスト記録を読み込めないため、エクスポートできません',
@@ -832,7 +844,7 @@ export const messages: Catalog = {
     typeTab: 'コード補完',
     typeCheckpoint: 'チェックポイント',
     tokenUsage: 'トークン',
-    cascade: 'Cascade',
+    cascade: '会話',
     stepOf: 'ステップ {step}',
     phaseRequest: 'リクエストの検証',
     phaseInternal: 'サービス内部',
@@ -971,7 +983,6 @@ export const messages: Catalog = {
       '各ユーザーメッセージはこの形式で送信され、{{.Text}} の位置にメッセージの原文が入ります。空欄のときはそのまま送信します。',
     templateLoad: 'プリセットを読み込む',
     templateInsert: '挿入',
-    templateSections: '公式の段落',
     templateVariables: '変数',
     templateChars: 'サンプルデータを代入すると {chars} 文字',
     templateError: 'テンプレートのエラー：{message}',
@@ -1188,9 +1199,12 @@ export const messages: Catalog = {
     confirmHint:
       '{version} のパッケージをダウンロードして SHA-256 を検証し、プログラムを置き換えて再起動します。新しいバージョンの準備ができるとページは自動で再読み込みされます。',
     confirm: '更新する',
+    releasePage: 'GitHub のリリースページ',
     cancel: 'キャンセル',
     restarting:
       '{version} で再起動しています。新しいバージョンの準備ができるとページは自動で再読み込みされます',
+    restartStalled:
+      '新しいバージョンが 1 分以内に起動しませんでした。Antigravity2API をもう一度開くと、起動後にこのページは自動で再読み込みされます。それでも起動しない場合は {path} のログを確認してください',
     downloading: '{version} をダウンロード中',
     verifying: '{version} のパッケージを検証中',
     installing: 'プログラムを置き換え中',
@@ -1314,9 +1328,9 @@ export const messages: Catalog = {
     pickAll: 'このフォルダーのファイルをすべて選択',
     pickNone: 'このフォルダーの選択を解除',
     folder: '保存先フォルダー',
-    folderRemote: 'サービスを実行しているコンピューターのフォルダーに保存',
-    folderRemoteHint:
-      'ほかのコンピューターから管理画面を使っているため、ファイルは Antigravity2API を実行しているコンピューターに保存されます。今のコンピューターに保存するには、［内容をコピー］を押してテキスト ファイルに貼り付けてください。',
+    download: 'ダウンロード',
+    downloadHint:
+      'ほかのコンピューターから管理画面を使っているため、{name} はブラウザーで今のコンピューターにダウンロードされます。',
     save: '保存',
     copy: '内容をコピー',
     copied: 'コピーしました',

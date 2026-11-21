@@ -4,7 +4,7 @@ import { useEffect, useEffectEvent, useRef, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
+import { Checkbox, SelectAllCheckbox } from '@/components/ui/checkbox'
 import { Field } from '@/components/ui/field'
 import { Textarea } from '@/components/ui/input'
 import { keepAccounts } from '@/features/accounts/actions'
@@ -137,7 +137,6 @@ export function ImportAccountFiles() {
     }
   }, [])
   const result = run.data
-  const allChosen = chosen.length === found.length
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-foreground-muted">{m.description}</p>
@@ -226,13 +225,14 @@ export function ImportAccountFiles() {
             <>
               <div className="flex flex-wrap items-center gap-3">
                 <label className="flex items-center gap-2 text-sm font-medium">
-                  <Checkbox
-                    checked={allChosen ? true : chosen.length === 0 ? false : 'indeterminate'}
-                    onCheckedChange={() => {
+                  <SelectAllCheckbox
+                    selected={chosen.length}
+                    total={found.length}
+                    onCheckedChange={(checked) => {
                       setSkipped(
-                        allChosen
-                          ? new Set(found.map((account) => account.refresh_token))
-                          : new Set(),
+                        checked
+                          ? new Set()
+                          : new Set(found.map((account) => account.refresh_token)),
                       )
                     }}
                   />
@@ -346,7 +346,7 @@ export function ImportAccountFiles() {
   )
 }
 
-// AccountExportDialog 是导出账户 JSON 的对话框：ids 为空时导出全部账户，多个账户时可选每个账户保存为单独的文件，total 是全部账户数
+// AccountExportDialog 是导出账户 JSON 的对话框：ids 为空时导出全部账户，本机访问且多个账户时可选每个账户保存为单独的文件，total 是全部账户数
 export function AccountExportDialog({
   ids,
   total,
@@ -360,6 +360,8 @@ export function AccountExportDialog({
   const [split, setSplit] = useState(false)
   const count = ids && ids.length > 0 ? ids.length : total
   const query = new URLSearchParams((ids ?? []).map((id) => ['id', id])).toString()
+  const content = async () =>
+    JSON.stringify(await api<unknown>('/api/accounts/export' + (query ? '?' + query : '')), null, 2)
   return (
     <ExportDialog
       open={ids !== undefined}
@@ -377,13 +379,16 @@ export function AccountExportDialog({
       description={m.exportDescription}
       path="/api/accounts/export"
       body={{ ids: ids ?? [], split }}
-      copy={async () =>
-        JSON.stringify(
-          await api<unknown>('/api/accounts/export' + (query ? '?' + query : '')),
-          null,
-          2,
-        )
-      }
+      copy={content}
+      download={{
+        name:
+          ids?.length === 1 && ids[0]
+            ? 'antigravity2api-' + ids[0] + '.json'
+            : 'antigravity2api-accounts-' +
+              new Date().toISOString().slice(0, 10).replaceAll('-', '') +
+              '.json',
+        file: async () => new Blob([await content()], { type: 'application/json' }),
+      }}
       options={
         count > 1 && (
           <label className="flex items-center gap-2 text-sm">

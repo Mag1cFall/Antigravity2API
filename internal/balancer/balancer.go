@@ -42,7 +42,6 @@ func (e *CooldownError) RetryAt(time.Time) time.Time {
 type Status struct {
 	Active   int
 	Cooldown map[string]time.Time
-	Quota    antigravity.QuotaSummary
 }
 
 // Lease 表示占用中的一个账户并发槽位，Model 为该账户目录中的模型条目，Credits 为该账户是否开启 AI 积分超额使用
@@ -183,6 +182,49 @@ func (p *Pool) SetQuota(id string, summary antigravity.QuotaSummary) {
 	p.notify()
 }
 
+// Replenish 按刚读到的额度摘要解除冷却：一个额度组的桶全部满额时解除该账户在该组与组内模型上的冷却，模型目录 quotaInfo 显示耗尽的模型仍按耗尽判定；返回是否解除了冷却
+func (p *Pool) Replenish(id string, summary antigravity.QuotaSummary) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.entry(id)
+	if e == nil {
+		return false
+	}
+	cleared := false
+	full := map[string]bool{}
+	for _, group := range summary.Groups {
+		for _, bucket := range group.Buckets {
+			scope := antigravity.BucketGroup(bucket.BucketID)
+			if previous, seen := full[scope]; !seen || previous {
+				full[scope] = bucket.RemainingFraction >= 1
+			}
+		}
+	}
+	for group, replenished := range full {
+		if !replenished {
+			continue
+		}
+		for scope := range p.cooldowns[id] {
+			if model, ok := e.model(scope); scope == group || ok && e.group(model) == group {
+				delete(p.cooldowns[id], scope)
+				cleared = true
+			}
+		}
+	}
+	p.notify()
+	return cleared
+}
+
+// Reset 解除账户的全部冷却，返回清除前是否有冷却
+func (p *Pool) Reset(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	cleared := len(p.cooldowns[id]) > 0
+	delete(p.cooldowns, id)
+	p.notify()
+	return cleared
+}
+
 // Limit 把账户的一个额度组或一个模型冷却到 until，按墙上时钟比较，系统睡眠期间冷却照常计时
 func (p *Pool) Limit(id, scope string, until time.Time) {
 	p.mu.Lock()
@@ -242,7 +284,7 @@ func (p *Pool) cooldown(id string) map[string]time.Time {
 	return p.cooldowns[id]
 }
 
-// Peers 返回与账户 id 共用该组额度池的其他账户：id 在该组已开始计时的每周额度桶，对方都有同一个桶，重置时刻相差不超过 poolSkew 且最近一次读到的剩余比例相同；家庭方案的成员账户共用同一组桶，同一时刻开始计时的独立额度剩余比例不同
+// Peers 返回与账户 id 共用该组额度池的其他就绪账户，判定规则见 docs/development.md「共享额度池」
 func (p *Pool) Peers(id, group string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -338,21 +380,22 @@ func (p *Pool) Status(id string) (Status, bool) {
 		return Status{}, false
 	}
 	now := p.now()
-	status := Status{Active: e.active, Cooldown: make(map[string]time.Time), Quota: e.quota}
+	status := Status{Active: e.active, Cooldown: make(map[string]time.Time)}
 	for scope, until := range e.cooldown {
 		if now.Before(until) {
 			status.Cooldown[scope] = until
 		}
 	}
 	for _, model := range e.models {
-		if reset := e.exhausted(model, p.reserve); now.Before(reset) && reset.After(status.Cooldown[model.QuotaGroup()]) {
-			status.Cooldown[model.QuotaGroup()] = reset
+		if reset := e.exhausted(model, p.reserve); now.Before(reset) && reset.After(status.Cooldown[e.group(model)]) {
+			status.Cooldown[e.group(model)] = reset
 		}
 	}
 	return status, true
 }
 
-// Acquire 为模型选择账户并占用一个并发槽位，session 非空时优先沿用该会话最近一次成功生成所用的账户，skip 不为 nil 时每次选择都跳过它返回 true 的账户，lowerTier 时同优先级内先用套餐低的账户；候选账户并发已满时等待槽位
+// Acquire 为模型选择账户并占用一个并发槽位，候选并发已满时等待槽位或 ctx 取消，选择顺序见 docs/development.md「选择账户」
+// session 非空时优先沿用粘连账户；skip 不为 nil 时跳过其返回 true 的账户；lowerTier 为真时同优先级内优先低套餐账户
 func (p *Pool) Acquire(ctx context.Context, model, session string, skip func(string) bool, lowerTier bool) (*Lease, error) {
 	for {
 		p.mu.Lock()
@@ -449,7 +492,7 @@ func (p *Pool) Bind(session, id string, started time.Time) {
 // sticky 返回会话粘连且仍有空闲槽位的候选账户
 func (p *Pool) sticky(session string, candidates []*entry, now time.Time) *entry {
 	bound, ok := p.sessions[session]
-	if session == "" || !ok || !now.Before(bound.expires) {
+	if !ok || !now.Before(bound.expires) {
 		return nil
 	}
 	for _, e := range candidates {
@@ -463,8 +506,8 @@ func (p *Pool) sticky(session string, candidates []*entry, now time.Time) *entry
 // best 在有空闲槽位的候选中选账户：先取优先级最高的一组，lowerTier 时再取其中套餐最低的一组；fillFirst 时取账户顺序中的第一个，否则取进行中请求最少者，并列时取最久未被选中者
 func (p *Pool) best(candidates []*entry, lowerTier bool) *entry {
 	var free []*entry
-	for _, e := range p.entries {
-		if slices.Contains(candidates, e) && e.active < p.concurrency {
+	for _, e := range candidates {
+		if e.active < p.concurrency {
 			free = append(free, e)
 		}
 	}
@@ -530,7 +573,7 @@ func (e *entry) model(id string) (antigravity.CatalogModel, bool) {
 // until 返回模型的不可用截止时间，取额度组冷却、模型冷却与额度耗尽的重置时间中最晚者
 func (e *entry) until(model antigravity.CatalogModel, reserve float64) time.Time {
 	until := e.exhausted(model, reserve)
-	for _, cooldown := range []time.Time{e.cooldown[model.QuotaGroup()], e.cooldown[model.ID]} {
+	for _, cooldown := range []time.Time{e.cooldown[e.group(model)], e.cooldown[model.ID]} {
 		if cooldown.After(until) {
 			until = cooldown
 		}
@@ -545,7 +588,7 @@ func (e *entry) exhausted(model antigravity.CatalogModel, reserve float64) time.
 		return until
 	}
 	resets := []antigravity.QuotaInfo{model.QuotaInfo}
-	for _, bucket := range e.buckets(model.QuotaGroup()) {
+	for _, bucket := range e.buckets(e.group(model)) {
 		resets = append(resets, antigravity.QuotaInfo{RemainingFraction: bucket.RemainingFraction, ResetTime: bucket.ResetTime})
 	}
 	for _, info := range resets {
@@ -554,6 +597,25 @@ func (e *entry) exhausted(model antigravity.CatalogModel, reserve float64) time.
 		}
 	}
 	return until
+}
+
+// Group 返回模型在账户上的额度组，见 entry.group；账户不在池中时为目录给出的组
+func (p *Pool) Group(id string, model antigravity.CatalogModel) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e := p.entry(id); e != nil {
+		return e.group(model)
+	}
+	return model.QuotaGroup()
+}
+
+// group 返回模型在该账户上的额度组：Argon 模型在账户额度摘要中没有 gemini-argon-wtu 桶而有 gemini 桶时（Ultra 与 Ultra-lite 套餐）与 Gemini 模型共用 gemini 组，其余同目录
+func (e *entry) group(model antigravity.CatalogModel) string {
+	group := model.QuotaGroup()
+	if group == antigravity.QuotaGroupArgon && len(e.buckets(group)) == 0 && len(e.buckets(antigravity.QuotaGroupGemini)) > 0 {
+		return antigravity.QuotaGroupGemini
+	}
+	return group
 }
 
 // buckets 返回额度摘要中属于该组的桶，组名取 bucketId 的前缀

@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { Check, Copy, FolderOpen, FolderSearch } from 'lucide-react'
+import { Check, Copy, Download, FolderOpen, FolderSearch } from 'lucide-react'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -31,11 +31,11 @@ interface SavedFiles {
 }
 
 // revealFile 在服务所在电脑的文件管理器中显示文件
-export function revealFile(path: string) {
+function revealFile(path: string) {
   return api('/api/paths/reveal', { method: 'POST', json: { path } })
 }
 
-// ExportDialog 是导出文件的对话框：保存到运行服务的电脑上的文件夹（默认上次的文件夹或下载文件夹，可浏览选择），或把内容复制到剪贴板；保存后在对话框中列出写入的文件，本机访问时可在文件夹中显示。save 以文件夹调用 path 对应的保存接口，options 是保存前的附加选项
+// ExportDialog 是导出文件的对话框：本机访问时保存到运行服务的电脑上的文件夹（默认上次的文件夹或下载文件夹，可浏览选择），从其他电脑访问时由浏览器下载 download 给出的文件，也可把内容复制到剪贴板；保存后在对话框中列出写入的文件，本机访问时可在文件夹中显示。save 以文件夹调用 path 对应的保存接口，options 是保存前的附加选项，只在本机访问时显示
 export function ExportDialog({
   open,
   onOpenChange,
@@ -44,6 +44,7 @@ export function ExportDialog({
   path,
   body = {},
   copy,
+  download,
   options,
 }: {
   open: boolean
@@ -53,13 +54,14 @@ export function ExportDialog({
   path: string
   body?: Record<string, unknown>
   copy?: () => Promise<string>
+  download: { name: string; file: () => Promise<Blob> }
   options?: ReactNode
 }) {
   const m = useMessages('files')
   const app = useMessages('app')
   const session = useSession()
   const local = session.data?.local ?? true
-  const places = usePlaces(open)
+  const places = usePlaces(open && local)
   const [folder, setFolder] = useState(rememberedFolder)
   const [browsing, setBrowsing] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -92,11 +94,21 @@ export function ExportDialog({
       }
     },
   })
+  const fetchFile = useMutation({
+    mutationFn: async () => {
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(await download.file())
+      link.download = download.name
+      link.click()
+      URL.revokeObjectURL(link.href)
+    },
+  })
   const reveal = useMutation({ mutationFn: revealFile })
   const close = () => {
     onOpenChange(false)
     save.reset()
     copyContent.reset()
+    fetchFile.reset()
     reveal.reset()
     setCopied(false)
     setManual(undefined)
@@ -136,16 +148,29 @@ export function ExportDialog({
                 </Button>
               )}
               <Button onClick={close}>{m.cancel}</Button>
-              <Button
-                variant="primary"
-                disabled={!target.trim()}
-                loading={save.isPending}
-                onClick={() => {
-                  save.mutate()
-                }}
-              >
-                {m.save}
-              </Button>
+              {local ? (
+                <Button
+                  variant="primary"
+                  disabled={!target.trim()}
+                  loading={save.isPending}
+                  onClick={() => {
+                    save.mutate()
+                  }}
+                >
+                  {m.save}
+                </Button>
+              ) : (
+                <Button
+                  variant="primary"
+                  loading={fetchFile.isPending}
+                  onClick={() => {
+                    fetchFile.mutate()
+                  }}
+                >
+                  <Download size={16} aria-hidden />
+                  {m.download}
+                </Button>
+              )}
             </>
           )
         }
@@ -186,34 +211,43 @@ export function ExportDialog({
           </div>
         ) : (
           <div className="flex flex-col gap-4">
-            <Field
-              id="export-folder"
-              label={local ? m.folder : m.folderRemote}
-              description={local ? undefined : m.folderRemoteHint}
-            >
-              <div className="flex gap-2">
-                <Input
-                  id="export-folder"
-                  value={target}
-                  spellCheck={false}
-                  autoComplete="off"
-                  onChange={(event) => {
-                    setFolder(event.target.value)
-                  }}
-                  className="font-mono"
-                />
-                <Button
-                  className="shrink-0"
-                  onClick={() => {
-                    setBrowsing(true)
-                  }}
-                >
-                  <FolderOpen size={16} aria-hidden />
-                  {m.browse}
-                </Button>
-              </div>
-            </Field>
-            {options}
+            {local ? (
+              <>
+                <Field id="export-folder" label={m.folder}>
+                  <div className="flex gap-2">
+                    <Input
+                      id="export-folder"
+                      value={target}
+                      spellCheck={false}
+                      autoComplete="off"
+                      onChange={(event) => {
+                        setFolder(event.target.value)
+                      }}
+                      className="font-mono"
+                    />
+                    <Button
+                      className="shrink-0"
+                      onClick={() => {
+                        setBrowsing(true)
+                      }}
+                    >
+                      <FolderOpen size={16} aria-hidden />
+                      {m.browse}
+                    </Button>
+                  </div>
+                </Field>
+                {options}
+              </>
+            ) : (
+              <p className="text-sm text-foreground-muted">
+                {fill(m.downloadHint, { name: download.name })}
+              </p>
+            )}
+            {fetchFile.isError && (
+              <Callout tone="error" role="alert">
+                <p className="wrap-anywhere">{errorMessage(fetchFile.error)}</p>
+              </Callout>
+            )}
             {save.isError && (
               <Callout tone="error" role="alert">
                 <p className="wrap-anywhere">{errorMessage(save.error)}</p>

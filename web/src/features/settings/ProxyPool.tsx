@@ -46,7 +46,7 @@ export function ProxyPool() {
     <FormRow id="proxy-pool" label={m.pool}>
       <ul
         aria-label={m.pool}
-        className="flex flex-col divide-y divide-border rounded-md border border-border"
+        className="flex max-h-[264px] flex-col divide-y divide-border overflow-y-auto rounded-md border border-border"
       >
         {list.map((proxy) => (
           <li key={proxy.url} className="flex flex-col gap-1 px-3 py-2 text-sm">

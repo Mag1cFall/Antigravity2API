@@ -24,7 +24,7 @@ var audioExtensionTypes = map[string]string{
 	".mpga": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav", ".webm": "audio/webm",
 }
 
-// dataURLPart 把 data URL 解析为内联媒体
+// dataURLPart 把 data URL 解析为内联媒体，类型无法解析或为通配类型（image/*）时按内容识别
 func dataURLPart(value string, name string) (antigravity.Part, error) {
 	if !strings.HasPrefix(value, "data:") {
 		return antigravity.Part{}, fmt.Errorf("media URL must be a data URL")
@@ -48,7 +48,7 @@ func dataURLPart(value string, name string) (antigravity.Part, error) {
 		data = []byte(decoded)
 	}
 	mimeType, _, err := mime.ParseMediaType(metadata)
-	if err != nil {
+	if err != nil || strings.HasSuffix(mimeType, "/*") {
 		mimeType = detectMediaType(name, data)
 	}
 	mimeType, data = normalizeImagePayload(mimeType, data)

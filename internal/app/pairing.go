@@ -24,10 +24,11 @@ type pairingToken struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// PairingUpload 是 login --remote 上传的正文：本机登录得到的 OAuth token 与登录开始时生成的设备档案
+// PairingUpload 是 login --remote 上传的正文：本机登录得到的 OAuth token、登录开始时生成的设备档案与 --proxy 指定的代理
 type PairingUpload struct {
 	oauth2.Token
 	Device antigravity.Device `json:"device"`
+	Proxy  string             `json:"proxy,omitempty"`
 }
 
 // pairing 保存当前唯一有效的配对令牌，令牌成功导入一个账户后失效
@@ -98,7 +99,7 @@ func (s *server) pairAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	added, err := s.deps.Store.AddWithDevice(r.Context(), &upload.Token, upload.Device)
+	added, err := s.deps.Store.AddWithDevice(r.Context(), &upload.Token, upload.Device, upload.Proxy)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "远程配对导入失败 | 错误="+err.Error(), "source", "auth")
 		writeError(w, http.StatusBadGateway, "pairing_import_failed", err.Error())

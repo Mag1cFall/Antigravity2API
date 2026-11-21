@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
+	"github.com/Mag1cFall/Antigravity2API/internal/robustio"
 	"github.com/Mag1cFall/Antigravity2API/rules"
 )
 
@@ -25,9 +25,6 @@ const rejectedInterval = time.Hour
 
 // rejectedTimeout 是一次读取上游拒绝句列表的时限
 const rejectedTimeout = time.Minute
-
-// rejectedLimit 是下载的上游拒绝句列表的字节上限
-const rejectedLimit = 1 << 20
 
 // rejectedFeed 维护请求使用的上游拒绝句规则：列表取内置与数据目录中已下载的两份中版本较新者，启动时与每小时从 GitHub 检查更新，与自定义规则合并后交给 prompt
 type rejectedFeed struct {
@@ -132,8 +129,6 @@ func (f *rejectedFeed) check(ctx context.Context) rejectedStatus {
 
 // fetch 发出带 If-None-Match 的 GET，列表没变化时返回空正文
 func (f *rejectedFeed) fetch(ctx context.Context, etag string) ([]byte, string, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = func(r *http.Request) (*url.URL, error) { return f.server.live.Load().ProxyURL(r) }
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rejectedURL, nil)
 	if err != nil {
 		return nil, "", err
@@ -142,7 +137,7 @@ func (f *rejectedFeed) fetch(ctx context.Context, etag string) ([]byte, string, 
 	if etag != "" {
 		request.Header.Set("If-None-Match", etag)
 	}
-	response, err := (&http.Client{Transport: transport}).Do(request)
+	response, err := f.server.httpClient().Do(request)
 	if err != nil {
 		return nil, "", err
 	}
@@ -151,7 +146,7 @@ func (f *rejectedFeed) fetch(ctx context.Context, etag string) ([]byte, string, 
 	case http.StatusNotModified:
 		return nil, etag, nil
 	case http.StatusOK:
-		data, err := io.ReadAll(io.LimitReader(response.Body, rejectedLimit))
+		data, err := io.ReadAll(response.Body)
 		return data, response.Header.Get("ETag"), err
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 512))
@@ -169,14 +164,11 @@ func (f *rejectedFeed) store(data []byte, etag string) error {
 	if version(downloaded.Version) < version(current.Version) || f.remote && string(data) == f.list {
 		return nil
 	}
-	if err := os.MkdirAll(f.server.boot.RuntimeDir, 0o755); err != nil {
-		return err
-	}
 	temporary := f.path() + ".tmp"
 	if err := os.WriteFile(temporary, data, 0o644); err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, f.path()); err != nil {
+	if err := robustio.Rename(temporary, f.path()); err != nil {
 		return err
 	}
 	f.list, f.remote, f.updated = string(data), true, time.Now()

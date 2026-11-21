@@ -295,10 +295,7 @@ func (s *Service) Accounts() []AccountStatus {
 	for _, record := range records {
 		status := AccountStatus{Account: *record, Error: failures[record.ID], Quota: renewed(usableQuota(quotas[record.ID].summary.Groups, catalogs[record.ID]), time.Now()), QuotaAt: quotas[record.ID].at}
 		if state, ok := s.pool.Status(record.ID); ok {
-			status.Ready, status.Active = true, state.Active
-			if len(state.Cooldown) != 0 {
-				status.Cooldown = state.Cooldown
-			}
+			status.Ready, status.Active, status.Cooldown = true, state.Active, state.Cooldown
 			for _, group := range []string{antigravity.QuotaGroupGemini, antigravity.QuotaGroupArgon, antigravity.QuotaGroupThirdParty} {
 				if peers := s.pool.Peers(record.ID, group); len(peers) > 0 {
 					if status.Shared == nil {
@@ -358,7 +355,8 @@ func pace(ctx context.Context) error {
 	}
 }
 
-// Refresh 为还没有额度读取的账户取账本中 7 天内最近一次额度摘要，结束时结束启动期间的等待，初始化尚未就绪、账户代理已变或重新登录过的启用账户（需要验证的账户只由 Verify 恢复）：相邻两个账户的初始化相隔 pace 开始、彼此并发，全部结束后返回；停用或已删除的账户移出调度，已删除账户的目录与 Hub 状态文件随之删除
+// Refresh 同步账户库与调度池：补入近期额度快照、并发初始化启用账户并清理停用或已删除账户
+// 相邻账户初始化间隔 pace；规则见 docs/development.md“初始化”
 func (s *Service) Refresh(ctx context.Context) error {
 	defer s.markLaunched()
 	records := s.store.Accounts()
@@ -399,9 +397,9 @@ func (s *Service) Refresh(ctx context.Context) error {
 			continue
 		}
 		s.mu.Lock()
-		verifying := strings.HasPrefix(s.failures[record.ID], verifyReason(nil))
+		paused := pausedFailure(s.failures[record.ID])
 		s.mu.Unlock()
-		if verifying {
+		if paused {
 			continue
 		}
 		if waited {
@@ -472,12 +470,18 @@ func verifyReason(body []byte) string {
 	return "需要验证：" + string(body)
 }
 
-// RetryFailed 依次重新初始化启用中但初始化失败或认证失败的账户，相邻两次之间相隔 pace，返回重试的账户数与仍失败的账户数；需要验证的账户只由 Verify 恢复
+// pausedFailure 判断移出调度的原因是否应跳过自动刷新与定时重试
+// 需要验证的账户由 Verify 恢复，缺少产品许可的账户由 Verify 或读额度成功时恢复
+func pausedFailure(reason string) bool {
+	return strings.HasPrefix(reason, verifyReason(nil)) || strings.HasPrefix(reason, licenseReason(""))
+}
+
+// RetryFailed 依次重新初始化启用中但初始化失败或认证失败的账户，相邻两次之间相隔 pace，返回重试的账户数与仍失败的账户数；需要验证的账户只由 Verify 恢复，缺少产品许可的账户由 Verify 或之后读额度成功时恢复
 func (s *Service) RetryFailed(ctx context.Context) (int, int) {
 	s.mu.Lock()
 	var failed []auth.Account
 	for _, record := range s.store.Accounts() {
-		if reason, ok := s.failures[record.ID]; ok && record.Enabled && !strings.HasPrefix(reason, verifyReason(nil)) {
+		if reason, ok := s.failures[record.ID]; ok && record.Enabled && !pausedFailure(reason) {
 			failed = append(failed, *record)
 		}
 	}
@@ -505,13 +509,9 @@ func (s *Service) proxy(record *auth.Account) antigravity.Proxy {
 			}
 			return s.live.Load().ProxyURL(request)
 		}
-	case proxypool.Direct:
-		s.proxies.Release(record.ID)
-		return func(*http.Request) (*url.URL, error) { return nil, nil }
 	}
 	s.proxies.Release(record.ID)
-	proxy, err := url.Parse(record.Proxy)
-	return func(*http.Request) (*url.URL, error) { return proxy, err }
+	return proxypool.Fixed(record.Proxy)
 }
 
 // Import 把账户 JSON 中的一个账户写入账户库，换取 token 与读取邮箱经该账户的代理发出：导入项带代理时用它，否则用代理池按项中邮箱绑定的代理；项中邮箱不是账户库中的账户时解除它的绑定
@@ -549,7 +549,8 @@ func (s *Service) tokenSource(record *auth.Account, token *oauth2.Token, proxy a
 	})
 }
 
-// initialize 以账户的设备档案与代理开始虚拟客户端，项目为空或 refresh token 与调度中的客户端不同时按登录序列、否则按冷启动序列初始化，读到的套餐、项目、地区、目录与额度经 observe 写回（冷启动不读额度，沿用最近一次读取），loadCodeAssist 给出不能使用的套餐且没有项目时按初始化失败处理、原因为 reasonMessage 与套餐原文，成功且账户仍在账户库中启用或 warm 为真（停用账户的手动预热）时加入调度并开始伴随请求；失败时停止伴随请求并把账户移出调度，需要验证或违反服务条款的 403 按 forbid 处理；账户已从账户库删除时不初始化
+// initialize 以账户设备档案与代理创建上游客户端并按登录或冷启动序列完成初始化
+// warm 为真时允许停用账户临时初始化供手动预热；写回与失败处理见 docs/development.md“初始化”
 func (s *Service) initialize(ctx context.Context, record *auth.Account, warm bool) error {
 	token := s.store.Token(record.ID)
 	if token == nil {
@@ -593,6 +594,9 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account, warm boo
 		return nil
 	}
 	s.remove(record.ID)
+	if running != nil && running.refresh != token.RefreshToken && s.pool.Reset(record.ID) {
+		go s.saveCooldowns()
+	}
 	current := &account{id: record.ID, proxy: record.Proxy, refresh: token.RefreshToken, client: client, source: source, device: record.Device, cancel: cancel}
 	s.accounts[record.ID] = current
 	delete(s.failures, record.ID)
@@ -605,7 +609,8 @@ func (s *Service) initialize(ctx context.Context, record *auth.Account, warm boo
 	return nil
 }
 
-// observe 返回账户客户端的读取回调，是上游账户状态唯一的写回点：套餐、项目、AI 积分与地区写回仍在账户库中的账户并更新调度档案，目录与额度摘要记下并更新账户池，目录只在账户由该客户端调度时进入账户池；账户已删除时不写回
+// observe 返回上游账户状态的唯一写回回调，在账户仍在账户库中时落盘并更新调度池
+// 目录仅在账户当前由该客户端调度时写入账户池
 func (s *Service) observe(id string, client *antigravity.Client) func(antigravity.Observed) {
 	return func(observed antigravity.Observed) {
 		record, ok, err := s.store.Update(id, func(record *auth.Account) {
@@ -678,19 +683,23 @@ func (s *Service) quote(ctx context.Context, current *account) {
 	}
 }
 
-// setQuota 记下账户的额度摘要及读取时间，更新账户池并写入额度快照
+// setQuota 记下账户的额度摘要及读取时间，更新账户池、按满额的额度组解除冷却并写入额度快照
 func (s *Service) setQuota(id string, summary antigravity.QuotaSummary) {
 	s.mu.Lock()
 	s.quotas[id] = quotaRead{summary: summary, at: time.Now()}
 	s.mu.Unlock()
 	s.pool.SetQuota(id, summary)
+	if s.pool.Replenish(id, summary) {
+		s.saveCooldowns()
+	}
 	s.ledger.RecordQuota(id, summary.Groups)
 }
 
 // quotaWorkers 是同时读取额度摘要的账户数上限
 const quotaWorkers = 5
 
-// RefreshQuota 实时读取一个账户的套餐与额度摘要：已初始化的账户经自己的客户端读取，其余账户（含停用）以保存的 token、设备档案与代理读取；先读套餐与项目（已初始化的账户从当前 cloudcode 端点，未初始化的企业 WIF 账户按 BusinessAssist，其余为 daily loadCodeAssist），读到的套餐与额度经 observe 写回；读取遇到需要验证或违反服务条款的 403 时按 forbid 处理
+// RefreshQuota 实时读取单个账户的套餐与额度摘要并经 observe 写回
+// 端点选择、缺少产品许可移出与恢复规则见 docs/development.md“初始化”与“失败与换号”
 func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 	record, ok := s.store.Account(id)
 	if !ok {
@@ -714,10 +723,25 @@ func (s *Service) RefreshQuota(ctx context.Context, id string) error {
 	if err == nil {
 		_, err = client.RetrieveUserQuotaSummary(ctx)
 	}
-	if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok {
-		s.forbid(ctx, id, upstream)
+	if upstream, ok := errors.AsType[*antigravity.UpstreamError](err); ok && !s.forbid(ctx, id, upstream) && unlicensed(upstream) {
+		_, message := upstream.Message()
+		slog.WarnContext(ctx, "账户缺少产品许可，停止请求", "source", id)
+		s.mu.Lock()
+		s.stop(id, licenseReason(message))
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	reason := s.failures[id]
+	s.mu.Unlock()
+	if err == nil && strings.HasPrefix(reason, licenseReason("")) && record.Enabled {
+		return s.initialize(ctx, &record, false)
 	}
 	return err
+}
+
+// licenseReason 返回读额度时上游答复账户没有产品许可而移出调度的原因，message 为上游说明，为空时为这类原因的前缀
+func licenseReason(message string) string {
+	return "缺少产品许可：" + message
 }
 
 // RefreshQuotas 读取全部账户的额度摘要，同时最多 quotaWorkers 个，返回读取失败的账户及原因

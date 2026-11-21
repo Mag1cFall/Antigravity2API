@@ -46,7 +46,8 @@ func RejectedDigest() string {
 	return rejected.Load().Digest
 }
 
-// ParseRejected 依次解析拒绝句列表文本并合并：`!` 开头的行为注释，第一份文本中的 `! Version:` 为版本；`[system]` 与 `[user]` 切换所在节，节标记之前的行属于 system；`/…/` 为 Go 正则，其余非空行为短语，不区分大小写，短语中的空格可对应任意空白序列
+// ParseRejected 依次解析并合并多份拒绝句规则文本，列表语法见 docs/protocol.md「系统提示与 user 轮」
+// 版本只取第一份文本中的首个 `! Version:` 头
 func ParseRejected(texts ...string) (*Rejected, error) {
 	result := &Rejected{}
 	var system, user []string
@@ -179,7 +180,8 @@ func dropRejected(text string, patterns []*regexp.Regexp) string {
 // fullStops 为全角句末标点，其后不需要空白即结束一句
 var fullStops = []string{"。", "！", "？"}
 
-// sentence 返回包含 text[start:end] 的整句范围：句子从同一行中上一个后接空白的句末标点或全角句末标点之后、或行首的缩进与列表符号之后开始，到 start 之后第一个全角句末标点或后接空白的句末标点为止并带上其后的空格，没有句末标点时到 end 之后的行尾
+// sentence 返回包含 text[start:end] 的整句字节区间，句子边界规则见 docs/protocol.md「系统提示与 user 轮」
+// 句末标点包含后接空白的 .!? 与全角 。！？，CRLF 行尾落在 \r 之前
 func sentence(text string, start, end int) [2]int {
 	lineStart := strings.LastIndexByte(text[:start], '\n') + 1
 	from := lineStart + len(listMarker.FindString(text[lineStart:start]))
@@ -194,7 +196,7 @@ func sentence(text string, start, end int) [2]int {
 	}
 	to := len(text)
 	for index := start; index < len(text); index++ {
-		if text[index] == '\n' && index >= end {
+		if (text[index] == '\n' || strings.HasPrefix(text[index:], "\r\n")) && index >= end {
 			to = index
 			break
 		}
@@ -202,7 +204,7 @@ func sentence(text string, start, end int) [2]int {
 			to = index + len(fullStops[stop])
 			break
 		}
-		if strings.ContainsRune(".!?", rune(text[index])) && (index+1 == len(text) || strings.ContainsRune(" \t\n", rune(text[index+1]))) {
+		if strings.ContainsRune(".!?", rune(text[index])) && (index+1 == len(text) || strings.ContainsRune(" \t\r\n", rune(text[index+1]))) {
 			to = index + 1
 			for to < len(text) && (text[to] == ' ' || text[to] == '\t') {
 				to++

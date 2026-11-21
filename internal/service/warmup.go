@@ -148,7 +148,8 @@ func cheapest(models []antigravity.CatalogModel, group string) string {
 	return best
 }
 
-// Prewarm 是管理端的手动预热：以账户与模型经生成路径发送一条 Hi 并读完回答，成功后重新读取该账户的额度，返回模型所属额度组；停用账户按冷启动临时初始化，只供手动预热使用，没有进行中的预热满 borrowLinger 后移出调度；账户不存在、未就绪或模型目录中没有该模型时不发送并返回原因
+// Prewarm 执行管理端的手动预热，发送 Hi 并重读账户额度后返回模型所属额度组
+// 停用账户按冷启动临时初始化并在空闲 borrowLinger 后移出调度，规则见 docs/development.md“初始化”
 func (s *Service) Prewarm(ctx context.Context, id, name string) (string, error) {
 	record, ok := s.store.Account(id)
 	if !ok {

@@ -57,7 +57,7 @@ function lastMinute(range: CustomRange) {
 }
 
 // useRangeText 返回时间范围的简短文字，结束写范围所含的最后一分钟，与今年同年时省略年份
-export function useRangeText() {
+function useRangeText() {
   const { locale } = useI18n()
   return (range: CustomRange) => {
     const sameYear =

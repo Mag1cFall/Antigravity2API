@@ -18,7 +18,6 @@ import (
 	"golang.org/x/oauth2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/mem"
-	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const (
@@ -28,8 +27,6 @@ const (
 	bidiMethod = "/google.gca.aicode.v1alpha.PredictionService/BidiGenerateContent"
 	// transcriptionMIME 为音频块的 MIME，16 kHz 单声道 16 位小端 PCM
 	transcriptionMIME = "audio/pcm;rate=16000"
-	// transcriptionChunk 为每个音频块的字节数，即 40 ms 的 16 kHz PCM
-	transcriptionChunk = 1280
 	// transcriptionInterval 为相邻音频块的发送间隔
 	transcriptionInterval = 40 * time.Millisecond
 	// grpcUserAgent 为 grpc-go 写出的 User-Agent，也是经 HTTP 代理时 CONNECT 的 User-Agent
@@ -76,7 +73,8 @@ type Transcription struct {
 	Messages []string
 }
 
-// Transcribe 按官方语音输入的顺序转写 16 kHz 单声道 PCM：经 OpenLive 打开 BidiGenerateContent 双向流，发送 setup 并等到 setupComplete，再发 activity start，音频按 40 ms 一个 1280 字节的块以实时节奏发送，开头补发流打开以来应已录下的块，最后发 activity end 并结束发送；返回各 inputTranscription 文本以空格相连的结果
+// Transcribe 经 BidiGenerateContent 双向流按实时节奏转写 16 kHz 单声道 PCM
+// 帧格式与发送节奏见 docs/protocol.md“语音转写双向流”
 func (c *Client) Transcribe(ctx context.Context, model string, pcm []byte) (Transcription, error) {
 	started := time.Now()
 	stream, err := c.OpenLive(ctx)
@@ -123,9 +121,9 @@ func (c *Client) Transcribe(ctx context.Context, model string, pcm []byte) (Tran
 	ticker := time.NewTicker(transcriptionInterval)
 	defer ticker.Stop()
 	for offset := 0; offset < len(pcm); {
-		due := min(len(pcm), (int(time.Since(started)/transcriptionInterval)+1)*transcriptionChunk)
-		for ; offset < due; offset += transcriptionChunk {
-			if err := stream.Send(realtimeInput(1, audioBlob(pcm[offset:min(offset+transcriptionChunk, len(pcm))]))); err != nil {
+		due := min(len(pcm), (int(time.Since(started)/transcriptionInterval)+1)*VoiceMicFrame)
+		for ; offset < due; offset += VoiceMicFrame {
+			if err := stream.Send(realtimeInput(1, audioBlob(pcm[offset:min(offset+VoiceMicFrame, len(pcm))]))); err != nil {
 				return Transcription{}, transcriptionError(ctx, err)
 			}
 		}
@@ -163,58 +161,46 @@ func transcriptionError(ctx context.Context, err error) error {
 
 // setupMessage 编码 setup：模型、关闭自动语音活动检测与输入转写
 func setupMessage(model string) []byte {
-	detection := protowire.AppendVarint(protowire.AppendTag(nil, 1, protowire.VarintType), 1)
-	config := appendMessage(nil, 6, detection)
-	setup := protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), model)
-	setup = appendMessage(setup, 5, config)
-	setup = appendMessage(setup, 8, nil)
-	return appendMessage(nil, 1, setup)
+	setup := appendString(nil, 1, model)
+	setup = appendBytes(setup, 5, appendBytes(nil, 6, appendVarint(nil, 1, 1)))
+	setup = appendBytes(setup, 8, nil)
+	return appendBytes(nil, 1, setup)
 }
 
 // realtimeInput 编码 realtimeInput 的一个字段：1 为音频，5 为 activity start，6 为 activity end
-func realtimeInput(field protowire.Number, value []byte) []byte {
-	return appendMessage(nil, 3, appendMessage(nil, field, value))
+func realtimeInput(field int, value []byte) []byte {
+	return appendBytes(nil, 3, appendBytes(nil, field, value))
 }
 
 // audioBlob 编码一个音频块
 func audioBlob(data []byte) []byte {
-	blob := protowire.AppendString(protowire.AppendTag(nil, 1, protowire.BytesType), transcriptionMIME)
-	return protowire.AppendBytes(protowire.AppendTag(blob, 2, protowire.BytesType), data)
-}
-
-// appendMessage 追加一个嵌套消息字段
-func appendMessage(b []byte, field protowire.Number, value []byte) []byte {
-	return protowire.AppendBytes(protowire.AppendTag(b, field, protowire.BytesType), value)
+	return appendBytes(appendString(nil, 1, transcriptionMIME), 2, data)
 }
 
 // serverMessage 表示服务端消息中转写所需的字段
 type serverMessage struct {
 	setupComplete      bool
 	inputTranscription string
-	turnComplete       bool
 }
 
-// parseServerMessage 解码 setupComplete 与 serverContent 中的 inputTranscription 和 turnComplete
+// parseServerMessage 解码 setupComplete 与 serverContent 中的 inputTranscription
 func parseServerMessage(raw []byte) (serverMessage, error) {
 	var message serverMessage
-	err := walkWire(raw, func(field protowire.Number, value []byte, _ uint64) error {
+	err := walkWire(raw, func(field int, value []byte, _ uint64) error {
 		switch field {
 		case 1:
 			message.setupComplete = true
 		case 2:
-			return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
-				switch field {
-				case 6:
-					return walkWire(value, func(field protowire.Number, value []byte, _ uint64) error {
-						if field == 1 {
-							message.inputTranscription = string(value)
-						}
-						return nil
-					})
-				case 3:
-					message.turnComplete = number > 0
+			return walkWire(value, func(field int, value []byte, _ uint64) error {
+				if field != 6 {
+					return nil
 				}
-				return nil
+				return walkWire(value, func(field int, value []byte, _ uint64) error {
+					if field == 1 {
+						message.inputTranscription = string(value)
+					}
+					return nil
+				})
 			})
 		}
 		return nil

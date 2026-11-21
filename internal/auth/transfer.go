@@ -57,7 +57,7 @@ func (s *Store) Import(ctx context.Context, item Transfer, proxy antigravity.Pro
 	})
 }
 
-// ParseTransfers 从账户 JSON 中取出账户，按 refresh token 去重：任意层级中带 refresh_token、refreshToken 或 token.refresh_token 的对象各为一个账户（本服务与 Antigravity Manager 的导出、CLIProxyAPI 与 gcli2api 的账户文件、opencode-antigravity-auth 与 antigravity-claude-proxy 的 accounts.json、sub2api 的数据导出），platform 不是 antigravity 的对象跳过，refreshToken 中 “|” 之后的项目 ID 去掉；内容不是 JSON 时取文本中的全部 refresh token
+// ParseTransfers 从账户 JSON 或纯文本中提取账户并按 refresh token 去重，支持的格式与字段见 docs/development.md「添加账户」
 func ParseTransfers(data []byte) []Transfer {
 	var root any
 	if err := json.Unmarshal(data, &root); err != nil {

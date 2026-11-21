@@ -37,12 +37,14 @@ func officialDir(app string) string {
 	return filepath.Dir(app) + "/"
 }
 
-// stopOfficial 结束命令行含官方客户端目录的全部进程并等待其退出
+// stopOfficial 让命令行含官方客户端目录的全部进程退出并等待：先发 SIGTERM，closeTimeout 内没有退出的进程以 SIGKILL 结束
 func stopOfficial(app string) ([]string, error) {
 	dir := officialDir(app)
-	if err := exec.Command("pkill", "-KILL", "-f", dir).Run(); err != nil && !noProcess(err) {
+	if err := exec.Command("pkill", "-TERM", "-f", dir).Run(); err != nil && !noProcess(err) {
 		return nil, fmt.Errorf("结束官方客户端: %w", err)
 	}
+	deadline := time.Now().Add(closeTimeout)
+	killed := false
 	for {
 		err := exec.Command("pgrep", "-f", dir).Run()
 		if noProcess(err) {
@@ -50,6 +52,12 @@ func stopOfficial(app string) ([]string, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("查询官方客户端进程: %w", err)
+		}
+		if !killed && time.Now().After(deadline) {
+			if err := exec.Command("pkill", "-KILL", "-f", dir).Run(); err != nil && !noProcess(err) {
+				return nil, fmt.Errorf("结束官方客户端: %w", err)
+			}
+			killed = true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

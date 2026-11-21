@@ -170,7 +170,8 @@ func (c *Composer) Tier() Tier {
 	return c.tier
 }
 
-// Compose 以会话 ID、账户设备档案、推荐插件段的货架正文与账户实时的布尔实验开关渲染系统指令并包装 user 轮，times[i] 为 contents[i] 首次出现时的本地时间；客户端系统提示与 user 轮中上游拒绝的整句删去，工具声明保持不变；模板执行出错时返回该错误
+// Compose 渲染系统指令、包装 user 轮并删去上游拒绝句，组装规则见 docs/protocol.md「系统提示与 user 轮」
+// times[i] 为 contents[i] 首次出现时的本地时间；工具声明保持不变
 func (c *Composer) Compose(request antigravity.GenerateRequest, model antigravity.CatalogModel, conversation string, times []string, device antigravity.Device, plugins string, experiments map[string]bool) (antigravity.GenerateRequest, error) {
 	data := deviceData(model, conversation, device, plugins, experiments)
 	current := rejected.Load()
@@ -192,7 +193,7 @@ func deviceData(model antigravity.CatalogModel, conversation string, device anti
 		ConversationID:   conversation,
 		AppDataDir:       device.AppDataDir,
 		Separator:        "/",
-		OS:               device.OS,
+		OS:               osName(device.OS),
 		ModelDisplayName: model.DisplayName,
 		FeaturedPlugins:  plugins,
 		experiments:      experiments,
@@ -202,6 +203,14 @@ func deviceData(model antigravity.CatalogModel, conversation string, device anti
 		data.Separator = `\`
 	}
 	return data
+}
+
+// osName 返回 user_information 中的系统名：macOS 为 mac（官方 2.33.0 macOS 现场），其余为设备档案的 os
+func osName(os string) string {
+	if os == "darwin" {
+		return "mac"
+	}
+	return os
 }
 
 // SectionTokens 返回以所选目录条目、会话、设备档案、推荐插件段的货架正文与布尔实验开关渲染的各官方段按 ceil(UTF-8 字节数/3) 计的 token 数，键为段名，不输出的段为 0
@@ -216,16 +225,15 @@ func SectionTokens(model antigravity.CatalogModel, conversation string, device a
 	return tokens
 }
 
-// validate 以各字段都有值的数据试渲染模板，提前暴露字段名错误
+// validate 以 previewData 试渲染模板，提前暴露字段名错误
 func (c *Composer) validate() error {
-	data := systemData{Client: "client", ConversationID: "00000000-0000-0000-0000-000000000000", AppDataDir: "app", Separator: "/", OS: "os", ModelDisplayName: "model", FeaturedPlugins: "plugins"}
-	if err := c.system.Execute(io.Discard, data); err != nil {
+	if err := c.system.Execute(io.Discard, previewData); err != nil {
 		return err
 	}
 	if c.user == nil {
 		return nil
 	}
-	return c.user.Execute(io.Discard, userData{Text: "text", LocalTime: "2026-10-14T14:47:22+08:00", First: true, ModelDisplayName: "model"})
+	return c.user.Execute(io.Discard, userData{Text: "text", LocalTime: "2026-10-14T14:47:22+08:00", First: true, ModelDisplayName: previewData.ModelDisplayName})
 }
 
 // wrap 用 user 模板包装每个含文本且不含工具结果的 user 轮，文本块以换行相连，其余 part 排在其后
@@ -279,7 +287,7 @@ func parse(name, text string) (*template.Template, error) {
 	return t, nil
 }
 
-// parseSections 把官方原文切成各段的原文与模板，各段以 <段名> 开头、</段名> 结尾、段间以换行相连；段正文在所选目录条目带该段的服务端模板时换成模板的渲染结果，推荐插件段的原文包在 FeaturedPlugins 的条件中，规划执行协议段包在 PlanExecute 的条件中并在不输出时去掉它之前的换行
+// parseSections 把 official.txt 按 XML 标签切分为各官方段的原文与模板，格式与条件输出见 docs/protocol.md「系统提示与 user 轮」
 func parseSections(text string) ([]Section, map[string]*template.Template) {
 	var sections []Section
 	parsed := map[string]*template.Template{}

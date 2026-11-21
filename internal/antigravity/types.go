@@ -289,7 +289,9 @@ type LiveRequest struct {
 	Accounts  []string
 }
 
-// LiveSession 表示已打开的 Live 上游流：Voice 为语音模式 StreamVoice，否则为 BidiGenerateContent；First 为上游的第一条消息；OpenObserver 在同一账户上再次打开语音模式识别用户语音的转写模型双向流并读完 setupComplete；Close 关闭流、归还账户并以结束原因记账
+// LiveSession 表示已打开的 Live 上游流
+// Voice 为真时是语音模式 StreamVoice，否则为 BidiGenerateContent；Close 关闭流、归还账户并记账
+// 协议与双流生命周期见 docs/protocol.md“语音模式双向流”
 type LiveSession struct {
 	Model        CatalogModel
 	Voice        bool

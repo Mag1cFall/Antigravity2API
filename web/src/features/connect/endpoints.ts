@@ -9,7 +9,7 @@ export function serviceOrigin() {
 export type Protocol = 'openai' | 'anthropic' | 'gemini'
 
 // RouteLabel 是接口用途在 connect 文案中的键
-export type RouteLabel =
+type RouteLabel =
   | 'routeChat'
   | 'routeCompletions'
   | 'routeResponses'
@@ -44,7 +44,7 @@ export type RouteLabel =
   | 'routeInteractionCancel'
 
 // ParamLabel 是参数说明在 connect 文案中的键
-export type ParamLabel =
+type ParamLabel =
   | 'paramModel'
   | 'paramMessages'
   | 'paramInput'

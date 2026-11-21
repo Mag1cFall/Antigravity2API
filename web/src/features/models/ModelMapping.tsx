@@ -1,5 +1,6 @@
 import { ArrowRight, Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardBody } from '@/components/ui/card'
@@ -19,10 +20,11 @@ interface Mapping {
   model: string
 }
 
-// MappingEditor 编辑已读取的模型映射，保存时只提交 MODEL_MAPPING
+// MappingEditor 编辑已读取的模型映射，列表限高并在列表内滚动，新增的行滚入可见处并聚焦，保存时只提交 MODEL_MAPPING
 function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[] }) {
   const m = useMessages('models')
   const [rows, setRows] = useState(saved)
+  const list = useRef<HTMLUListElement>(null)
   const [checked, setChecked] = useState(false)
   const save = useSaveSettings()
   const aliases = rows.map((row) => row.alias.trim())
@@ -58,7 +60,7 @@ function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[]
       {rows.length === 0 ? (
         <p className="text-sm text-foreground-muted">{m.mappingEmpty}</p>
       ) : (
-        <ul className="flex flex-col gap-3">
+        <ul ref={list} className="-m-1 flex max-h-[360px] flex-col gap-3 overflow-y-auto p-1">
           {rows.map((row, index) => {
             const id = 'mapping-' + String(index)
             const error = checked ? errors[index] : undefined
@@ -124,7 +126,12 @@ function MappingEditor({ saved, targets }: { saved: Mapping[]; targets: string[]
         <Button
           size="sm"
           onClick={() => {
-            setRows((current) => [...current, { alias: '', model: '' }])
+            flushSync(() => {
+              setRows((current) => [...current, { alias: '', model: '' }])
+            })
+            const last = list.current?.lastElementChild
+            last?.scrollIntoView({ block: 'nearest' })
+            last?.querySelector('input')?.focus()
           }}
         >
           <Plus size={16} aria-hidden />

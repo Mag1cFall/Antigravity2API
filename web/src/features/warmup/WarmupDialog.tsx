@@ -5,7 +5,7 @@ import { Link } from 'react-router'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
+import { Checkbox, SelectAllCheckbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Table, Td, Th } from '@/components/ui/table'
 import { AccountStatusBadge } from '@/features/accounts/AccountStatus'
@@ -448,18 +448,19 @@ function Toggle({
     <label
       className={
         heading
-          ? 'pb-1.5 flex items-center gap-2 border-y border-border px-3 pt-3 text-xs font-medium text-foreground-muted'
+          ? 'flex items-center gap-2 border-y border-border px-3 pt-3 text-xs font-medium text-foreground-muted'
           : 'flex items-center gap-2 border-b border-border bg-muted px-3 py-2 text-sm'
       }
     >
-      <Checkbox
-        checked={chosen === 0 ? false : chosen === options.length ? true : 'indeterminate'}
+      <SelectAllCheckbox
+        selected={chosen}
+        total={options.length}
         onCheckedChange={(checked) => {
           onChange(
             toggle(
               picked,
               options.map((option) => option.value),
-              checked === true,
+              checked,
             ),
           )
         }}

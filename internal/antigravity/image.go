@@ -108,6 +108,7 @@ func (c *Client) GenerateContent(ctx context.Context, envelope any) (<-chan Even
 	}
 	request.Header.Set("User-Agent", c.device.UserAgent())
 	request.Header.Set("Content-Type", "application/json")
+	c.userProject(request)
 	response, err := c.http.Do(c.traced(request))
 	if err != nil {
 		return nil, exchange, err
@@ -118,7 +119,7 @@ func (c *Client) GenerateContent(ctx context.Context, envelope any) (<-chan Even
 		return nil, exchange, err
 	}
 	if response.StatusCode/100 != 2 {
-		return nil, exchange, &UpstreamError{Status: response.StatusCode, Body: exchange.Response}
+		return nil, exchange, &UpstreamError{Status: response.StatusCode, Body: exchange.Response, RetryAfter: response.Header.Get("Retry-After")}
 	}
 	var compact bytes.Buffer
 	if err := json.Compact(&compact, exchange.Response); err != nil {

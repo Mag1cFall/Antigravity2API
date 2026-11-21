@@ -16,16 +16,17 @@ import (
 var (
 	// datedSuffix 匹配客户端模型名末尾的日期版本，例如 -20261001 与 @20261001
 	datedSuffix = regexp.MustCompile(`[-@]\d{8}$`)
+	// contextSuffix 匹配 Claude Code 在模型名末尾写的上下文窗口，例如 [1m]
+	contextSuffix = regexp.MustCompile(`\[\d+[km]\]$`)
 	// effortSuffix 匹配模型名末尾括号中的思考档位或思考预算，例如 (high) 与 (8192)
 	effortSuffix = regexp.MustCompile(`\(([a-z]+|-?\d+)\)$`)
-	// levelLabel 匹配目录显示名末尾的档位，例如 " (Medium)"
-	levelLabel = regexp.MustCompile(` \((Low|Medium|High|XHigh)\)$`)
 )
 
 // defaultLevel 为请求不带思考参数时族模型使用的档位
 const defaultLevel = "medium"
 
-// resolve 把客户端模型名解析为目录条目，括号后缀不是思考档位或预算时返回 400，只在未就绪账户上一次目录中时返回 503，找不到时返回 404：先按 MODEL_MAPPING 替换，目录中有该 ID 时直接使用；否则去掉 models/ 前缀、括号档位、日期版本、-latest、-thinking 与档位后缀得到族名，档位依次取名称中指定的档位（括号中的档位或思考预算、-thinking 为 high、档位后缀）、思考参数与 medium、high、low 中目录有的第一个，xhigh 不在目录时取 high，最后按族名本身匹配
+// resolve 把客户端模型名解析为就绪账户目录中的条目
+// 无效括号后缀返回 400，只在未就绪账户目录中返回 503，找不到返回 404；规则见 docs/protocol.md“模型 ID 与思考档位”
 func (s *Service) resolve(name string, config antigravity.GenerationConfig) (antigravity.CatalogModel, error) {
 	for _, alias := range s.live.Load().ModelMapping {
 		if alias.Alias == name {
@@ -36,7 +37,7 @@ func (s *Service) resolve(name string, config antigravity.GenerationConfig) (ant
 	if model, ok := s.pool.Model(name); ok {
 		return model, nil
 	}
-	family := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "models/"))
+	family := contextSuffix.ReplaceAllString(strings.ToLower(strings.TrimPrefix(strings.TrimSpace(name), "models/")), "")
 	implied := ""
 	if match := effortSuffix.FindStringSubmatch(family); match != nil {
 		family = strings.TrimSuffix(family, match[0])
@@ -96,7 +97,8 @@ func (s *Service) pending(ids []string) ([]string, []string) {
 	return reasons, states
 }
 
-// public 把目录条目投影为公开目录：Agent 模型中 ID 档位后缀与显示名档位一致的条目按族合并为一个族 ID，列出可选档位，名称去掉档位，上限与能力取默认档位的条目；默认档位依次取 medium、high、low 中族内有的第一个，与 resolve 一致；其余条目原样公开
+// public 把账户目录条目投影为公开模型列表，按族合并带档位后缀的 Agent 模型
+// 默认档位依次取 medium、high、low 中族内首项，规则见 docs/protocol.md“模型 ID 与思考档位”
 func public(catalog []antigravity.CatalogModel) []antigravity.Model {
 	var models []antigravity.Model
 	index := make(map[string]int)
@@ -124,7 +126,7 @@ func public(catalog []antigravity.CatalogModel) []antigravity.Model {
 		for _, level := range []string{defaultLevel, "high", "low"} {
 			if entry, ok := entries[level]; ok {
 				model := entry.Public()
-				model.ID, model.Name, model.ThinkingLevels, model.DefaultThinkingLevel = family, levelLabel.ReplaceAllString(entry.DisplayName, ""), levels, level
+				model.ID, model.Name, model.ThinkingLevels, model.DefaultThinkingLevel = family, antigravity.TierLabel.ReplaceAllString(entry.DisplayName, ""), levels, level
 				models[index[family]] = model
 				break
 			}
@@ -135,7 +137,7 @@ func public(catalog []antigravity.CatalogModel) []antigravity.Model {
 
 // familyOf 返回 Agent 模型条目的族名与档位，ID 后缀与显示名档位不一致或不是 Agent 模型时族名为空
 func familyOf(entry antigravity.CatalogModel) (family, level string) {
-	match := levelLabel.FindStringSubmatch(entry.DisplayName)
+	match := antigravity.TierLabel.FindStringSubmatch(entry.DisplayName)
 	if !entry.Agent || match == nil {
 		return "", ""
 	}

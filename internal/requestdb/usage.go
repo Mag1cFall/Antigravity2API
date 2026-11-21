@@ -380,7 +380,7 @@ func bucketStarts(from, to time.Time, size time.Duration, location *time.Locatio
 	}
 	_, offset := from.In(location).Zone()
 	step, shift := size.Milliseconds(), int64(offset)*1000
-	for at := floorDiv(from.UnixMilli()+shift, step)*step - shift; at < to.UnixMilli(); at += step {
+	for at := (from.UnixMilli()+shift)/step*step - shift; at < to.UnixMilli(); at += step {
 		starts = append(starts, at)
 	}
 	return starts
@@ -423,7 +423,7 @@ func plan(from, to int64, starts []int64) []segment {
 // planHours 把 [from, to) 切成连续段：完整落在范围与单个分桶内的整小时读取小时汇总，其余读取原始记录
 func planHours(from, to int64, starts []int64) []segment {
 	var segments []segment
-	for hour := floorDiv(from, hourMS) * hourMS; hour < to; hour += hourMS {
+	for hour := from / hourMS * hourMS; hour < to; hour += hourMS {
 		end, part := hour+hourMS, segment{from: max(hour, from), to: min(hour+hourMS, to)}
 		if hour >= from && end <= to && sameBucket(starts, hour, end) {
 			part.source = fromHours
@@ -515,13 +515,9 @@ func (store *Store) scan(ctx context.Context, part segment, filters map[string][
 
 // Usage 返回时间范围内的汇总、上一周期、当前吞吐、逐桶趋势、堆叠序列、分项与筛选候选
 func (store *Store) Usage(ctx context.Context, query UsageQuery) (UsageReport, error) {
-	location := query.Location
-	if location == nil {
-		location = time.UTC
-	}
 	now := time.Now()
 	from, to := query.From.UnixMilli(), query.To.UnixMilli()
-	starts := bucketStarts(query.From, query.To, query.Bucket, location)
+	starts := bucketStarts(query.From, query.To, query.Bucket, query.Location)
 	totals := &aggregate{}
 	buckets := make([]*aggregate, len(starts))
 	for index := range buckets {

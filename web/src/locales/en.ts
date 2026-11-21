@@ -61,7 +61,7 @@ export const messages: Catalog = {
     refreshQuotaOf: 'Refresh quota of {email}',
     quotaRefreshed: 'Quota of {email} refreshed',
     quotaRefreshFailed: 'Failed to read quota of {email}: {message}',
-    search: 'Search email, label or project',
+    search: 'Search email, label, project or error',
     filter: 'Filter by state',
     all: 'All',
     ready: 'Ready',
@@ -129,6 +129,7 @@ export const messages: Catalog = {
     proxyDescription:
       'Token, profile, generation and companion requests for this account go through this proxy. The account is initialized again after saving.',
     proxyLabel: 'Proxy URL',
+    loginProxyLabel: 'Proxy for this sign-in and the account',
     proxyHint:
       'HTTP, HTTPS or SOCKS5, with optional user:pass@, for example socks5://user:pass@127.0.0.1:1080. Enter direct to connect without a proxy; leave empty to use the upstream proxy from Settings. Passwords show as xxxxx.',
     proxyInvalid:
@@ -480,6 +481,9 @@ export const messages: Catalog = {
     editKeyHint:
       'Enter your own key or use the random one. After you change a key, clients that use the old value need the new one.',
     keyValue: 'Key',
+    keyName: 'Name',
+    keyNameHint: 'Shown with the key on the Connect, Usage and request pages to tell keys apart.',
+    errKeyName: 'The name cannot contain commas or colons',
     keyAccounts: 'Accounts',
     keyAccountsHint:
       'Only the checked accounts serve requests with this key. Leave all unchecked to use every account.',
@@ -505,6 +509,7 @@ export const messages: Catalog = {
       'Pick a client and model, copy the config and start; models come from the live catalog of your accounts',
     clientLabel: 'Client',
     model: 'Model',
+    tierFable: 'Fable model',
     tierOpus: 'Opus model',
     tierSonnet: 'Sonnet model',
     tierHaiku: 'Haiku model',
@@ -525,7 +530,7 @@ export const messages: Catalog = {
       'The model catalog is empty. Add an account to pick models; the config uses <model-id> for now',
     modelPlaceholder: '<model-id>',
     clientClaude:
-      'Anthropic’s terminal coding agent, connected over Anthropic Messages, with a separate model for each of the Opus, Sonnet and Haiku tiers',
+      'Anthropic’s terminal coding agent, connected over Anthropic Messages, with a separate model for each of the Fable, Opus, Sonnet and Haiku tiers',
     clientCodex: 'OpenAI’s terminal coding agent, connected over OpenAI Responses',
     clientOpencode: 'Open-source terminal coding agent, with every chat model listed in its config',
     clientOpenclaw:
@@ -744,6 +749,12 @@ export const messages: Catalog = {
     now: 'Now',
   },
   requests: {
+    failCapacity: 'Google has no capacity for this model right now; retry later or switch models',
+    failQuota: 'The account’s quota is used up; it can be used again after the reset',
+    failVerify: 'The account needs to be verified with Google first',
+    failRejected:
+      'Upstream rejected the request content, usually a phrase in the system prompt; this is not a quota issue',
+    failTried: 'Tried {count} accounts',
     pageTitle: 'Requests',
     tabs: 'Request views',
     tabRecords: 'Records',
@@ -763,7 +774,7 @@ export const messages: Catalog = {
     allModels: 'All models',
     account: 'Account',
     allAccounts: 'All accounts',
-    search: 'Search request ID, response ID, cascade or error',
+    search: 'Search request ID, response ID, conversation ID or error',
     export: 'Export CSV',
     exportEmpty: 'There are no requests to export',
     exportFailed: 'Request records could not be loaded, so there is nothing to export',
@@ -823,7 +834,7 @@ export const messages: Catalog = {
     typeTab: 'Code completion',
     typeCheckpoint: 'Checkpoint',
     tokenUsage: 'Tokens',
-    cascade: 'Cascade',
+    cascade: 'Conversation',
     stepOf: 'step {step}',
     phaseRequest: 'Request validation',
     phaseInternal: 'Internal',
@@ -960,7 +971,6 @@ export const messages: Catalog = {
       'Each user message is sent in this format, with the message at {{.Text}}. Leave it empty to send messages as they are.',
     templateLoad: 'Load preset',
     templateInsert: 'Insert',
-    templateSections: 'Official sections',
     templateVariables: 'Variables',
     templateChars: '{chars} characters with sample data',
     templateError: 'Template error: {message}',
@@ -1172,8 +1182,11 @@ export const messages: Catalog = {
     confirmHint:
       'Downloads the {version} package, verifies its SHA-256, replaces the program and restarts; the page reloads once the new version is ready.',
     confirm: 'Update',
+    releasePage: 'Release page on GitHub',
     cancel: 'Cancel',
     restarting: 'Restarting into {version}; the page reloads once the new version is ready',
+    restartStalled:
+      'The new version didn’t start within 1 minute. Open Antigravity2API again and this page reloads once it’s running. If it still won’t start, check the logs in {path}.',
     downloading: 'Downloading {version}',
     verifying: 'Verifying the {version} package',
     installing: 'Replacing the program',
@@ -1297,9 +1310,9 @@ export const messages: Catalog = {
     pickAll: 'Select all files in this folder',
     pickNone: 'Clear the selection in this folder',
     folder: 'Save to folder',
-    folderRemote: 'Save to a folder on the computer running the service',
-    folderRemoteHint:
-      'You are using the admin UI from another computer, so files are saved on the computer running Antigravity2API. To keep a copy on this computer, click Copy content and paste it into a text file.',
+    download: 'Download',
+    downloadHint:
+      'You are using the admin UI from another computer; the browser downloads {name} to this computer.',
     save: 'Save',
     copy: 'Copy content',
     copied: 'Copied',

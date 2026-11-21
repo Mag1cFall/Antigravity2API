@@ -2,6 +2,8 @@ package app
 
 import (
 	"testing"
+
+	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
 )
 
 // TestVerifyURL 验证从需要验证的上游错误正文中取出解码后的 validation_url
@@ -22,7 +24,7 @@ func TestRedactProxy(t *testing.T) {
 		"http://127.0.0.1:7890":              "http://127.0.0.1:7890",
 		"":                                   "",
 	} {
-		if got := redactProxy(input); got != want {
+		if got := proxypool.Redact(input); got != want {
 			t.Errorf("%q=%q 期望 %q", input, got, want)
 		}
 	}

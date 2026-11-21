@@ -20,7 +20,10 @@ var liveURLs = map[bool]string{
 	true:  "https://aicode.googleapis.com/google.gca.aicode.v1alpha.JetskiRemoteAgentProxyService/StreamVoice",
 }
 
-// OpenLive 按模型打开 Live 上游双向流：目录中的转写模型为 BidiGenerateContent，Agent 模型为语音模式 StreamVoice（计划模型为该模型，另以目录中的转写模型识别用户语音）；选定账户后发出 request.Setup 给出的消息并等到第一条上游消息，认证失败时刷新 token 在同一账户重试一次，其余失败按 Generate 的规则换账户；转写会话期间占用该账户的一个并发槽位，语音会话打开后归还槽位，智能体回合经 Generate 在该账户上占用槽位；账本记录账户、上游模型与一次上游尝试
+// OpenLive 按模型打开 Live 上游双向流并读取第一条上游消息
+// 转写模型走 BidiGenerateContent（会话期间占槽位），Agent 模型走语音模式 StreamVoice（打开后归还槽位）
+// 401 时丢弃 token 在同一账户重试一次，其余失败按 fail 换号最多 accountLimit 个，不做限速等待与连接错误再试
+// 协议与双流流程见 docs/protocol.md“语音转写双向流”与“语音模式双向流”
 func (s *Service) OpenLive(ctx context.Context, request antigravity.LiveRequest) (*antigravity.LiveSession, error) {
 	model, err := s.model(antigravity.GenerateRequest{Model: request.Model, AccountID: request.AccountID, Accounts: request.Accounts})
 	if err != nil {

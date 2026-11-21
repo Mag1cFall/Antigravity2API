@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
+	"github.com/Mag1cFall/Antigravity2API/internal/robustio"
 	"github.com/Mag1cFall/Antigravity2API/internal/tokencount"
 )
 
@@ -30,7 +32,8 @@ const conversationTTL = 24 * time.Hour
 // conversationTemp 为写入会话文件时同目录临时文件的名称前缀
 const conversationTemp = ".conversation-"
 
-// conversation 表示一个客户端会话的 cascade 与 trajectory 标识、会话分区的摘要、最近一次请求在摘要链中的位置与该处的链摘要、该次请求成功生成的回答指纹、该位置之前供回退匹配的链摘要、各条消息首次出现的 Unix 秒、最近一次成功生成的上游输入用量、各函数调用 ID 与各回答指纹的思考签名、各签名摘要对应的模型族
+// conversation 表示持久化保存的一个客户端会话状态
+// 含会话标识、摘要链、消息首次出现时间、输入用量与思考签名，规则见 docs/protocol.md“labels 与会话标识”
 type conversation struct {
 	Cascade    string            `json:"cascade"`
 	Trajectory string            `json:"trajectory"`
@@ -43,8 +46,16 @@ type conversation struct {
 	Prompt     *promptUsage      `json:"prompt,omitempty"`
 	Signatures map[string]string `json:"signatures,omitempty"`
 	Origins    map[string]string `json:"origins,omitempty"`
-	Used       time.Time         `json:"used"`
-	New        bool              `json:"-"`
+	// Accounts 是各账户发往上游的 cascade 与 trajectory 标识，第一个服务该会话的账户用 Cascade 与 Trajectory，其余账户各自另起一组
+	Accounts map[string]upstreamIdentity `json:"accounts,omitempty"`
+	Used     time.Time                   `json:"used"`
+	New      bool                        `json:"-"`
+}
+
+// upstreamIdentity 是一个账户在会话中发往上游的 cascade 与 trajectory 标识
+type upstreamIdentity struct {
+	Cascade    string `json:"cascade"`
+	Trajectory string `json:"trajectory"`
 }
 
 // promptUsage 表示一次成功生成的模型、规范消息条数、该处的链摘要、客户端系统提示、工具声明与拒绝句规则的摘要、上游 contents 条数、上游 promptTokenCount 与 thoughtsTokenCount
@@ -110,7 +121,8 @@ func openConversations(dir string) (*conversations, error) {
 	return c, nil
 }
 
-// identity 表示请求在会话记录中的指纹：digests 为摘要链，第 0 项为会话分区的摘要，第 i 项由第 i-1 项与第 i 条消息算出；answers 为各条消息的回答指纹，非 assistant 消息为空；anchors 为 assistant 消息中的思考签名；frame 为客户端系统提示、工具声明与当前拒绝句规则的摘要
+// identity 表示一次请求用于匹配会话与计数缓存的指纹
+// digests[0] 为会话分区摘要，其余项逐消息累积；摘要算法见 docs/protocol.md“labels 与会话标识”
 type identity struct {
 	digests []string
 	answers []string
@@ -166,9 +178,9 @@ func answerKey(parts []antigravity.Part) string {
 	return digest("", []byte(strings.Join(strings.Fields(text.String()), " ")+"\x00"+strings.Join(calls, "\x00")))
 }
 
-// replySignatureKey 返回回答正文签名在会话签名表中的键
-func replySignatureKey(answer string) string {
-	return "reply:" + answer
+// replySignatureKey 返回回答正文签名在会话签名表中的键：position 为回答在客户端消息中的序号，同一会话中相同正文的两次回答各有各的签名
+func replySignatureKey(answer string, position int) string {
+	return "reply:" + strconv.Itoa(position) + ":" + answer
 }
 
 // digest 返回上一项摘要与本项内容的 SHA-256
@@ -179,7 +191,8 @@ func digest(previous string, data []byte) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-// begin 为生成请求取得会话：找最近一次请求是本次前缀或与本次相同的会话，本次不多于一条消息时不取已成功生成过的会话；本次多于一条消息时另由 rewind 取回退的会话，相同部分更长时改用它；都没有时由 anchor 取同一分区中保存过本次某个思考签名的会话；仍没有时新建；记下本次的摘要链与新消息的时间并落盘，返回会话副本，新建时副本的 New 为真
+// begin 按前缀、回退与思考签名依次匹配或新建会话，更新摘要链与消息时间并落盘
+// 返回会话副本，新建时副本的 New 为真；匹配规则见 docs/protocol.md“labels 与会话标识”
 func (c *conversations) begin(id identity) (conversation, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -217,6 +230,28 @@ func (c *conversations) begin(id identity) (conversation, error) {
 	return snapshot, c.save(item)
 }
 
+// identity 返回账户在会话 cascade 中发往上游的标识与该账户是否第一次服务该会话：第一个服务的账户用会话的 Cascade 与 Trajectory，其余账户第一次服务时另起一组并保存；会话已不在记录中时为会话的标识
+func (c *conversations) identity(cascade, trajectory, account string) (upstreamIdentity, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	item := c.items[cascade]
+	if item == nil {
+		return upstreamIdentity{Cascade: cascade, Trajectory: trajectory}, false, nil
+	}
+	if known, ok := item.Accounts[account]; ok {
+		return known, false, nil
+	}
+	assigned := upstreamIdentity{Cascade: item.Cascade, Trajectory: item.Trajectory}
+	if len(item.Accounts) > 0 {
+		assigned = upstreamIdentity{Cascade: uuid.NewString(), Trajectory: uuid.NewString()}
+	}
+	if item.Accounts == nil {
+		item.Accounts = map[string]upstreamIdentity{}
+	}
+	item.Accounts[account] = assigned
+	return assigned, len(item.Accounts) > 1, c.save(item)
+}
+
 // history 返回摘要链中链首之后、链位置之前各项的副本，链位置之前没有消息时为空
 func history(digests []string) []string {
 	if len(digests) <= 2 {
@@ -225,7 +260,8 @@ func history(digests []string) []string {
 	return slices.Clone(digests[1 : len(digests)-1])
 }
 
-// rewind 返回从第 1 条消息起与本次相同条数最多的会话与相同条数：条数按会话保留的链摘要二分查找（链摘要逐项累积，某项相同则之前各项都相同），并列时取最近使用者；第 1 条消息就不同的会话不算，都不算时返回 nil 与 0
+// rewind 返回从第 1 条消息起与 digests 相同条数最多的会话与相同条数
+// 按链摘要二分查找，并列取最近使用者，第 1 条即不同时返回 nil 与 0
 func (c *conversations) rewind(digests []string) (*conversation, int) {
 	var best *conversation
 	kept := 0
@@ -288,7 +324,8 @@ func (c *conversations) match(id identity, accept func(*conversation) bool) *con
 	return best
 }
 
-// record 记下会话一次成功生成的模型、消息条数、系统提示与工具声明的摘要、上游 contents 条数、上游 promptTokenCount 与 thoughtsTokenCount、输出中的思考签名，回答正文的签名以回答指纹为键，会话仍停在本次请求时记下回答指纹
+// record 记下会话一次成功生成的模型、上游输入用量、思考签名与回答指纹并落盘
+// 回答正文签名以回答指纹与消息序号为键；仅当会话仍停在本次请求时更新回答指纹
 func (c *conversations) record(cascade string, id identity, answer, model string, contents int, tokens, thoughts int64, signed signatureRecord) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -307,7 +344,7 @@ func (c *conversations) record(cascade string, id identity, answer, model string
 	}
 	maps.Copy(item.Signatures, signed.calls)
 	if signed.reply != "" {
-		item.Signatures[replySignatureKey(answer)] = signed.reply
+		item.Signatures[replySignatureKey(answer, length)] = signed.reply
 	}
 	if len(signed.origins) > 0 && item.Origins == nil {
 		item.Origins = map[string]string{}
@@ -343,6 +380,7 @@ func (c *conversations) snapshot(item *conversation) conversation {
 	copied.Times = append([]int64(nil), item.Times...)
 	copied.Signatures = maps.Clone(item.Signatures)
 	copied.Origins = maps.Clone(item.Origins)
+	copied.Accounts = maps.Clone(item.Accounts)
 	return copied
 }
 
@@ -365,7 +403,7 @@ func (c *conversations) save(item *conversation) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temp.Name(), path)
+	return robustio.Rename(temp.Name(), path)
 }
 
 // sweep 删除空闲超过 conversationTTL 的会话及其文件

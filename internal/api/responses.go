@@ -52,7 +52,7 @@ type responsesRequest struct {
 	ServiceTier string `json:"service_tier"`
 }
 
-// allTools 返回顶层工具与输入中 additional_tools 提供的工具
+// allTools 返回顶层工具与输入中 additional_tools、tool_search_output 提供的工具
 func (request responsesRequest) allTools() []responsesTool {
 	var items []struct {
 		Type  string          `json:"type"`
@@ -61,7 +61,7 @@ func (request responsesRequest) allTools() []responsesTool {
 	_ = json.Unmarshal(request.Input, &items)
 	var additional []responsesTool
 	for _, item := range items {
-		if item.Type == "additional_tools" {
+		if item.Type == "additional_tools" || item.Type == "tool_search_output" {
 			additional = append(additional, item.Tools...)
 		}
 	}
@@ -104,6 +104,8 @@ type responsesTool struct {
 	DisplayWidth  int             `json:"display_width,omitempty"`
 	DisplayHeight int             `json:"display_height,omitempty"`
 	Environment   json.RawMessage `json:"environment,omitempty"`
+	// Execution 为 tool_search 的执行方，client 或 server
+	Execution string `json:"execution,omitempty"`
 }
 
 // strict 返回函数工具是否按 strict 校验：省略 strict 时参数 Schema 已满足 strict 要求即按 strict 处理
@@ -704,7 +706,7 @@ func (s *server) prepareResponses(r *http.Request, request *responsesRequest, id
 	if err != nil {
 		return responsesPreparation{}, err
 	}
-	generateRequest.Session = clientSession(r, r.Header.Get("session_id"), r.Header.Get("conversation_id"), request.PromptCacheKey, request.User)
+	generateRequest.Session = clientSession(r, append(append([]string{r.Header.Get("session_id"), r.Header.Get("conversation_id")}, headerSessions(r)...), request.PromptCacheKey, request.User)...)
 	prepared := responsesPreparation{
 		generate: generateRequest, contents: cloneResponseContents(generateRequest.Contents),
 		inlineInstructions: append([]string(nil), inlineInstructions...), input: responsesInputItems(request.Input, id),
@@ -874,7 +876,7 @@ func (request responsesRequest) toGenerateRequest(id string) (antigravity.Genera
 		MaxOutputTokens: request.MaxOutputTokens,
 	}
 	config.HideThinking = true
-	if len(request.Reasoning) > 0 && string(request.Reasoning) != "null" {
+	if rawJSONConfigured(request.Reasoning) {
 		var reasoning struct {
 			Effort          string `json:"effort"`
 			Summary         string `json:"summary"`
@@ -890,7 +892,7 @@ func (request responsesRequest) toGenerateRequest(id string) (antigravity.Genera
 	if input.effort != "" {
 		config.ReasoningEffort = input.effort
 	}
-	if len(request.Text) > 0 && string(request.Text) != "null" {
+	if rawJSONConfigured(request.Text) {
 		var text struct {
 			Format struct {
 				Type        string          `json:"type"`
@@ -931,10 +933,10 @@ type responsesInput struct {
 	effort       string
 }
 
-// responsesContents 转换 Responses 输入项：首部 system、developer 消息为指令，对话中的作为 system-reminder 并入下一个 user 消息；reasoning 项的摘要与签名并入其后的 assistant 消息，调用项并入其前的 assistant 消息
+// responsesContents 转换 Responses 输入项：首部 system、developer 消息为指令，对话中的作为 system-reminder 并入下一个 user 消息；reasoning 项的摘要（没有摘要时为 content 中的 reasoning_text）与签名并入其后的 assistant 消息，只带签名的 reasoning 项之后紧接不带签名的 reasoning 项时签名移到后者的思考之后，调用项并入其前的 assistant 消息，紧跟在调用之后的 assistant 消息（Codex 的说明文字）折回该消息首个调用之前
 func responsesContents(raw json.RawMessage) (responsesInput, error) {
 	var input responsesInput
-	if value := strings.TrimSpace(string(raw)); value == "" || value == "null" {
+	if !rawJSONConfigured(raw) {
 		return input, nil
 	}
 	var text string
@@ -982,6 +984,18 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 		}
 		reasoning = nil
 	}
+	addCall := func(call antigravity.FunctionCall) {
+		if last := len(reasoning) - 1; last >= 0 && reasoning[last].Text == "" {
+			call.ThoughtSignature = reasoning[last].ThoughtSignature
+			reasoning = reasoning[:last]
+		}
+		if last := len(contents) - 1; last >= 0 && contents[last].Role == antigravity.RoleAssistant {
+			contents[last].Parts = slices.Concat(contents[last].Parts, reasoning, []antigravity.Part{{FunctionCall: &call}})
+			reasoning = nil
+			return
+		}
+		add(antigravity.Content{Role: antigravity.RoleAssistant, Parts: []antigravity.Part{{FunctionCall: &call}}})
+	}
 	for index, rawItem := range items {
 		var item responsesInputItem
 		switch kind := responsesItemType(rawItem); kind {
@@ -990,8 +1004,36 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 				return input, fmt.Errorf("compaction_trigger must be the final input item")
 			}
 			continue
+		case "tool_search_call", "tool_search_output":
+			var search struct {
+				CallID    string          `json:"call_id"`
+				Execution string          `json:"execution"`
+				Arguments json.RawMessage `json:"arguments"`
+				Tools     []responsesTool `json:"tools"`
+			}
+			if err := json.Unmarshal(rawItem, &search); err != nil {
+				return input, fmt.Errorf("%s: %w", kind, err)
+			}
+			if search.Execution == "client" && kind == "tool_search_call" {
+				addCall(antigravity.FunctionCall{ID: search.CallID, Name: "tool_search", Arguments: rawObjectArguments(search.Arguments)})
+				continue
+			}
+			if search.Execution == "client" {
+				flushReasoning()
+				add(antigravity.Content{Role: antigravity.RoleTool, Parts: []antigravity.Part{{FunctionResult: &antigravity.FunctionResult{
+					ID: search.CallID, Name: "tool_search", Content: loadedTools(search.Tools),
+				}}}})
+				continue
+			}
+			content, err := responsesHostedItem(kind, rawItem)
+			if err != nil {
+				return input, fmt.Errorf("%s: %w", kind, err)
+			}
+			flushReasoning()
+			add(content)
+			continue
 		case "web_search_call", "code_interpreter_call", "image_generation_call", "file_search_call",
-			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "tool_search_call", "tool_search_output", "program", "program_output":
+			"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "program", "program_output":
 			content, err := responsesHostedItem(kind, rawItem)
 			if err != nil {
 				return input, fmt.Errorf("%s: %w", kind, err)
@@ -1047,6 +1089,13 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 			if role != antigravity.RoleAssistant {
 				flushReasoning()
 			}
+			if last := len(contents) - 1; role == antigravity.RoleAssistant && last >= 0 && contents[last].Role == antigravity.RoleAssistant {
+				if first := slices.IndexFunc(contents[last].Parts, func(part antigravity.Part) bool { return part.FunctionCall != nil }); first >= 0 {
+					contents[last].Parts = slices.Concat(contents[last].Parts[:first], reasoning, parts, contents[last].Parts[first:])
+					reasoning = nil
+					continue
+				}
+			}
 			add(antigravity.Content{Role: role, Parts: parts})
 			continue
 		case "agent_message":
@@ -1093,37 +1142,53 @@ func responsesContents(raw json.RawMessage) (responsesInput, error) {
 			if err != nil {
 				return input, fmt.Errorf("%s: %w", item.Type, err)
 			}
+			if item.Status == "incomplete" && item.Type != "apply_patch_call_output" {
+				output, _ = json.Marshal(map[string]any{"status": item.Status, "output": rawJSONValue(output, nil)})
+			}
+			if item.CallID == "" {
+				text := string(output)
+				json.Unmarshal(output, &text)
+				tag := "external_" + cmp.Or(item.Name, "context")
+				flushReasoning()
+				add(antigravity.Content{Role: antigravity.RoleUser, Parts: append([]antigravity.Part{{Text: "<" + tag + ">\n" + text + "\n</" + tag + ">"}}, media...)})
+				continue
+			}
 			flushReasoning()
 			add(antigravity.Content{Role: antigravity.RoleTool, Parts: []antigravity.Part{{FunctionResult: &antigravity.FunctionResult{
 				ID: item.CallID, Content: output, Parts: media,
 			}}}})
 			continue
 		case "reasoning":
-			flushReasoning()
+			carried := ""
+			if last := len(reasoning) - 1; last >= 0 && reasoning[last].Text == "" && item.EncryptedContent == "" {
+				carried, reasoning = reasoning[last].ThoughtSignature, reasoning[:last]
+			} else {
+				flushReasoning()
+			}
 			var summary strings.Builder
 			for _, part := range item.Summary {
 				summary.WriteString(part.Text)
 			}
+			if summary.Len() == 0 {
+				var content []struct {
+					Text string `json:"text"`
+				}
+				json.Unmarshal(item.Content, &content)
+				for _, part := range content {
+					summary.WriteString(part.Text)
+				}
+			}
 			if summary.Len() > 0 {
 				reasoning = append(reasoning, antigravity.Part{Text: summary.String(), Thought: true})
 			}
-			if item.EncryptedContent != "" {
-				reasoning = append(reasoning, antigravity.Part{ThoughtSignature: item.EncryptedContent})
+			if signature := cmp.Or(item.EncryptedContent, carried); signature != "" {
+				reasoning = append(reasoning, antigravity.Part{ThoughtSignature: signature})
 			}
 			continue
 		default:
 			return input, fmt.Errorf("unsupported input item type %q", item.Type)
 		}
-		if last := len(reasoning) - 1; last >= 0 && reasoning[last].Text == "" {
-			call.ThoughtSignature = reasoning[last].ThoughtSignature
-			reasoning = reasoning[:last]
-		}
-		if last := len(contents) - 1; last >= 0 && contents[last].Role == antigravity.RoleAssistant {
-			contents[last].Parts = slices.Concat(contents[last].Parts, reasoning, []antigravity.Part{{FunctionCall: &call}})
-			reasoning = nil
-			continue
-		}
-		add(antigravity.Content{Role: antigravity.RoleAssistant, Parts: []antigravity.Part{{FunctionCall: &call}}})
+		addCall(call)
 	}
 	flushReasoning()
 	contents = appendTrailingReminders(contents, reminders)
@@ -1237,7 +1302,7 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 		}
 		parameters := tool.Parameters
 		if len(parameters) == 0 {
-			parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+			parameters = emptyObjectParameters
 		}
 		return addDeclaration(antigravity.FunctionDeclaration{
 			Name: tool.Name, Description: tool.Description, Parameters: parameters, Strict: tool.strict(),
@@ -1291,7 +1356,14 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 			if err := addDeclaration(imageToolDeclaration); err != nil {
 				return antigravity.Tools{}, err
 			}
-		case "code_interpreter", "file_search", "mcp", "tool_search", "programmatic_tool_calling":
+		case "tool_search":
+			if tool.Execution == "client" {
+				tool.Name = "tool_search"
+				if err := addTool(tool); err != nil {
+					return antigravity.Tools{}, err
+				}
+			}
+		case "code_interpreter", "file_search", "mcp", "programmatic_tool_calling":
 		default:
 			return antigravity.Tools{}, fmt.Errorf("unsupported tool type %q", tool.Type)
 		}
@@ -1310,12 +1382,32 @@ func mapResponsesTools(tools []responsesTool, choice json.RawMessage) (antigravi
 	return mapped, nil
 }
 
-// mergeResponsesTools 把 additional_tools 中与顶层同名之外的工具并入工具列表
+// loadedTools 返回客户端 tool_search 结果的函数结果正文：加载的工具按声明名列出，工具定义本身并入本次请求的工具声明
+func loadedTools(tools []responsesTool) json.RawMessage {
+	names := []string{}
+	for _, tool := range tools {
+		if tool.Type != "namespace" {
+			names = append(names, cmp.Or(tool.Name, tool.Type))
+			continue
+		}
+		for _, inner := range tool.Tools {
+			names = append(names, namespacedName(tool.Name, inner.Name))
+		}
+	}
+	content, _ := json.Marshal(map[string]any{"loaded_tools": names})
+	return content
+}
+
+// mergeResponsesTools 把 additional 中的工具并入工具列表：同类同名的工具保留先出现的，同名命名空间合并其中的工具
 func mergeResponsesTools(tools, additional []responsesTool) []responsesTool {
 	merged := slices.Clone(tools)
 	for _, tool := range additional {
-		if !slices.ContainsFunc(merged, func(existing responsesTool) bool { return existing.Type == tool.Type && existing.Name == tool.Name }) {
+		index := slices.IndexFunc(merged, func(existing responsesTool) bool { return existing.Type == tool.Type && existing.Name == tool.Name })
+		switch {
+		case index < 0:
 			merged = append(merged, tool)
+		case tool.Type == "namespace":
+			merged[index].Tools = mergeResponsesTools(merged[index].Tools, tool.Tools)
 		}
 	}
 	return merged
@@ -1397,7 +1489,7 @@ func (o *responsesOutput) add(event antigravity.Event) (added []map[string]any) 
 		o.abandoned = len(o.items)
 	case antigravity.EventText:
 		if o.message == nil || !isLast(o.message) {
-			o.message = map[string]any{"id": o.itemID("msg_"), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": &outputText{}, "annotations": []any{}}}}
+			o.message = map[string]any{"id": o.itemID("msg_"), "type": "message", "status": "completed", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": &outputText{}, "annotations": []any{}, "logprobs": []any{}}}}
 			o.items = append(o.items, o.message)
 			added = append(added, o.message)
 		}
@@ -1548,7 +1640,7 @@ func responseShell(id string, created int64, status string, request responsesReq
 
 // rawJSONValue 解码 JSON 值，未给出时返回 defaultValue
 func rawJSONValue(raw json.RawMessage, defaultValue any) any {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return defaultValue
 	}
 	var value any
@@ -1586,13 +1678,19 @@ func responseFunctionCall(call antigravity.FunctionCall, tools []responsesTool) 
 		item["type"], item["actions"], item["pending_safety_checks"] = "computer_call", arguments.Actions, []any{}
 		return item
 	case "custom":
-		item["type"], item["name"], item["input"] = "custom_tool_call", call.Name, customToolInput(call.Arguments)
+		item["id"], item["type"], item["name"], item["input"] = "ctc_"+call.ID, "custom_tool_call", call.Name, customToolInput(call.Arguments)
+	case "tool_search":
+		item["id"], item["type"], item["execution"], item["arguments"] = "tsc_"+call.ID, "tool_search_call", "client", rawJSONValue(call.Arguments, map[string]any{})
+		return item
 	default:
 		item["type"], item["name"], item["arguments"] = "function_call", call.Name, string(call.Arguments)
 	}
 	if namespace := responsesNamespace(tools, call.Name); namespace != "" {
 		item["namespace"] = namespace
 		item["name"] = strings.TrimPrefix(call.Name, namespace+".")
+		if namespace == "collaboration" && item["type"] == "function_call" {
+			item["encrypted_function_args"] = []string{}
+		}
 	}
 	return item
 }
@@ -1786,7 +1884,7 @@ func (writer *responsesStreamWriter) added(item map[string]any) error {
 		writer.open = append(writer.open, item)
 		return writer.emit("response.content_part.added", map[string]any{
 			"item_id": item["id"], "output_index": index, "content_index": 0,
-			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}},
 		})
 	case item["type"] == "reasoning":
 		pending := maps.Clone(item)
@@ -1939,8 +2037,11 @@ func responsesError(err error) map[string]any {
 	return map[string]any{"code": responsesErrorCode(err), "message": retryMessage(publicErrorMessage(statusFromError(err), publicReason(err)), retryAfterSeconds(err))}
 }
 
-// responsesErrorCode 返回 Responses 失败响应 error.code 的枚举值：限流为 rate_limit_exceeded，请求内容被拒为 invalid_prompt，其余为 server_error
+// responsesErrorCode 返回 Responses 失败响应 error.code 的枚举值：上下文超限为 context_length_exceeded（Codex 据此自动压缩），限流为 rate_limit_exceeded，请求内容被拒为 invalid_prompt，其余为 server_error
 func responsesErrorCode(err error) string {
+	if contextOverflow(err) {
+		return "context_length_exceeded"
+	}
 	switch statusFromError(err) {
 	case http.StatusTooManyRequests:
 		return "rate_limit_exceeded"

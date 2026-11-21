@@ -21,11 +21,13 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { toast } from '@/components/ui/toast'
 import { keepAccounts, useImportAccounts } from '@/features/accounts/actions'
 import { accountsKey, loginFailuresKey, loginKey, loginsKey } from '@/features/accounts/queries'
 import { ImportAccountFiles } from '@/features/accounts/TransferDialog'
 import type { Login, Pairing } from '@/features/accounts/types'
-import { api } from '@/lib/api'
+import { validProxy } from '@/features/settings/schema'
+import { api, errorMessage } from '@/lib/api'
 import { isDesktop } from '@/lib/desktop'
 import { fill, serverText, useMessages } from '@/lib/i18n'
 import { useNow } from '@/lib/time'
@@ -62,6 +64,9 @@ function LoginProgress({ login, onRestart }: { login: Login; onRestart: () => vo
   const cancel = useMutation({
     mutationFn: () => cancelLogin(login.id),
     onSuccess: onRestart,
+    onError: (failure) => {
+      toast({ tone: 'error', title: failure.message })
+    },
   })
   const submit = useMutation({
     mutationFn: (value: string) =>
@@ -331,10 +336,13 @@ export function AddAccountDialog({
   const [open, setOpen] = useState(resume !== undefined)
   const [chosen, setChosen] = useState<Method | undefined>(resume?.mode)
   const [loginId, setLoginId] = useState(resume?.id)
+  const [proxyValue, setProxyValue] = useState('')
+  const proxy = proxyValue.trim()
+  const proxyValid = proxy === 'direct' || validProxy(proxy)
   const current = chosen ?? method ?? preferredMethod()
   const create = useMutation({
     mutationFn: (value: 'browser' | 'code') =>
-      api<Login>('/api/logins', { method: 'POST', json: { mode: value } }),
+      api<Login>('/api/logins', { method: 'POST', json: { mode: value, proxy } }),
     onSuccess: (login) => {
       client.setQueryData(loginKey(login.id), login)
       setLoginId(login.id)
@@ -439,9 +447,34 @@ export function AddAccountDialog({
           ) : (
             <div className="flex flex-col items-start gap-3">
               <p className="text-sm text-foreground-muted sm:hidden">{text.methods[current][1]}</p>
+              <div className="w-full">
+                <Field
+                  id="login-proxy"
+                  label={m.loginProxyLabel}
+                  description={m.proxyHint}
+                  error={proxyValid ? undefined : m.proxyInvalid}
+                >
+                  <Input
+                    id="login-proxy"
+                    value={proxyValue}
+                    onChange={(event) => {
+                      setProxyValue(event.target.value)
+                    }}
+                    placeholder="socks5://127.0.0.1:1080"
+                    spellCheck={false}
+                    autoComplete="off"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    aria-invalid={proxyValid ? undefined : true}
+                    aria-describedby={proxyValid ? 'login-proxy-description' : 'login-proxy-error'}
+                    className="font-mono"
+                  />
+                </Field>
+              </div>
               <Button
                 variant="primary"
                 loading={create.isPending}
+                disabled={!proxyValid}
                 onClick={() => {
                   const tab = isDesktop ? null : window.open('', '_blank')
                   create.mutate(current, {
@@ -525,7 +558,9 @@ export function LoginTasks() {
                   size="sm"
                   variant="ghost"
                   onClick={() => {
-                    void cancelLogin(login.id).catch(() => undefined)
+                    void cancelLogin(login.id).catch((error: unknown) => {
+                      toast({ tone: 'error', title: errorMessage(error) })
+                    })
                   }}
                 >
                   {m.loginCancel}

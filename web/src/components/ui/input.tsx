@@ -29,7 +29,7 @@ export function PasswordInput({
       <Input
         {...props}
         type={shown ? 'text' : 'password'}
-        className={twMerge('pr-10', className)}
+        className={twMerge('pr-control', className)}
       />
       <button
         type="button"

@@ -49,10 +49,11 @@ var (
 	projectNumber = regexp.MustCompile(`(?i)\b(consumer|project(?:[ _-]?(?:id|number))?)(\s*[:=]?\s*['"]?)[0-9]{6,}`)
 )
 
-// UpstreamError 表示 cloudcode 返回的非 2xx 响应或流中的 error 帧
+// UpstreamError 表示 cloudcode 返回的非 2xx 响应或流中的 error 帧，RetryAfter 为响应头 Retry-After 的原文
 type UpstreamError struct {
-	Status int
-	Body   []byte
+	Status     int
+	Body       []byte
+	RetryAfter string
 }
 
 // Error 返回状态码、上游 status、ErrorInfo reason 与 message，项目号、项目 ID 与邮箱替换为 ***；正文不是错误 JSON 时取正文
@@ -153,27 +154,35 @@ func (e *UpstreamError) ContextOverflow() (bool, int64, int64) {
 	return false, 0, 0
 }
 
-// RetryAt 返回上游错误给出的恢复时刻：RetryInfo 的 retryDelay，其次 ErrorInfo 的 quotaResetDelay 与 quotaResetTimeStamp；都没有时为零值
+// ContentRejected 判断错误是否为上游按请求内容拒绝：没有 ErrorInfo 与恢复时刻的 429，由系统提示或消息中的文字触发，同一请求重发仍被拒绝
+func (e *UpstreamError) ContentRejected() bool {
+	return e.Status == http.StatusTooManyRequests && e.Reason() == "" && e.RetryAt(time.Now()).IsZero()
+}
+
+// RetryAt 返回上游错误给出的恢复时刻：RetryInfo 的 retryDelay、ErrorInfo 的 quotaResetDelay、quotaResetTimeStamp 与响应头 Retry-After（秒数或 HTTP 日期）中最晚者；都没有时为零值
 func (e *UpstreamError) RetryAt(now time.Time) time.Time {
-	details := e.body().Error.Details
-	for _, key := range []string{"retryDelay", "quotaResetDelay", "quotaResetTimeStamp"} {
-		for _, detail := range details {
-			value := detail.Metadata[key]
-			if key == "retryDelay" {
-				value = detail.RetryDelay
+	var latest time.Time
+	if seconds, err := strconv.ParseInt(e.RetryAfter, 10, 64); err == nil {
+		latest = now.Add(time.Duration(seconds) * time.Second)
+	} else if at, err := http.ParseTime(e.RetryAfter); err == nil {
+		latest = at
+	}
+	for _, detail := range e.body().Error.Details {
+		for _, value := range []string{detail.RetryDelay, detail.Metadata["quotaResetDelay"], detail.Metadata["quotaResetTimeStamp"]} {
+			at, err := time.Parse(time.RFC3339, value)
+			if delay, parsed := time.ParseDuration(value); parsed == nil {
+				at, err = now.Add(delay), nil
 			}
-			if delay, err := time.ParseDuration(value); err == nil {
-				return now.Add(delay)
-			}
-			if at, err := time.Parse(time.RFC3339, value); err == nil {
-				return at
+			if err == nil && at.After(latest) {
+				latest = at
 			}
 		}
 	}
-	return time.Time{}
+	return latest
 }
 
-// Client 以官方客户端身份访问 cloudcode 的一个账户会话，account 为日志中的账户，http 为带 Bearer 的 HTTP/1.1 客户端，web 为头像与 tokeninfo 的 HTTP/1.1 客户端，h2 为插件市场目录与登录前 clearcut 的 HTTP/2 客户端，auth 为带 Bearer 的 HTTP/2 客户端，state 为伴随请求所需的账户状态，observe 接收每次成功读取的账户状态
+// Client 以官方客户端身份访问 cloudcode 的一个账户会话
+// 各 HTTP 客户端的分工与认证见 docs/protocol.md“请求身份”
 type Client struct {
 	account string
 	http    *http.Client
@@ -211,7 +220,8 @@ func (c *Client) notify(observed Observed) {
 	}
 }
 
-// NewClient 创建以账户设备档案与代理发出请求的客户端：cloudcode、userinfo、aicode、头像与 tokeninfo 走 http1Transport，插件市场目录与 clearcut 走 http2Transport，两者都按代理各用一个 Transport；cloudcode、userinfo、aicode 与 clearcut 的 Authorization 由 oauth2.Transport 注入
+// NewClient 创建以账户设备档案与代理发出请求的客户端
+// 传输层与认证配置见 docs/protocol.md“请求身份”
 func NewClient(account string, source oauth2.TokenSource, device Device, proxy Proxy) *Client {
 	plain := newProxyTransport(proxy, http1Transport)
 	multiplexed := newProxyTransport(proxy, http2Transport)
@@ -357,8 +367,6 @@ func (c *Client) Project() string {
 // Tier 表示 loadCodeAssist 返回的套餐
 type Tier struct {
 	ID               string   `json:"id"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
 	AvailableCredits []Credit `json:"availableCredits"`
 }
 
@@ -373,10 +381,16 @@ type Credit struct {
 type LoadCodeAssistResponse struct {
 	CurrentTier             Tier             `json:"currentTier"`
 	PaidTier                *Tier            `json:"paidTier"`
-	AllowedTiers            []Tier           `json:"allowedTiers"`
 	CloudAICompanionProject string           `json:"cloudaicompanionProject"`
-	GCPManaged              bool             `json:"gcpManaged"`
 	IneligibleTiers         []IneligibleTier `json:"ineligibleTiers,omitempty"`
+}
+
+// tier 返回付费套餐 ID，没有付费套餐时返回当前套餐 ID
+func (r LoadCodeAssistResponse) tier() string {
+	if r.PaidTier != nil {
+		return r.PaidTier.ID
+	}
+	return r.CurrentTier.ID
 }
 
 // IneligibleTier 表示账户不能使用的套餐及原因，如 RESTRICTED_AGE 的年龄验证
@@ -389,13 +403,8 @@ type IneligibleTier struct {
 
 // Userinfo 表示 Google 账户资料
 type Userinfo struct {
-	ID            string `json:"id"`
-	Email         string `json:"email"`
-	VerifiedEmail bool   `json:"verified_email"`
-	Name          string `json:"name"`
-	GivenName     string `json:"given_name"`
-	FamilyName    string `json:"family_name"`
-	Picture       string `json:"picture"`
+	Email   string `json:"email"`
+	Picture string `json:"picture"`
 }
 
 // UserInfoResponse 表示 fetchUserInfo 返回的设置与地区
@@ -413,6 +422,8 @@ type QuotaBucket struct {
 	Window            string  `json:"window"`
 	ResetTime         string  `json:"resetTime"`
 	RemainingFraction float64 `json:"remainingFraction"`
+	// Disabled 表示上游停用了这个桶
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // QuotaGroup 表示共享额度的一组模型
@@ -428,21 +439,21 @@ type QuotaSummary struct {
 	Description string       `json:"description"`
 }
 
-// Initialization 表示账户初始化取得的套餐、资料、设置、目录与额度
+// Initialization 表示账户初始化取得的套餐与设置
 type Initialization struct {
 	Assist   LoadCodeAssistResponse
-	User     Userinfo
 	Settings UserInfoResponse
-	Catalog  Catalog
-	Quota    QuotaSummary
 }
 
-// Initialize 按官方客户端登录后的请求与并发关系完成账户初始化：prod loadCodeAssist 之后 userinfo 与 daily loadCodeAssist 并发，userinfo 之后读头像，loadCodeAssist 之后 fetchUserInfo；第二轮 userinfo 与第二次 loadCodeAssist 并发，userinfo 之后读头像；第二次 loadCodeAssist 结束 42–51 ms 后 fetchUserInfo、listExperiments、retrieveUserQuotaSummary、fetchAvailableModels 与 fetchAdminControls 并发，listExperiments 结束 113–175 ms 后发 fetchConfig，再过 3–15 ms 记录实验对照，listExperiments 失败时都不发；其余四个请求全部结束后发 cascadeNuxes，目录之后在后台按 listRemotes 读取远程项目与会话列表；只有 loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
+// Initialize 按官方客户端登录后的请求顺序完成账户初始化
+// 并发关系、等待间隔与伴随请求见 docs/protocol.md“账户初始化”
+// 只有 loadCodeAssist 与 fetchAvailableModels 失败时返回错误
 func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 	var result Initialization
-	user := optional(func() (err error) {
-		if result.User, err = c.Userinfo(ctx); err == nil {
-			c.avatar(ctx, result.User.Picture)
+	user := optional(func() error {
+		info, err := c.Userinfo(ctx)
+		if err == nil {
+			c.avatar(ctx, info.Picture)
 		}
 		return err
 	})
@@ -454,15 +465,16 @@ func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 		result.Assist, err = c.LoadCodeAssist(ctx, EndpointDaily)
 		return err
 	}
-	catalog := func() (err error) {
-		if result.Catalog, err = c.FetchAvailableModels(ctx); err == nil {
-			c.recordCatalog(result.Catalog)
+	catalog := func() error {
+		models, err := c.FetchAvailableModels(ctx)
+		if err == nil {
+			c.recordCatalog(models)
 			c.listRemotes(context.WithoutCancel(ctx), loginLists)
 		}
 		return err
 	}
-	quota := optional(func() (err error) {
-		result.Quota, err = c.RetrieveUserQuotaSummary(ctx)
+	quota := optional(func() error {
+		_, err := c.RetrieveUserQuotaSummary(ctx)
 		return err
 	})
 	experiments := func() error {
@@ -533,7 +545,7 @@ func parallel(steps ...func() error) error {
 	return errors.Join(distinct...)
 }
 
-// avatar 以 HTTP/2 读取账户头像，请求不带 Authorization 与自定义请求头，结果不影响初始化
+// avatar 以 HTTP/1.1 读取账户头像，请求不带 Authorization 与自定义请求头，结果不影响初始化
 func (c *Client) avatar(ctx context.Context, picture string) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, picture, nil)
 	if err != nil {
@@ -557,12 +569,8 @@ func (c *Client) LoadCodeAssist(ctx context.Context, base string) (LoadCodeAssis
 	if err := c.post(ctx, base+"/v1internal:loadCodeAssist", assistRequest{Metadata: assistMetadata{IDEType: ideType}}, &response); err != nil {
 		return LoadCodeAssistResponse{}, err
 	}
-	tier := response.CurrentTier.ID
-	if response.PaidTier != nil {
-		tier = response.PaidTier.ID
-	}
 	c.mu.Lock()
-	c.project, c.state.tier = response.CloudAICompanionProject, tier
+	c.project, c.state.tier = response.CloudAICompanionProject, response.tier()
 	c.mu.Unlock()
 	c.notify(Observed{Assist: &response})
 	return response, nil
@@ -596,11 +604,15 @@ func (c *Client) FetchUserInfo(ctx context.Context) (UserInfoResponse, error) {
 	return response, nil
 }
 
-// RetrieveUserQuotaSummary 读取两组额度桶的剩余比例与重置时间
+// RetrieveUserQuotaSummary 读取两组额度桶的剩余比例与重置时间；周额度用完时同组的 5 小时桶不生效，去掉这样的桶与上游标为 disabled 的桶
 func (c *Client) RetrieveUserQuotaSummary(ctx context.Context) (QuotaSummary, error) {
 	var summary QuotaSummary
 	if err := c.post(ctx, c.base+"/v1internal:retrieveUserQuotaSummary", projectRequest{Project: c.Project()}, &summary); err != nil {
 		return QuotaSummary{}, err
+	}
+	for index, group := range summary.Groups {
+		weeklyOut := slices.ContainsFunc(group.Buckets, func(bucket QuotaBucket) bool { return bucket.Window == "weekly" && bucket.RemainingFraction <= 0 })
+		summary.Groups[index].Buckets = slices.DeleteFunc(group.Buckets, func(bucket QuotaBucket) bool { return bucket.Disabled || weeklyOut && bucket.Window == "5h" })
 	}
 	c.notify(Observed{Quota: &summary})
 	return summary, nil
@@ -671,7 +683,7 @@ func (c *Client) do(request *http.Request, out any) (err error) {
 		return err
 	}
 	if response.StatusCode/100 != 2 {
-		return &UpstreamError{Status: response.StatusCode, Body: data}
+		return &UpstreamError{Status: response.StatusCode, Body: data, RetryAfter: response.Header.Get("Retry-After")}
 	}
 	if out == nil {
 		return nil

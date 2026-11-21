@@ -141,26 +141,18 @@ func writeSchemaMap(buffer *bytes.Buffer, value any) error {
 
 // writeInt64String 把整数写成 protojson 的 int64 字符串
 func writeInt64String(buffer *bytes.Buffer, value any) error {
-	switch number := value.(type) {
-	case int64:
+	if number, ok := value.(int64); ok {
 		return writeJSONValue(buffer, strconv.FormatInt(number, 10))
-	case int:
-		return writeJSONValue(buffer, strconv.Itoa(number))
-	case json.Number:
-		return writeJSONValue(buffer, number.String())
-	case float64:
-		return writeJSONValue(buffer, strconv.FormatInt(int64(number), 10))
 	}
 	return writeJSONValue(buffer, value)
 }
 
 // writeJSONValue 以不转义 HTML 字符的 JSON 写出一个值
 func writeJSONValue(buffer *bytes.Buffer, value any) error {
-	encoder := json.NewEncoder(buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(value); err != nil {
+	data, err := marshal(value)
+	if err != nil {
 		return err
 	}
-	buffer.Truncate(buffer.Len() - 1)
+	buffer.Write(data)
 	return nil
 }

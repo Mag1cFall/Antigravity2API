@@ -87,7 +87,8 @@ var loadedEvents = []events.WindowEventType{
 	events.Linux.WindowLoadFinished,
 }
 
-// Run 取得单实例锁后启动服务，服务开始监听时打开窗口与托盘（隐藏启动只创建托盘，显示时创建窗口；Linux 桌面环境没有系统托盘时隐藏启动也打开窗口），阻塞到退出；已有实例时唤起它的窗口并退出本进程；Windows 缺少 WebView2 运行时时只创建托盘，管理端在默认浏览器中打开
+// Run 取得单实例锁后启动服务并运行桌面窗口与托盘，阻塞直到应用退出，平台行为见 docs/development.md「命令行版与桌面版」
+// 已有实例运行时唤起其窗口并退出；Windows 缺少 WebView2 时只创建托盘并在默认浏览器打开管理端
 func Run(options Options) error {
 	// page 是带桌面宿主参数的管理端地址，服务开始监听时写入
 	page := &url.URL{Scheme: "http", RawQuery: url.Values{shellQuery: {"desktop"}}.Encode()}

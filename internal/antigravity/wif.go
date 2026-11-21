@@ -3,8 +3,6 @@ package antigravity
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -49,36 +47,11 @@ type WIFLogin struct {
 
 // LoginWIF 在本机回环端口等待 auth.cloud.google 的授权回调，open 负责打开授权链接，授权码经 STS 换取 token
 func LoginWIF(ctx context.Context, provider string, proxy Proxy, open func(url string) error) (*WIFLogin, error) {
-	listener, err := net.Listen("tcp", "localhost:0")
+	token, err := loginLoopback(ctx, OAuthConfigWIF, proxy, open, oauth2.SetAuthURLParam("provider", provider))
 	if err != nil {
 		return nil, err
 	}
-	defer listener.Close()
-	config := OAuthConfigWIF
-	config.RedirectURL = fmt.Sprintf("http://localhost:%d/auth/callback", listener.Addr().(*net.TCPAddr).Port)
-	verifier := oauth2.GenerateVerifier()
-	state := randomState()
-	callbacks := make(chan callback, 1)
-	server := &http.Server{Handler: callbackHandler(state, callbacks)}
-	go server.Serve(listener)
-	defer server.Close()
-	link := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(verifier), oauth2.SetAuthURLParam("provider", provider))
-	if err := open(link); err != nil {
-		return nil, err
-	}
-	select {
-	case result := <-callbacks:
-		if result.err != nil {
-			return nil, result.err
-		}
-		token, err := config.Exchange(exchangeContext(ctx, proxy), result.code, oauth2.VerifierOption(verifier))
-		if err != nil {
-			return nil, err
-		}
-		return &WIFLogin{Token: token, Provider: provider}, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return &WIFLogin{Token: token, Provider: provider}, nil
 }
 
 // onboardRequest 为 onboardUser 的请求体
@@ -146,11 +119,7 @@ func (c *Client) BusinessInitialize(ctx context.Context) (Initialization, error)
 		return Initialization{}, err
 	}
 	if assist.CloudAICompanionProject == "" {
-		tier := assist.CurrentTier.ID
-		if assist.PaidTier != nil {
-			tier = assist.PaidTier.ID
-		}
-		if _, err := c.OnboardUser(ctx, tier); err != nil {
+		if _, err := c.OnboardUser(ctx, assist.tier()); err != nil {
 			return Initialization{}, err
 		}
 		if assist, err = c.LoadCodeAssist(ctx, EndpointBusiness); err != nil {
@@ -158,14 +127,12 @@ func (c *Client) BusinessInitialize(ctx context.Context) (Initialization, error)
 		}
 	}
 	result.Assist = assist
-	optional(func() (err error) {
-		result.User, err = c.Userinfo(ctx)
-		return err
-	})()
-	if result.Catalog, err = c.FetchAvailableModels(ctx); err != nil {
+	c.Userinfo(ctx)
+	catalog, err := c.FetchAvailableModels(ctx)
+	if err != nil {
 		return Initialization{}, err
 	}
-	c.recordCatalog(result.Catalog)
+	c.recordCatalog(catalog)
 	return result, nil
 }
 

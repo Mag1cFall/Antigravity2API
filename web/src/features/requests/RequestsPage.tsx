@@ -26,12 +26,34 @@ import { RecordsExport } from '@/features/requests/RecordsExport'
 import { RequestDetailDialog } from '@/features/requests/RequestDetailDialog'
 import { RequestStateBadge } from '@/features/requests/RequestStateBadge'
 import { RunningRequests } from '@/features/requests/RunningRequests'
-import type { RequestPage } from '@/features/requests/types'
+import type { RequestPage, RequestRecord } from '@/features/requests/types'
 import { api } from '@/lib/api'
 import { formatCompact, formatCost, formatDateTime, formatDuration } from '@/lib/format'
 import { fill, serverText, useI18n, useMessages } from '@/lib/i18n'
 import { changeParams } from '@/lib/params'
 import { useNow } from '@/lib/time'
+import type { Catalog } from '@/locales/zh-CN'
+
+// failureNote 返回失败记录在原文前的说明：按最后一次上游尝试的原因说明属于哪类问题，换过账户时另写已试的账户数；没有可说明的内容时为空
+function failureNote(record: RequestRecord, m: Catalog['requests']): string {
+  const last = record.attempts?.at(-1)
+  const reason =
+    record.error_code === 'MODEL_CAPACITY_EXHAUSTED'
+      ? m.failCapacity
+      : record.error_code === 'QUOTA_EXHAUSTED'
+        ? m.failQuota
+        : record.error_code === 'VALIDATION_REQUIRED'
+          ? m.failVerify
+          : record.upstream_status === 429 &&
+              record.error_code === 'RESOURCE_EXHAUSTED' &&
+              !last?.retry_delay
+            ? m.failRejected
+            : ''
+  const accounts = new Set(record.attempts?.map((attempt) => attempt.account)).size
+  return [reason, accounts > 1 ? fill(m.failTried, { count: accounts }) : '']
+    .filter(Boolean)
+    .join(' · ')
+}
 
 // RequestsPage 是请求记录：筛选、分页与详情，全部状态保存在 URL；事件流的初始快照到达后进行中的请求与记录一起显示；宽度小于 640px 时每个请求一张卡片
 export function RequestsPage() {
@@ -271,6 +293,9 @@ export function RequestsPage() {
                       </Tooltip>
                       {record.error && (
                         <div className="mt-1 line-clamp-2 text-xs break-words text-error-text">
+                          {failureNote(record, m) && (
+                            <span className="font-medium">{failureNote(record, m)} · </span>
+                          )}
                           {serverText(record.error)}
                         </div>
                       )}

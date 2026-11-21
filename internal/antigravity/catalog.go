@@ -36,30 +36,24 @@ type QuotaInfo struct {
 
 // CatalogModel 表示 fetchAvailableModels 返回的一个模型
 type CatalogModel struct {
-	ID                       string          `json:"-"`
-	Model                    string          `json:"model"`
-	DisplayName              string          `json:"displayName"`
-	APIProvider              string          `json:"apiProvider"`
-	ModelProvider            string          `json:"modelProvider"`
-	VertexModelID            string          `json:"vertexModelId"`
-	MaxOutputTokens          int64           `json:"maxOutputTokens"`
-	MaxTokens                int64           `json:"maxTokens"`
-	ThinkingLevel            int             `json:"thinkingLevel"`
-	ThinkingBudget           *int64          `json:"thinkingBudget"`
-	MinThinkingBudget        int64           `json:"minThinkingBudget"`
-	SupportsThinking         bool            `json:"supportsThinking"`
-	SupportsAdaptiveThinking bool            `json:"supportsAdaptiveThinking"`
-	SupportsImages           bool            `json:"supportsImages"`
-	SupportsVideo            bool            `json:"supportsVideo"`
-	SupportedMIMETypes       map[string]bool `json:"supportedMimeTypes"`
-	Recommended              bool            `json:"recommended"`
-	TagTitle                 string          `json:"tagTitle"`
-	TagDescription           string          `json:"tagDescription"`
-	IsInternal               bool            `json:"isInternal"`
-	RequiresLeadInGeneration bool            `json:"requiresLeadInGeneration"`
-	TabJumpPrintLineRange    bool            `json:"tabJumpPrintLineRange"`
-	Disabled                 bool            `json:"disabled"`
-	QuotaInfo                QuotaInfo       `json:"quotaInfo"`
+	ID                       string     `json:"-"`
+	Model                    string     `json:"model"`
+	DisplayName              string     `json:"displayName"`
+	APIProvider              string     `json:"apiProvider"`
+	ModelProvider            string     `json:"modelProvider"`
+	MaxOutputTokens          int64      `json:"maxOutputTokens"`
+	MaxTokens                int64      `json:"maxTokens"`
+	ThinkingLevel            int        `json:"thinkingLevel"`
+	ThinkingBudget           *int64     `json:"thinkingBudget"`
+	SupportsThinking         bool       `json:"supportsThinking"`
+	SupportsImages           bool       `json:"supportsImages"`
+	SupportsVideo            bool       `json:"supportsVideo"`
+	TagDescription           string     `json:"tagDescription"`
+	IsInternal               bool       `json:"isInternal"`
+	RequiresLeadInGeneration bool       `json:"requiresLeadInGeneration"`
+	TabJumpPrintLineRange    bool       `json:"tabJumpPrintLineRange"`
+	Disabled                 bool       `json:"disabled"`
+	QuotaInfo                QuotaInfo  `json:"quotaInfo"`
 	ModelExperiments         struct {
 		Experiments map[string]ModelExperiment `json:"experiments"`
 	} `json:"modelExperiments"`
@@ -88,7 +82,6 @@ type ModelSort struct {
 // Catalog 表示 fetchAvailableModels 的响应
 type Catalog struct {
 	Models                     map[string]CatalogModel `json:"models"`
-	DefaultAgentModelID        string                  `json:"defaultAgentModelId"`
 	AgentModelSorts            []ModelSort             `json:"agentModelSorts"`
 	ImageGenerationModelIDs    []string                `json:"imageGenerationModelIds"`
 	AudioTranscriptionModelIDs []string                `json:"audioTranscriptionModelIds"`
@@ -114,10 +107,11 @@ func (c *Client) FetchAvailableModels(ctx context.Context) (Catalog, error) {
 	return catalog, nil
 }
 
-// retiredLabel 匹配选择器外旧 Agent 条目显示名末尾的档位，这类条目请求时返回下线提示
-var retiredLabel = regexp.MustCompile(` \((Low|Medium|High|XHigh)\)$`)
+// TierLabel 匹配模型显示名末尾的思考档位后缀
+var TierLabel = regexp.MustCompile(` \((Low|Medium|High|XHigh)\)$`)
 
-// PublicModels 返回可请求的条目：先按选择器顺序列出未禁用的 Agent 模型，再列出图像生成与语音转写用途列表中的条目（目录没有对应模型条目时只有 ID），最后按 ID 列出其余非内部、未禁用、有输出上限的条目：有显示名且显示名不带档位的条目，以及没有显示名、要求预填续写且不打印行范围的 Tab 补全条目；套餐不含的模型在目录中为 disabled
+// PublicModels 返回账户可请求的模型条目
+// 排序与过滤规则见 docs/protocol.md“`fetchAvailableModels` 顶层字段”
 func (catalog Catalog) PublicModels() []CatalogModel {
 	var models []CatalogModel
 	listed := make(map[string]bool)
@@ -158,7 +152,7 @@ func (catalog Catalog) PublicModels() []CatalogModel {
 		case model.DisplayName == "" && model.RequiresLeadInGeneration && !model.TabJumpPrintLineRange:
 			model.Kind = KindTab
 			others = append(others, model)
-		case model.DisplayName != "" && !retiredLabel.MatchString(model.DisplayName):
+		case model.DisplayName != "" && !TierLabel.MatchString(model.DisplayName):
 			others = append(others, model)
 		}
 	}

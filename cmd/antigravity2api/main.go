@@ -31,6 +31,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/auth"
 	"github.com/Mag1cFall/Antigravity2API/internal/config"
 	"github.com/Mag1cFall/Antigravity2API/internal/logging"
+	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 	"github.com/Mag1cFall/Antigravity2API/internal/webui"
@@ -192,7 +193,7 @@ func openAdmin(link string) {
 	}
 }
 
-// loginCommand 完成 Google 登录并把账户加入本地账户库或远程服务
+// loginCommand 完成 Google 登录并把账户加入本地账户库或远程服务，--proxy 为本次登录的代理并绑定到该账户
 func loginCommand(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
 	var overrides config.Overrides
@@ -205,6 +206,11 @@ func loginCommand(ctx context.Context, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	bound := strings.TrimSpace(overrides.Proxy)
+	overrides.Proxy = ""
+	if strings.Contains(bound, ",") || (bound != proxypool.Direct && config.ValidateProxy(bound) != nil) {
+		return errors.New("login 的 --proxy 是本次登录并绑定到该账户的代理，只接受一个 http、https 或 socks5 URL，或 direct")
+	}
 	if *cloud && (*remote != "" || *code) {
 		return errors.New("--cloud 在本机以浏览器登录并写入本机账户库，不能与 --remote、--code 同时使用")
 	}
@@ -216,6 +222,9 @@ func loginCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	proxy := proxyOf(liveOf(cfg))
+	if bound != "" {
+		proxy = proxypool.Fixed(bound)
+	}
 	device := antigravity.NewLoginDevice()
 	if *cloud {
 		login, err := antigravity.LoginWIF(ctx, *provider, proxy, func(link string) error {
@@ -230,7 +239,7 @@ func loginCommand(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		account, err := store.AddWIF(ctx, login, device)
+		account, err := store.AddWIF(ctx, login, device, bound)
 		if err != nil {
 			return err
 		}
@@ -255,13 +264,13 @@ func loginCommand(ctx context.Context, args []string) error {
 		return err
 	}
 	if *remote != "" {
-		return pair(ctx, *remote, *token, app.PairingUpload{Token: *authorized, Device: device})
+		return pair(ctx, *remote, *token, app.PairingUpload{Token: *authorized, Device: device, Proxy: bound})
 	}
 	store, err := auth.Open(cfg.AuthDir, proxy)
 	if err != nil {
 		return err
 	}
-	account, err := store.AddWithDevice(ctx, authorized, device)
+	account, err := store.AddWithDevice(ctx, authorized, device, bound)
 	if err != nil {
 		return err
 	}

@@ -60,7 +60,7 @@ export const messages: Catalog = {
     refreshQuotaOf: '{email}의 할당량 새로고침',
     quotaRefreshed: '{email}의 할당량을 새로고침했습니다',
     quotaRefreshFailed: '{email}의 할당량을 읽지 못했습니다: {message}',
-    search: '이메일, 라벨 또는 프로젝트 검색',
+    search: '이메일, 라벨, 프로젝트 또는 오류 검색',
     filter: '상태별 필터',
     all: '전체',
     ready: '준비됨',
@@ -129,6 +129,7 @@ export const messages: Catalog = {
     proxyDescription:
       '이 계정의 토큰, 프로필, 생성 및 부수 요청은 모두 이 프록시를 거칩니다. 저장하면 계정을 다시 초기화합니다.',
     proxyLabel: '프록시 주소',
+    loginProxyLabel: '이번 로그인과 이 계정에 사용할 프록시',
     proxyHint:
       'HTTP, HTTPS 또는 SOCKS5이며 user:pass@를 포함할 수 있습니다. 예: socks5://user:pass@127.0.0.1:1080. direct를 입력하면 직접 연결하고, 비워 두면 설정의 업스트림 프록시를 사용합니다. 비밀번호는 xxxxx로 표시됩니다.',
     proxyInvalid:
@@ -479,6 +480,9 @@ export const messages: Catalog = {
     editKeyHint:
       '직접 key를 입력하거나 무작위로 생성된 값을 사용할 수 있습니다. 수정하면 이전 값을 쓰던 클라이언트는 새 값으로 바꿔야 합니다.',
     keyValue: 'Key',
+    keyName: '이름',
+    keyNameHint: '연동, 사용량, 요청 페이지에서 key와 함께 표시되어 용도를 구분할 수 있습니다.',
+    errKeyName: '이름에는 쉼표나 콜론을 넣을 수 없습니다',
     keyAccounts: '사용할 계정',
     keyAccountsHint:
       '선택한 계정만 이 key가 담긴 요청을 처리합니다. 아무것도 선택하지 않으면 모든 계정을 사용합니다.',
@@ -504,6 +508,7 @@ export const messages: Catalog = {
       '클라이언트와 모델을 고르고 설정을 복사하면 바로 사용할 수 있습니다. 모델은 계정의 실시간 목록에서 가져옵니다',
     clientLabel: '클라이언트',
     model: '모델',
+    tierFable: 'Fable용 모델',
     tierOpus: 'Opus용 모델',
     tierSonnet: 'Sonnet용 모델',
     tierHaiku: 'Haiku용 모델',
@@ -524,7 +529,7 @@ export const messages: Catalog = {
       '모델 목록이 비어 있습니다. 계정을 추가하면 모델을 고를 수 있으며, 설정에는 우선 <모델 ID>를 자리표시자로 넣습니다',
     modelPlaceholder: '<모델 ID>',
     clientClaude:
-      'Anthropic의 터미널 코딩 에이전트. Anthropic Messages로 연결하며 Opus, Sonnet, Haiku 등급마다 모델을 따로 지정할 수 있습니다',
+      'Anthropic의 터미널 코딩 에이전트. Anthropic Messages로 연결하며 Fable, Opus, Sonnet, Haiku 등급마다 모델을 따로 지정할 수 있습니다',
     clientCodex: 'OpenAI의 터미널 코딩 에이전트. OpenAI Responses로 연결합니다',
     clientOpencode: '오픈 소스 터미널 코딩 에이전트. 설정에 모든 채팅 모델을 나열합니다',
     clientOpenclaw: '오픈 소스 개인 비서 에이전트. 설정 파일에 사용자 지정 제공자를 추가합니다',
@@ -737,6 +742,13 @@ export const messages: Catalog = {
     now: '지금',
   },
   requests: {
+    failCapacity:
+      'Google에 지금 이 모델의 여유 용량이 없습니다. 잠시 후 다시 시도하거나 다른 모델을 사용하세요',
+    failQuota: '계정 할당량을 모두 사용했습니다. 초기화 후 다시 사용할 수 있습니다',
+    failVerify: '계정을 먼저 Google에서 인증해야 합니다',
+    failRejected:
+      '업스트림이 요청 내용을 거부했습니다. 대개 시스템 프롬프트의 한 문장 때문이며 할당량 문제가 아닙니다',
+    failTried: '계정 {count}개 시도',
     pageTitle: '요청',
     tabs: '요청 보기',
     tabRecords: '기록',
@@ -756,7 +768,7 @@ export const messages: Catalog = {
     allModels: '모든 모델',
     account: '계정',
     allAccounts: '모든 계정',
-    search: '요청 ID, 응답 ID, cascade 또는 오류 검색',
+    search: '요청 ID, 응답 ID, 대화 ID 또는 오류 검색',
     export: 'CSV 내보내기',
     exportEmpty: '내보낼 요청이 없습니다',
     exportFailed: '요청 기록을 불러오지 못해 내보낼 수 없습니다',
@@ -951,7 +963,6 @@ export const messages: Catalog = {
       '각 사용자 메시지를 이 형식으로 보내며, {{.Text}} 자리에 메시지 원문이 들어갑니다. 비워 두면 그대로 보냅니다.',
     templateLoad: '프리셋 불러오기',
     templateInsert: '삽입',
-    templateSections: '공식 섹션',
     templateVariables: '변수',
     templateChars: '예시 데이터 대입 시 {chars}자',
     templateError: '템플릿 오류: {message}',
@@ -1165,9 +1176,12 @@ export const messages: Catalog = {
     confirmHint:
       '{version} 릴리스 패키지를 다운로드하고 SHA-256을 확인한 뒤 프로그램을 교체하고 다시 시작합니다. 새 버전이 준비되면 페이지를 자동으로 새로 고칩니다.',
     confirm: '업데이트',
+    releasePage: 'GitHub 릴리스 페이지',
     cancel: '취소',
     restarting:
       '{version}(으)로 다시 시작하는 중입니다. 새 버전이 준비되면 페이지를 자동으로 새로 고칩니다',
+    restartStalled:
+      '새 버전이 1분 안에 시작되지 않았습니다. Antigravity2API를 다시 열면 실행된 뒤 이 페이지가 자동으로 새로 고쳐집니다. 그래도 시작되지 않으면 {path}의 로그를 확인하세요',
     downloading: '{version} 다운로드 중',
     verifying: '{version} 패키지 확인 중',
     installing: '프로그램 교체 중',
@@ -1290,9 +1304,9 @@ export const messages: Catalog = {
     pickAll: '이 폴더의 파일 모두 선택',
     pickNone: '이 폴더의 선택 해제',
     folder: '저장할 폴더',
-    folderRemote: '서비스를 실행하는 컴퓨터의 폴더에 저장',
-    folderRemoteHint:
-      '다른 컴퓨터에서 관리 화면에 접속 중이므로 파일은 Antigravity2API를 실행하는 컴퓨터에 저장됩니다. 지금 사용하는 컴퓨터에 저장하려면 [내용 복사]를 눌러 텍스트 파일에 붙여넣으세요.',
+    download: '다운로드',
+    downloadHint:
+      '다른 컴퓨터에서 관리 화면에 접속 중이므로 브라우저가 {name}을(를) 지금 사용하는 컴퓨터에 다운로드합니다.',
     save: '저장',
     copy: '내용 복사',
     copied: '복사됨',

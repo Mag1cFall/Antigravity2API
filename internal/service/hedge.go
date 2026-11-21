@@ -51,38 +51,33 @@ func (stats *firstEventStats) observe(model string, at time.Time, wait time.Dura
 	stats.samples[model] = samples[max(0, len(samples)-firstEventSampleLimit):]
 }
 
-// p95 按最近秩法返回模型 firstEventSampleAge 内样本的 p95 与样本数，没有样本时 p95 为 0
-func (stats *firstEventStats) p95(model string, now time.Time) (time.Duration, int) {
+// nearestRank 按最近秩法返回模型 firstEventSampleAge 内样本的 95 百分位与样本数，没有样本时为零值
+func nearestRank[T cmp.Ordered](stats *firstEventStats, model string, now time.Time, pick func(firstEventSample) T) (T, int) {
 	stats.mu.Lock()
-	var waits []time.Duration
+	var values []T
 	for _, sample := range stats.samples[model] {
 		if now.Sub(sample.at) <= firstEventSampleAge {
-			waits = append(waits, sample.wait)
+			values = append(values, pick(sample))
 		}
 	}
 	stats.mu.Unlock()
-	if len(waits) == 0 {
-		return 0, 0
+	if len(values) == 0 {
+		var zero T
+		return zero, 0
 	}
-	slices.Sort(waits)
-	return waits[(len(waits)*95+99)/100-1], len(waits)
+	slices.Sort(values)
+	return values[(len(values)*95+99)/100-1], len(values)
 }
 
-// size 按最近秩法返回模型 firstEventSampleAge 内样本上游请求正文字节数的 p95，没有样本时为 0
+// p95 返回模型 firstEventSampleAge 内首字等待样本的 p95 与样本数
+func (stats *firstEventStats) p95(model string, now time.Time) (time.Duration, int) {
+	return nearestRank(stats, model, now, func(sample firstEventSample) time.Duration { return sample.wait })
+}
+
+// size 返回模型 firstEventSampleAge 内样本上游请求正文字节数的 p95
 func (stats *firstEventStats) size(model string, now time.Time) int {
-	stats.mu.Lock()
-	var sizes []int
-	for _, sample := range stats.samples[model] {
-		if now.Sub(sample.at) <= firstEventSampleAge {
-			sizes = append(sizes, sample.bytes)
-		}
-	}
-	stats.mu.Unlock()
-	if len(sizes) == 0 {
-		return 0
-	}
-	slices.Sort(sizes)
-	return sizes[(len(sizes)*95+99)/100-1]
+	limit, _ := nearestRank(stats, model, now, func(sample firstEventSample) int { return sample.bytes })
+	return limit
 }
 
 // seed 按时间顺序从请求账本记录补入原请求样本：被备用请求取代的原请求取其已等时长与正文字节数，其余有首字的记录取首字耗时减排队与最后一次尝试的正文字节数（没有尝试时为 0）
@@ -136,7 +131,8 @@ func (s *Service) FirstEventLatencies() []FirstEventLatency {
 	return latencies
 }
 
-// hedgeDelay 返回上游正文为 bytes 字节的原请求等待首字多久后发起备用请求；后台响应、FIRST_EVENT_HEDGE 为 off、模型不在 FIRST_EVENT_HEDGE_MODELS 中、auto 的样本少于 firstEventMinSamples 或 bytes 超过样本正文字节数的 p95 时第二个返回值为 false
+// hedgeDelay 返回上游正文为 bytes 字节的原请求发起备用请求前的首字等待阈值
+// 后台响应、关闭或未命中配置、样本不足或正文超限时返回 false，规则见 docs/development.md“失败与换号”
 func (s *Service) hedgeDelay(cfg *config.Config, request antigravity.GenerateRequest, model antigravity.CatalogModel, bytes int) (time.Duration, bool) {
 	if request.Background || !listed(cfg.FirstEventHedgeModels, model) {
 		return 0, false
@@ -180,7 +176,8 @@ type hedgePlan struct {
 	start func() *upstreamStream
 }
 
-// await 等待原请求的首个上游事件，正常开始的原请求的首字等待记为样本；plan 不为 nil 时原请求到阈值仍没有首个事件则发起一个备用请求，没有空闲账户或已有 hedgeLimit 个备用请求在进行时每 hedgeRecheck 再试；先返回首个事件的一方胜出、另一方挂为它的 standby，一方失败而另一方仍在等待时交给 failed 处理，一方的首个事件为错误而另一方仍在等待时取代它；返回胜出的一方，两方都失败时返回后失败的一方；备用请求计数在只剩一方时减去，留有 standby 时由 relay 处理 standby 后减去
+// await 等待原请求的首个上游事件，达到阈值时发起备用请求并返回胜出的一方
+// 另一方仍在等待时挂为 standby，计数由 relay 在处理 standby 后减去；规则见 docs/development.md“失败与换号”
 func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedgePlan, failed func(*upstreamStream)) *upstreamStream {
 	model := primary.lease.Model.ID
 	var check <-chan time.Time

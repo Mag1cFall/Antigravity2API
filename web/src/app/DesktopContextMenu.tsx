@@ -1,5 +1,5 @@
 import { ClipboardPaste, Copy, Scissors, TextSelect } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import {
   DropdownMenu,
@@ -55,7 +55,6 @@ function replaceSelection(
 export function DesktopContextMenu() {
   const m = useMessages('app')
   const [target, setTarget] = useState<Target>()
-  const anchor = useRef<HTMLSpanElement>(null)
   useEffect(() => {
     const onContextMenu = (event: MouseEvent) => {
       event.preventDefault()
@@ -108,7 +107,6 @@ export function DesktopContextMenu() {
     >
       <DropdownMenuTrigger asChild>
         <span
-          ref={anchor}
           aria-hidden
           tabIndex={-1}
           className="pointer-events-none fixed size-0"

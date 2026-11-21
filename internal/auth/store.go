@@ -18,6 +18,8 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
+	"github.com/Mag1cFall/Antigravity2API/internal/robustio"
 )
 
 const (
@@ -233,14 +235,24 @@ func (s *Store) Token(id string) *oauth2.Token {
 	return s.tokens[id]
 }
 
-// AddWithDevice 以个人账户登录得到的 token 写入账户，device 为登录开始时生成的设备档案
-func (s *Store) AddWithDevice(ctx context.Context, token *oauth2.Token, device antigravity.Device) (*Account, error) {
-	return s.add(ctx, token, identity{device: device}, s.proxy, func(*Account) {})
+// AddWithDevice 以个人账户登录得到的 token 写入账户，device 为登录开始时生成的设备档案，proxy 见 loginProxy
+func (s *Store) AddWithDevice(ctx context.Context, token *oauth2.Token, device antigravity.Device, proxy string) (*Account, error) {
+	via, bind := s.loginProxy(proxy)
+	return s.add(ctx, token, identity{device: device}, via, bind)
 }
 
-// AddWIF 以企业 WIF 登录结果写入账户，记认证方式与 provider
-func (s *Store) AddWIF(ctx context.Context, login *antigravity.WIFLogin, device antigravity.Device) (*Account, error) {
-	return s.add(ctx, login.Token, identity{device: device, method: antigravity.AuthMethodEnterprise, provider: login.Provider}, s.proxy, func(*Account) {})
+// AddWIF 以企业 WIF 登录结果写入账户，记认证方式与 provider，proxy 见 loginProxy
+func (s *Store) AddWIF(ctx context.Context, login *antigravity.WIFLogin, device antigravity.Device, proxy string) (*Account, error) {
+	via, bind := s.loginProxy(proxy)
+	return s.add(ctx, login.Token, identity{device: device, method: antigravity.AuthMethodEnterprise, provider: login.Provider}, via, bind)
+}
+
+// loginProxy 返回读取邮箱所用的代理与写入前对账户的修改：proxy 为本次登录指定的代理（URL 或 direct），非空时经它读取邮箱并绑定到账户，为空时用添加账户的代理且不改账户代理
+func (s *Store) loginProxy(proxy string) (antigravity.Proxy, func(*Account)) {
+	if proxy == "" {
+		return s.proxy, func(*Account) {}
+	}
+	return proxypool.Fixed(proxy), func(account *Account) { account.Proxy = proxy }
 }
 
 // identity 为一次登录或导入的账户身份：email 为已知的邮箱，device 为登录时的设备档案，method 与 provider 为认证方式与 WIF provider
@@ -251,7 +263,8 @@ type identity struct {
 	provider string
 }
 
-// add 以邮箱为 ID 写入 token 与资料：邮箱为空时取 id_token 载荷，再没有时以该认证方式的 OAuth 客户端经 proxy 请求 userinfo；设备档案带 installation_id 时用它补齐用户名与目录，否则新账户生成设备档案；已有账户改用本次的认证方式与 provider、保留其余字段，refresh token 变化时清空项目，服务据此按登录序列初始化；写入前以 change 修改账户；项目、套餐与地区由服务初始化账户时写回
+// add 以邮箱为 ID 写入账户资料与 token，邮箱获取与已有账户合并规则见 docs/development.md「添加账户」
+// 写入前调用 change 修改账户；from.device 带 installation_id 时补齐邮箱对应的用户名与目录，否则为新账户生成设备档案
 func (s *Store) add(ctx context.Context, token *oauth2.Token, from identity, proxy antigravity.Proxy, change func(*Account)) (*Account, error) {
 	email := cmp.Or(from.email, tokenEmail(token))
 	if email == "" {
@@ -356,5 +369,5 @@ func writeJSON(path string, value any) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(temp.Name(), path)
+	return robustio.Rename(temp.Name(), path)
 }

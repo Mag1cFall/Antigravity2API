@@ -588,11 +588,11 @@ function TemplateEditor({
   id: string
   label: string
   hint: string
-  rows: number
+  rows?: number
   value: string
   onChange: (value: string) => void
   presets: { label: string; text: string }[]
-  groups: { label: string; items: Insert[] }[]
+  groups?: { label: string; items: Insert[] }[]
   status: string
   error: string | undefined
   locked: boolean
@@ -639,7 +639,7 @@ function TemplateEditor({
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          {children === undefined && <InsertMenu groups={groups} onInsert={insert} />}
+          {children === undefined && groups && <InsertMenu groups={groups} onInsert={insert} />}
         </div>
       </div>
       {children ?? (
@@ -751,7 +751,6 @@ export function PromptTemplateFields({
         id="SYSTEM_PROMPT_TEMPLATE"
         label={m.templateSystem}
         hint={m.templateSystemHint}
-        rows={14}
         value={system}
         onChange={onSystemChange}
         presets={[
@@ -759,7 +758,6 @@ export function PromptTemplateFields({
           { label: m.promptMedium, text: tiers.medium.system },
           { label: m.promptAggressive, text: tiers.aggressive.system },
         ]}
-        groups={[]}
         status={system.trim() === '' ? m.templateSystemEmpty : chars(preview.data?.system)}
         error={failure('system')}
         locked={systemLocked}

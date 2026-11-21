@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,16 +120,8 @@ func NewHandler(service antigravity.Service, options Options) http.Handler {
 	}
 	public.HandleFunc("/", writeRouteNotFound)
 
-	keys := func() []string {
-		var keys []string
-		for _, key := range options.APIKeys() {
-			if key = strings.TrimSpace(key); key != "" {
-				keys = append(keys, key)
-			}
-		}
-		return keys
-	}
-	handler := corsMiddleware(bodyLimitMiddleware(browserOriginMiddleware(keys, authMiddleware(keys, waitLaunchMiddleware(options.WaitLaunch, withFiles(s.files, public))))))
+	keys := options.APIKeys
+	handler := corsMiddleware(bodyLimitMiddleware(browserOriginMiddleware(keys, authMiddleware(keys, decodeMiddleware(waitLaunchMiddleware(options.WaitLaunch, withFiles(s.files, public)))))))
 	root := http.NewServeMux()
 	root.Handle("/v1/", handler)
 	root.Handle("/v1beta/", handler)

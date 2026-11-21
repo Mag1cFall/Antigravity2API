@@ -35,7 +35,7 @@ func harmonyTokens(prompt string) int64 {
 	return total + Text(antigravity.ProviderOpenAI, prompt[last:])
 }
 
-// harmonyPrompt 按 gpt-oss 聊天模板（openai/gpt-oss-120b chat_template.jinja）渲染上游请求：先渲染 system 消息，带系统指令或函数声明时渲染 developer 消息；contents 依次渲染为 user、assistant 回答、函数调用与函数结果消息，一条 content 中的多个函数调用只渲染第一个，多个函数结果以换行连接第一个之后的各结果；最后以回答开头结束
+// harmonyPrompt 按 openai/gpt-oss-120b 聊天模板把上游请求渲染为 harmony 提示，渲染规则见 docs/protocol.md「非流式与计数」
 func harmonyPrompt(request antigravity.WireRequest) string {
 	var prompt strings.Builder
 	var declarations []antigravity.WireFunctionDeclaration

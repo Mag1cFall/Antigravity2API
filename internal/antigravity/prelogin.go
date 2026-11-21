@@ -39,7 +39,7 @@ type preloginBatch struct {
 	sent uint64
 }
 
-// preloginTemplates 为各系统的登录前模板，登录只在本机系统上发起，故只含 windows 与 linux
+// preloginTemplates 为 windows 与 linux 的登录前模板，macOS 设备不发登录前请求
 var preloginTemplates = map[string]preloginTemplate{
 	"windows": loadPreloginTemplate("windows"),
 	"linux":   loadPreloginTemplate("linux"),
@@ -68,7 +68,8 @@ func loadPreloginTemplate(system string) preloginTemplate {
 		data := gunzip(gz)
 		batch := preloginBatch{data: data}
 		var source uint64
-		for _, node := range pbParse(data) {
+		nodes, _ := pbParse(data)
+		for _, node := range nodes {
 			switch {
 			case node.num == 2 && node.wire == 0:
 				source = node.u
@@ -97,19 +98,23 @@ func paramInstall(event []byte) []byte {
 
 // preloginInstall 从日志源 327 的一条事件中取出 ErrorTraceMetadata 里的 installation_id
 func preloginInstall(event []byte) []byte {
-	for _, ext := range pbParse(event) {
+	exts, _ := pbParse(event)
+	for _, ext := range exts {
 		if ext.num != 6 {
 			continue
 		}
-		for _, meta := range pbParse(ext.raw) {
+		metas, _ := pbParse(ext.raw)
+		for _, meta := range metas {
 			if meta.num != 18 {
 				continue
 			}
-			for _, inner := range pbParse(meta.raw) {
+			inners, _ := pbParse(meta.raw)
+			for _, inner := range inners {
 				if inner.num != 2 {
 					continue
 				}
-				for _, field := range pbParse(inner.raw) {
+				fields, _ := pbParse(inner.raw)
+				for _, field := range fields {
 					if field.num == 5 && field.wire == 2 {
 						return field.raw
 					}
@@ -217,7 +222,6 @@ type Prelogin struct {
 // NewPrelogin 以登录开始的设备档案创建登录前虚拟进程，日志中的账户记为 login
 func NewPrelogin(device Device, proxy Proxy) *Prelogin {
 	client := NewClient("login", staticToken{}, device, proxy)
-	client.SetHub(HubState{}, nil)
 	return &Prelogin{client: client, browser: []byte(uuid.NewString())}
 }
 

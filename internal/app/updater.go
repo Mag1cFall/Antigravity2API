@@ -99,7 +99,7 @@ type updaterDial[T any] struct {
 	err  error
 }
 
-// get 经 proxy（为空时直连）以 headers 的顺序发出 GET，返回状态码与响应正文：直连且记住了 h3 替代服务时先发出 QUIC Initial 航班，再使用现有 HTTP/2 连接或开始 TCP，先就绪的连接承载请求，QUIC 连接在对端确认握手后才算就绪；落后的 QUIC 连接照常完成握手并空闲到超时，落后的 TCP 连接照常完成 TLS 握手后不发 HTTP/2 前言，闲置到下一次读取时关闭；其余情况在现有或新建的 HTTP/2 连接上发出
+// get 经 proxy（为空时直连）以 headers 的顺序发出 GET 并返回状态码与正文，HTTP/2 与 HTTP/3 竞速规则见 docs/reverse-engineering.md「官方新版本对齐」
 func (u *updater) get(ctx context.Context, target *url.URL, headers [][2]string, proxy *url.URL) (int, []byte, error) {
 	via := ""
 	if proxy != nil {

@@ -23,14 +23,14 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 - **Claude compatible**: `/v1/messages`, `/v1/messages/count_tokens`
 - **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens`, Files API, Interactions API, Live API
 - **Official client identity**: plain Go HTTP that reaches Cloud Code with the TLS and HTTP shape, User-Agent, request envelope, initialization order and companion requests of the official Antigravity client; every account uses the device profile generated when it was added
-- **Agent models**: every Gemini, Claude and GPT-OSS Agent model, published from each account's live catalog; thinking parameters map to the Low, Medium and High thinking levels of the same family
+- **Agent models**: every Gemini, Claude and GPT-OSS Agent model, published from each account's live catalog; thinking parameters map to the Low, Medium, High and XHigh thinking levels of the same family
 - **Streaming**: text, thinking and thought signatures stream incrementally; tool calls, parallel function calls, image and PDF input work across the four protocols OpenAI Chat, OpenAI Responses, Claude Messages and Gemini
 - **Images and speech**: the image generation model of the catalog generates and edits images, returned by these four protocols and the OpenAI Images endpoints; the speech transcription model of the catalog transcribes audio over the channel of the official voice input: the OpenAI transcription and translation endpoints use it when `model` is omitted, and Chat `input_audio` and Gemini audio input are transcribed by it when the selected model is the transcription model, while any other selected model receives the audio directly
 - **Files**: the OpenAI, Claude and Gemini Files APIs store files in `RUNTIME_DIR/files/`, and file references in requests are inlined before sending
 - **System prompt tiers**: full, medium, aggressive and custom tiers control how much of the official system prompt and user message wrapping is kept
 - **Multi-account scheduling**: accounts are picked by account priority and the Gemini and third-party quota groups, requests rotate across accounts of the same priority, and a conversation stays on one account; selected models can prefer lower-plan accounts; exhausted quota cools down until reset, rate limits, capacity errors and server errors cool down or switch accounts by reason; account quota refreshes on a schedule, and the Accounts page can refresh all accounts or one at any time
 - **Token counting**: input tokens are counted locally per model family; GPT-OSS prompts are rendered with the official chat template before counting, and Gemini and Claude counts are calibrated with the upstream usage of the same conversation
-- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings; account details list the models the account can use and the other accounts that share its weekly quota (usually the same Google One family group), usage and request records can be viewed over preset or custom time ranges, the trend chart shows each period on hover, and exported files are saved to a folder on the computer running the service; in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German, with service logs and error messages shown in the interface language; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
+- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings; account details list the models the account can use and the other accounts that share its weekly quota (usually the same Google One family group), usage and request records can be viewed over preset or custom time ranges, the trend chart shows each period on hover, and exported files are saved to a chosen folder when the admin UI is opened on the computer running the service, and downloaded by the browser when it is opened from another computer; in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German, with service logs and error messages shown in the interface language; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
 - **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores the account, model, tokens, cache hits and timing of every request and estimates cost with official API prices
 - **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing, account JSON export and import (all, selected or single accounts; the accounts in a file are listed and checked before import; accepts the account files of Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
 - **Proxy**: global and per-account HTTP, HTTPS and SOCKS5 proxies; the system proxy is used when none is set
@@ -39,7 +39,13 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 
 | Model ID | Name | Thinking levels |
 | --- | --- | --- |
+| `gemini-4-neon` | Gemini 4 Neon | Low, Medium, High, XHigh |
+| `gemini-4-carbon` | Gemini 4 Carbon | Low, Medium, High |
 | `gemini-4-argon` | Gemini 4 Argon | Low, Medium, High |
+| `gemini-4-hydrogen` | Gemini 4 Hydrogen | Low, Medium, High, XHigh |
+| `gemini-pro-orchestrator-neon` | Orchestrator (Neon) | — |
+| `gemini-pro-orchestrator` | Orchestrator (Carbon) | — |
+| `gemini-pro-orchestrator-argon` | Orchestrator (Argon) | — |
 | `gemini-3.8-flash` | Gemini 3.8 Flash | Low, Medium, High |
 | `claude-opus-5-5` | Claude Opus 5.5 | Low, Medium, High |
 | `claude-sonnet-5-5` | Claude Sonnet 5.5 | Low, Medium, High |
@@ -47,7 +53,7 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 
 The service reads the Antigravity model catalog of every account at startup and saves it to `RUNTIME_DIR/catalogs/`; `/v1/models` is authoritative once it runs:
 
-- The table lists the Agent models of the official model picker; each entry carries its thinking levels and default level: `supported_reasoning_levels` and `default_reasoning_level` in the OpenAI format, `thinking_levels` and `default_thinking_level` in the Anthropic format, `thinkingLevels` and `defaultThinkingLevel` in the Gemini format
+- The table lists the Agent models of the official model picker; entries with thinking levels carry their available and default levels: `supported_reasoning_levels` and `default_reasoning_level` in the OpenAI format, `thinking_levels` and `default_thinking_level` in the Anthropic format, `thinkingLevels` and `defaultThinkingLevel` in the Gemini format
 - The image generation model (for example `gemini-3.1-flash-image`) and the speech transcription model (for example `proactive-observer-v10`) of the catalog follow, with the capabilities `image_generation` and `transcription`
 - Other usable entries in the catalog are published with their catalog IDs, for example `claude-sonnet-4-6` and `claude-opus-4-6-thinking` in the catalog of a Pro account
 - After a restart, `/v1/models` lists the saved catalogs until the accounts finish initialization; models that only appear in the catalogs of accounts still initializing return 503
@@ -103,7 +109,7 @@ When the official Antigravity client is signed in on this computer, import its a
 ./antigravity2api import
 ```
 
-`import` reads the token saved by the official client and imports that one account: it reads the system credential store (service `gemini`, user `antigravity`) first and `~/.gemini/jetski-standalone-oauth-token` when that fails.
+`import` reads the token saved by the official client and imports that one account: it reads the system credential store (service `gemini`, user `antigravity`) first then `~/.gemini/jetski-standalone-oauth-token`, and then `~/.gemini/antigravity-cli/antigravity-oauth-token` of the official agy CLI.
 
 In the other direction, switch the official client to an account in the account store:
 
@@ -307,6 +313,7 @@ docs/                 # protocol, development and logging docs
 | `LISTEN` | Listen address of the public API, admin API and admin UI; when Windows reserves the port, the service listens on the next free port and the admin UI shows the actual address | `127.0.0.1:8017` |
 | `API_KEYS` | Public API keys, comma separated | empty |
 | `API_KEY_ACCOUNTS` | Accounts bound to API keys, each item written as `key:account\|account`, comma separated; a key with bound accounts uses only those accounts | empty |
+| `API_KEY_NAMES` | Names for API keys, each item written as `key:name`, comma separated; the admin UI shows them with the keys | empty |
 | `AUTH_DIR` | Account directory | `auth` |
 | `RUNTIME_DIR` | Runtime data directory: the request ledger `requests.db`, logs in `logs/`, uploaded `files/`, generated `media/`, conversation records, model catalogs and other runtime state | `runtime` |
 | `PROXY` | Global HTTP, HTTPS or SOCKS5 proxy; the comma-separated items form a proxy pool; the system proxy is used when empty | empty |
@@ -357,10 +364,10 @@ Process environment variables override the same keys in `.env`.
 | `status` | Show the state of the running service and each account |
 | `version` | Print the program version |
 
-- `login` signs in with a browser by default; `--code` signs in with a pasted authorization code; `--remote <address> --token <token>` uploads the account to a remote service and also works with `--code`; `--cloud --provider <name>` signs in on this machine with Continue with Google Cloud (enterprise WIF) and cannot be combined with `--code` or `--remote`
+- `login` signs in with a browser by default; `--code` signs in with a pasted authorization code; `--remote <address> --token <token>` uploads the account to a remote service and also works with `--code`; `--proxy <URL>` is the proxy for this sign-in and is bound to the account (`direct` connects without a proxy), and works with the other options; `--cloud --provider <name>` signs in on this machine with Continue with Google Cloud (enterprise WIF) and cannot be combined with `--code` or `--remote`
 - `status` reads `/api/status` and `/api/accounts` of the running service over loopback and prints the version, listen address, start time and the state, plan and remaining share per quota bucket of each account; loopback access needs no sign-in
 
-Every command accepts `--listen`, `--auth`, `--runtime` and `--proxy`, overriding `LISTEN`, `AUTH_DIR`, `RUNTIME_DIR` and `PROXY`. On an error a command writes the reason to standard error and exits with code 1; for example `status` prints `服务未在 <LISTEN> 运行: <reason>` when the service is not running. The output of `accounts` and `status` is described in the [development guide](docs/development.md#子命令输出). The desktop executable accepts the same subcommands; without a subcommand it opens the desktop window, and `--hidden` starts with only the tray icon.
+Every command accepts `--listen`, `--auth`, `--runtime` and `--proxy`, overriding `LISTEN`, `AUTH_DIR`, `RUNTIME_DIR` and `PROXY` (for `login`, `--proxy` works as described above). On an error a command writes the reason to standard error and exits with code 1; for example `status` prints `服务未在 <LISTEN> 运行: <reason>` when the service is not running. The output of `accounts` and `status` is described in the [development guide](docs/development.md#子命令输出). The desktop executable accepts the same subcommands; without a subcommand it opens the desktop window, and `--hidden` starts with only the tray icon.
 
 ## Notes
 

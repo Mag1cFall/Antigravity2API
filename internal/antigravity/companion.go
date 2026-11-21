@@ -44,20 +44,23 @@ const (
 	accountRounds = 6
 )
 
-// companionState 表示伴随请求所需的账户状态：套餐、地区、遥测开关、标题模型、目录的实验 ID、最近一次实验与配置的响应和耗时、是否发出过 fetchConfig、最近一次 fetchConfig 的错误文本与实验是否已改以 fetchConfig 为准
+// companionState 表示伴随请求与 clearcut 事件所需的账户实时状态
+// 由 Client.mu 保护，字段含义见 docs/protocol.md“伴随请求”
 type companionState struct {
 	tier               string
 	region             string
 	telemetry          bool
 	title              string
 	catalogExperiments []int64
-	ccpa               experimentsResponse
-	ccpaLatency        time.Duration
-	aicode             configResponse
-	aicodeLatency      time.Duration
-	configured         bool
-	aicodeError        string
-	mendel             bool
+	// monitors 为目录 sharedModelExperiments 中 sonar 的 default-sonar-monitors-config，为空时执行配置沿用模板中的值
+	monitors      string
+	ccpa          experimentsResponse
+	ccpaLatency   time.Duration
+	aicode        configResponse
+	aicodeLatency time.Duration
+	configured    bool
+	aicodeError   string
+	mendel        bool
 }
 
 // experimentFlag 表示 listExperiments 与 fetchConfig 返回的一个实验开关
@@ -206,7 +209,8 @@ func configError(err error) string {
 	return ""
 }
 
-// configure 发出一轮实验中 listExperiments 之后的请求：routed 为真时以 fetchConfig 为准，成功后事件的实验开关与实验 ID 改取 fetchConfig，失败才改发 listExperiments 并改回取 listExperiments；否则只在本轮 listExperiments 成功（listed）时发 fetchConfig 作对照，返回是否发出了对照
+// configure 发出实验轮询中 listExperiments 之后的 fetchConfig 或回退请求
+// 返回是否发出了对照用的 fetchConfig，路由与回退规则见 docs/protocol.md“伴随请求”
 func (c *Client) configure(ctx context.Context, routed, listed bool) bool {
 	if routed {
 		err := c.fetchConfig(ctx)
@@ -260,22 +264,28 @@ func (c *Client) nuxes(ctx context.Context) error {
 	return c.get(ctx, c.base+"/v1internal/cascadeNuxes?page_size=1000", nil)
 }
 
-// recordCatalog 记下目录 mqueryModelIds 的首项为标题请求的模型，记下目录的实验 ID 供会话事件使用
+// recordCatalog 记下目录 mqueryModelIds 的首项为标题请求的模型，记下目录的实验 ID 与智能体监控配置供会话事件使用
 func (c *Client) recordCatalog(catalog Catalog) {
 	var ids struct {
 		MQuery      []string `json:"mqueryModelIds"`
 		Experiments []int64  `json:"experimentIds"`
+		Shared      struct {
+			Sonar struct {
+				Experiments map[string]ModelExperiment `json:"experiments"`
+			} `json:"sonar"`
+		} `json:"sharedModelExperiments"`
 	}
 	json.Unmarshal(catalog.Raw, &ids)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.state.catalogExperiments = ids.Experiments
+	c.state.monitors = ids.Shared.Sonar.Experiments["default-sonar-monitors-config"].StringValue
 	if len(ids.MQuery) != 0 {
 		c.state.title = ids.MQuery[0]
 	}
 }
 
-// tokeninfo 以 access token 查询 tokeninfo，请求经 HTTP/2 Transport 发出且不带 Authorization；连接错误中的地址不带查询参数
+// tokeninfo 以 access token 查询 tokeninfo，请求经 HTTP/1.1 Transport 发出且不带 Authorization；连接错误中的地址不带查询参数
 func (c *Client) tokeninfo(ctx context.Context, token string) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointTokeninfo+"?access_token="+url.QueryEscape(token), nil)
 	if err != nil {
@@ -309,7 +319,9 @@ type refresher interface {
 	Refresh() (*oauth2.Token, error)
 }
 
-// ColdStart 按官方客户端以已保存账户启动时的请求与并发关系完成初始化，不发 prod loadCodeAssist、fetchAdminControls 与额度摘要：tokeninfo 与第一次 loadCodeAssist 并发，access token 已过期时两路各自刷新、tokeninfo 之后再刷新一次，userinfo 与 tokeninfo 同时发出，结束 139–413 ms 后读头像；tokeninfo 结束 46–126 ms 后发第二次 loadCodeAssist；第一次 loadCodeAssist 结束 50–74 ms 后（第二次已先结束时为 7–10 ms）同时发 fetchAvailableModels、fetchUserInfo 与 listExperiments；第二次 loadCodeAssist 结束 36–61 ms 后（它先于第一次结束时与前述三个请求同时）同时发第三次 loadCodeAssist 与 userinfo，userinfo 结束 47–73 ms 后读头像，第三次发出时 fetchUserInfo 已结束则在第三次结束 52–64 ms 后再发一次 fetchUserInfo；目录之后记下本虚拟进程轮询远程列表（启动读取由 hubInterface 在界面渲染后发出）；fetchUserInfo 结束 23–63 ms 后按 hubStartup 记录启动事件；listExperiments 结束 113–175 ms 后发一次 fetchConfig 作对照，listExperiments 失败时不发；迁移组在目录读取结束 35–295 ms 后记录，对照事件在 fetchConfig 结束 3–15 ms 后记录，两者都不早于 ready：启动事件之后 1–7 ms，发过第二次 fetchUserInfo 的冷启动中有三分之一为它结束 46–51 ms 后，对照事件再晚 1–2 ms；userinfo 与头像不计入初始化；只有 token、loadCodeAssist 与 fetchAvailableModels 失败时初始化失败
+// ColdStart 按官方客户端以已保存账户启动时的请求顺序完成初始化
+// 并发关系、token 刷新与事件时机见 docs/protocol.md“账户初始化”与“伴随请求”
+// 只有 token、loadCodeAssist 与 fetchAvailableModels 失败时返回错误
 func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 	source, renew := c.source.(refresher)
 	renew = renew && source.Stale()
@@ -343,7 +355,7 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 	check := func() error {
 		defer close(checked)
 		return c.checkToken(ctx, source, renew, func() {
-			profiles.Go(func() { result.User, _ = c.profile(ctx, 139, 413) })
+			profiles.Go(func() { c.profile(ctx, 139, 413) })
 		})
 	}
 	first := func() (err error) {
@@ -370,11 +382,12 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 		if err := until(ctx, sent); err != nil {
 			return err
 		}
-		return parallel(func() (err error) {
-			if result.Catalog, err = c.FetchAvailableModels(ctx); err != nil {
+		return parallel(func() error {
+			catalog, err := c.FetchAvailableModels(ctx)
+			if err != nil {
 				return err
 			}
-			c.recordCatalog(result.Catalog)
+			c.recordCatalog(catalog)
 			c.mu.Lock()
 			c.hub.remote = true
 			c.mu.Unlock()
@@ -517,7 +530,7 @@ func (c *Client) checkToken(ctx context.Context, source refresher, renew bool, p
 		return err
 	}
 	profile()
-	optional(func() error { return c.tokeninfo(ctx, token.AccessToken) })()
+	c.tokeninfo(ctx, token.AccessToken)
 	if renew {
 		_, err = source.Refresh()
 	}
@@ -601,7 +614,9 @@ func titleEnvelopeFor(project, model string, contents []Content) (titleEnvelope,
 	return envelope, true
 }
 
-// StartTrajectory 按官方新会话的顺序在后台发出伴随请求：列出远程插件（冷启动后的第一个新会话除外）、writeTrajectoryAcls（响应后虚拟 Hub 的会话数加一）与以目录 mqueryModelIds 的模型发出的标题请求，再按 LoadMarketplace 读取插件市场目录；本次读取了目录时返回标题请求发起的时刻，否则返回零值，调用方随即发生成请求
+// StartTrajectory 在后台按官方新会话顺序发出伴随请求并触发插件市场目录读取
+// 本次发起了目录读取且开关打开时返回标题请求发起时刻，否则返回零值
+// 各伴随请求的时机见 docs/protocol.md“伴随请求”
 func (c *Client) StartTrajectory(ctx context.Context, trajectory string, contents []Content) time.Time {
 	background := context.WithoutCancel(ctx)
 	c.mu.Lock()
@@ -612,7 +627,7 @@ func (c *Client) StartTrajectory(ctx context.Context, trajectory string, content
 		go c.listPlugins(background)
 	}
 	go func() {
-		c.post(background, c.base+"/v1internal:writeTrajectoryAcls", trajectoryACL{TrajectoryID: trajectory}, nil)
+		c.WriteTrajectoryACL(background, trajectory)
 		c.countConversation()
 	}()
 	titled := time.Now()
@@ -626,18 +641,18 @@ func (c *Client) StartTrajectory(ctx context.Context, trajectory string, content
 }
 
 // title 以与生成请求相同的分块正文发出标题请求并读完响应流
-func (c *Client) title(ctx context.Context, envelope titleEnvelope) error {
+func (c *Client) title(ctx context.Context, envelope titleEnvelope) {
 	payload, err := c.device.hubJSON(envelope)
 	if err != nil {
-		return err
+		return
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v1internal:streamGenerateContent?alt=sse", io.NopCloser(bytes.NewReader(payload)))
 	if err != nil {
-		return err
+		return
 	}
 	request.Header.Set("User-Agent", c.device.UserAgent())
 	request.Header.Set("Content-Type", "application/json")
-	return c.do(request, nil)
+	c.do(request, nil)
 }
 
 // Companion 按官方 language_server 的节奏代一个账户发出与生成无关的伴随请求，创建时刻为该账户虚拟进程的启动时刻
@@ -668,7 +683,8 @@ func (m *Companion) every(ctx context.Context, offset, period time.Duration, run
 	}
 }
 
-// Run 读取过远程列表时按 pollRemote 轮询远程会话与项目列表；冷启动时按官方界面加载记录 Hub 界面事件；登录序列启动时记录摘要订阅、迁移、sidecar 启动、搜索索引与权限迁移事件，0.87–1.07 s 后按 hubOnboarded 记录界面渲染，23–29 ms 后列出远程插件（插件市场目录在初始化中与远程列表同时读取），此后的第一个新会话不再列出，新手提示从初始化中的那次读取起每 120 s 读取；此后在启动后每个整分钟读取实验与配置，每 6 轮同时刷新套餐与目录，读到的账户状态经 Observe 交出；ctx 结束时返回
+// Run 按官方节奏运行远程列表轮询、界面事件、新手提示与每分钟实验轮询，ctx 结束时返回
+// 周期、登录引导与刷新轮规则见 docs/protocol.md“伴随请求”
 func (m *Companion) Run(ctx context.Context) {
 	m.client.mu.Lock()
 	remote := m.client.hub.remote
@@ -698,7 +714,8 @@ func (m *Companion) Run(ctx context.Context) {
 	m.every(ctx, pollOffset, pollPeriod, func(round int) { m.poll(ctx, round) })
 }
 
-// poll 执行一轮实验轮询：use-aicode-mendel 开启时只发 fetchConfig，失败才 listExperiments，不记录对照；关闭时 listExperiments 成功后发 fetchConfig 并记录对照，fetchConfig 失败时对照带错误文本；刷新轮 loadCodeAssist 与第一个实验请求并发，fetchAvailableModels 与 fetchConfig 并发
+// poll 执行一轮实验轮询，每 accountRounds 轮同时刷新套餐与模型目录
+// 路由、回退与对照规则见 docs/protocol.md“伴随请求”
 func (m *Companion) poll(ctx context.Context, round int) {
 	c := m.client
 	refresh := round%accountRounds == 0
@@ -829,7 +846,8 @@ func appendFlag(b []byte, flag experimentFlag) []byte {
 	return appendBytes(b, 6, entry)
 }
 
-// clearcutEvent 编码一个 language_server clearcut 事件：客户端、版本、设备、套餐、遥测关闭标记、地区、子客户端，shape.flags 为真时附 listExperiments 的全部开关，shape.empty 为真时附空的开关字段，最后是事件名与参数，shape.env 为真时载荷末尾附客户端环境
+// clearcutEvent 编码一条名称型 language_server clearcut 事件
+// 字段布局与形态见 docs/protocol.md“伴随请求”的 clearcut 上报表
 func (s companionState) clearcutEvent(at time.Time, device Device, name string, params map[string]any, shape eventShape) []byte {
 	ext := s.extension(device, shape)
 	payload := appendBytes(nil, 1, []byte(name))
@@ -853,7 +871,8 @@ func (s companionState) clearcutEvent(at time.Time, device Device, name string, 
 	return appendVarint(event, 11, 5)
 }
 
-// extension 编码 clearcut 事件扩展的公共字段：客户端、版本、设备、套餐、遥测关闭标记、地区、子客户端与按 shape 附带的实验开关：开关取最近一次 listExperiments，实验改以 fetchConfig 为准后取最近一次 fetchConfig；对照的 fetchConfig 失败时对照事件的开关为空
+// extension 编码 clearcut 事件扩展的公共字段与按 shape 附带的实验开关
+// 开关来源与去重规则见 docs/protocol.md“伴随请求”的 clearcut 上报说明
 func (s companionState) extension(device Device, shape eventShape) []byte {
 	ext := appendBytes(nil, 16, []byte("antigravity"))
 	ext = appendBytes(ext, 17, []byte(ClientVersion))
@@ -895,7 +914,8 @@ func clearcutRequest(events [][]byte, sent time.Time) []byte {
 	return appendVarint(request, 4, uint64(sent.UnixMilli()))
 }
 
-// report 把一个 mendel_aicode_shadow_diff 事件放入 clearcut 上报队列：事件时刻之前已有带开关的 Hub 事件时附开关，否则冷启动不带开关字段、登录带空的开关字段；冷启动在启动事件之前记录时带比记录时刻早 12–20 ms 的 client_event_time_ms；尚未发出 fetchConfig 时不记录
+// report 把一条 mendel_aicode_shadow_diff 事件放入 clearcut 上报队列
+// 尚未发出 fetchConfig 时不记录；形态与参数见 docs/protocol.md“伴随请求”
 func (c *Client) report() {
 	c.mu.Lock()
 	at := time.Now()

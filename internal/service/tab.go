@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"net/http"
 	"strings"
 	"time"
 
@@ -20,10 +19,7 @@ func (s *Service) complete(ctx context.Context, request antigravity.GenerateRequ
 	}
 	return s.dispatch(ctx, request, model, conversation{}, identity{}, "tab", 0, tier, func(deadline context.Context, current *account, catalog antigravity.CatalogModel) (<-chan antigravity.Event, *antigravity.Exchange, error) {
 		file := antigravity.NewTabFile(current.device, prefix.String(), request.Suffix)
-		envelope, err := antigravity.BuildTabEnvelope(current.client.Project(), catalog, file, time.Now().In(current.device.Location()))
-		if err != nil {
-			return nil, nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
-		}
+		envelope := antigravity.BuildTabEnvelope(current.client.Project(), catalog, file, time.Now().In(current.device.Location()))
 		upstream, exchange, err := current.client.StreamGenerateContent(deadline, envelope)
 		if err != nil {
 			return nil, exchange, err

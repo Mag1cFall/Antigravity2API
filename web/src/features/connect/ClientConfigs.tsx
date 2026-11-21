@@ -74,10 +74,11 @@ export function ClientConfigs() {
   const [params, setParams] = useSearchParams()
   const client = clients.find((item) => item.id === params.get('client')) ?? claudeCode
   const catalog = useModels()
-  const { settings, keys } = useApiKeys()
+  const { settings, keys, names } = useApiKeys()
   const models = (catalog.data?.models ?? []).filter((model) => kindOf(model) === 'chat')
   const [choice, setChoice] = useState<{
     model?: string
+    fable?: string
     opus?: string
     sonnet?: string
     haiku?: string
@@ -99,6 +100,7 @@ export function ClientConfigs() {
     model: models.find((model) => model.id === modelID),
     modelID: modelID || m.modelPlaceholder,
     tiers: {
+      fable: (choice.fable ?? modelID) || m.modelPlaceholder,
       opus: (choice.opus ?? modelID) || m.modelPlaceholder,
       sonnet: (choice.sonnet ?? modelID) || m.modelPlaceholder,
       haiku: (choice.haiku ?? flashDefault) || m.modelPlaceholder,
@@ -199,6 +201,7 @@ export function ClientConfigs() {
             modelSelect('client-model-' + client.id, m.model, modelID, 'model')}
           {client.tiers &&
             models.length > 0 && [
+              modelSelect('client-tier-fable', m.tierFable, input.tiers.fable, 'fable'),
               modelSelect('client-tier-opus', m.tierOpus, input.tiers.opus, 'opus'),
               modelSelect('client-tier-sonnet', m.tierSonnet, input.tiers.sonnet, 'sonnet'),
               modelSelect('client-tier-haiku', m.tierHaiku, input.tiers.haiku, 'haiku'),
@@ -229,7 +232,10 @@ export function ClientConfigs() {
                 onValueChange={(next) => {
                   setChoice((current) => ({ ...current, key: next }))
                 }}
-                options={keys.map((item) => ({ value: item, label: maskKey(item) }))}
+                options={keys.map((item) => ({
+                  value: item,
+                  label: names[item] ? names[item] + ' · ' + maskKey(item) : maskKey(item),
+                }))}
                 className="w-full font-mono sm:w-[192px]"
               />
             </Labeled>

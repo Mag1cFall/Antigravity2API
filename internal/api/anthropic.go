@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"fmt"
@@ -75,6 +76,10 @@ func (request anthropicRequest) session() string {
 type anthropicMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
+	// OutputConfig 为 system 消息携带的会话中途思考强度（mid-conversation-output-config）
+	OutputConfig *struct {
+		Effort string `json:"effort"`
+	} `json:"output_config"`
 }
 
 // anthropicTool 为工具定义，Options 为 type、name、description 与 input_schema 之外的字段
@@ -118,8 +123,7 @@ type anthropicContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   json.RawMessage `json:"content,omitempty"`
 	// Citations 在 text 块上为引用列表，没有引用时为 JSON null
-	Citations any    `json:"citations,omitempty"`
-	Data      string `json:"data,omitempty"`
+	Citations any `json:"citations,omitempty"`
 }
 
 // handleAnthropicMessages 处理 Messages 请求，按 stream 返回 Message 或事件流
@@ -293,14 +297,14 @@ func (s *server) anthropicGenerateRequest(r *http.Request, request anthropicRequ
 	if err != nil {
 		return antigravity.GenerateRequest{}, err
 	}
-	generateRequest.Session = clientSession(r, request.session())
+	generateRequest.Session = clientSession(r, append([]string{request.session()}, headerSessions(r)...)...)
 	if err := s.restoreMediaLinks(generateRequest.Contents); err != nil {
 		return antigravity.GenerateRequest{}, err
 	}
 	return generateRequest, inlineRemoteMedia(r.Context(), generateRequest.Contents)
 }
 
-// toGenerateRequest 把 Messages 请求转换为生成请求
+// toGenerateRequest 把 Messages 请求转换为生成请求：thinking.disabled 时思考档位为 none，其余情况下思考强度取最后一个带 output_config.effort 的 system 消息，没有时取顶层 output_config.effort
 func (request anthropicRequest) toGenerateRequest(id string) (antigravity.GenerateRequest, error) {
 	if request.Thinking != nil {
 		switch request.Thinking.Type {
@@ -325,8 +329,15 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 	for _, tool := range request.Tools {
 		known[tool.Name] = tool
 	}
+	effort := ""
+	if request.OutputConfig != nil {
+		effort = request.OutputConfig.Effort
+	}
 	for _, message := range request.Messages {
 		if message.Role == "system" {
+			if message.OutputConfig != nil && message.OutputConfig.Effort != "" {
+				effort = message.OutputConfig.Effort
+			}
 			var text string
 			text, declared, err = anthropicSystemMessage(message.Content, declared, known)
 			if err != nil {
@@ -341,6 +352,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 		if err != nil {
 			return antigravity.GenerateRequest{}, err
 		}
+		message.Content, declared = takeToolChanges(message.Content, declared, known)
 		parts, err := anthropicParts(message.Content)
 		if err != nil {
 			return antigravity.GenerateRequest{}, fmt.Errorf("%s message: %w", message.Role, err)
@@ -370,13 +382,12 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 	}
 	if request.Thinking != nil && request.Thinking.Type == "disabled" {
 		config.ReasoningEffort = "none"
+	} else if effort != "" {
+		config.ReasoningEffort = effort
 	}
 	format := request.OutputFormat
-	if request.OutputConfig != nil {
-		config.ReasoningEffort = request.OutputConfig.Effort
-		if request.OutputConfig.Format != nil {
-			format = request.OutputConfig.Format
-		}
+	if request.OutputConfig != nil && request.OutputConfig.Format != nil {
+		format = request.OutputConfig.Format
 	}
 	if format != nil {
 		if format.Type != "json_schema" {
@@ -391,7 +402,7 @@ func (request anthropicRequest) toGenerateRequest(id string) (antigravity.Genera
 
 // anthropicSystemText 返回 system 的文本，text 块数组以换行相连
 func anthropicSystemText(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return "", nil
 	}
 	var text string
@@ -417,53 +428,89 @@ func anthropicSystemText(raw json.RawMessage) (string, error) {
 	return strings.Join(texts, "\n"), nil
 }
 
-// anthropicSystemMessage 返回会话中途 system 消息的文本，并按其中的 tool_addition 与 tool_removal 依次增删声明的工具：按值定义的工具记入 known 并声明，按名引用的工具从 known 中恢复声明，撤下的工具不再声明
+// anthropicSystemMessage 返回会话中途 system 消息的文本，并按其中的 tool_addition 与 tool_removal 依次增删声明的工具（见 changeTools）
 func anthropicSystemMessage(raw json.RawMessage, declared []anthropicTool, known map[string]anthropicTool) (string, []anthropicTool, error) {
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
 		return text, declared, nil
 	}
 	var blocks []struct {
-		Type string `json:"type"`
+		anthropicToolChange
 		Text string `json:"text"`
-		Tool struct {
-			Type       string        `json:"type"`
-			Name       string        `json:"name"`
-			Definition anthropicTool `json:"definition"`
-		} `json:"tool"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return "", nil, fmt.Errorf("content must be a string or block array")
 	}
 	texts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
-		name := block.Tool.Name
 		switch block.Type {
 		case "text":
 			if block.Text != "" {
 				texts = append(texts, block.Text)
 			}
-		case "tool_addition":
-			switch block.Tool.Type {
-			case "tool_definition":
-				name = block.Tool.Definition.Name
-				known[name] = block.Tool.Definition
-			case "tool_reference":
-			default:
-				continue
-			}
-			if tool, ok := known[name]; ok && !slices.ContainsFunc(declared, func(item anthropicTool) bool { return item.Name == name }) {
-				declared = append(declared, tool)
-			}
-		case "tool_removal":
-			if block.Tool.Type == "tool_reference" {
-				declared = slices.DeleteFunc(declared, func(item anthropicTool) bool { return item.Name == name })
-			}
+		case "tool_addition", "tool_removal":
+			declared = changeTools(block.anthropicToolChange, declared, known)
 		default:
 			return "", nil, fmt.Errorf("unsupported system block type %q", block.Type)
 		}
 	}
 	return strings.Join(texts, "\n"), declared, nil
+}
+
+// anthropicToolChange 为会话中途增删工具的 tool_addition 或 tool_removal 内容块，tool 为一个工具，tools 为多个
+type anthropicToolChange struct {
+	Type  string               `json:"type"`
+	Tool  *anthropicToolEntry  `json:"tool"`
+	Tools []anthropicToolEntry `json:"tools"`
+}
+
+// anthropicToolEntry 为增删的一个工具：tool_definition 按值定义，tool_reference 按名引用
+type anthropicToolEntry struct {
+	Type       string        `json:"type"`
+	Name       string        `json:"name"`
+	Definition anthropicTool `json:"definition"`
+}
+
+// changeTools 按一个增删工具的块更新声明：按值定义的工具记入 known 并声明，按名引用的工具从 known 中恢复声明，撤下的工具不再声明
+func changeTools(change anthropicToolChange, declared []anthropicTool, known map[string]anthropicTool) []anthropicTool {
+	entries := change.Tools
+	if change.Tool != nil {
+		entries = append(slices.Clone(entries), *change.Tool)
+	}
+	for _, entry := range entries {
+		switch change.Type + "/" + entry.Type {
+		case "tool_addition/tool_definition":
+			entry.Name = entry.Definition.Name
+			known[entry.Name] = entry.Definition
+			fallthrough
+		case "tool_addition/tool_reference":
+			if tool, ok := known[entry.Name]; ok && !slices.ContainsFunc(declared, func(item anthropicTool) bool { return item.Name == entry.Name }) {
+				declared = append(declared, tool)
+			}
+		case "tool_removal/tool_reference":
+			declared = slices.DeleteFunc(declared, func(item anthropicTool) bool { return item.Name == entry.Name })
+		}
+	}
+	return declared
+}
+
+// takeToolChanges 从 user 与 assistant 消息的块数组中取出 tool_addition 与 tool_removal 块并更新声明，返回其余的块；没有这类块时原样返回 raw
+func takeToolChanges(raw json.RawMessage, declared []anthropicTool, known map[string]anthropicTool) (json.RawMessage, []anthropicTool) {
+	var blocks []json.RawMessage
+	if !bytes.Contains(raw, []byte(`"tool_`)) || json.Unmarshal(raw, &blocks) != nil {
+		return raw, declared
+	}
+	kept := blocks[:0]
+	for _, block := range blocks {
+		var change anthropicToolChange
+		if json.Unmarshal(block, &change) == nil && (change.Type == "tool_addition" || change.Type == "tool_removal") {
+			declared = changeTools(change, declared, known)
+			continue
+		}
+		kept = append(kept, block)
+	}
+	encoded, _ := json.Marshal(kept)
+	return encoded, declared
 }
 
 // anthropicRole 把 user 与 assistant 换成上游角色
@@ -703,7 +750,7 @@ func mapAnthropicTools(tools []anthropicTool, choice json.RawMessage) (antigravi
 			}
 			parameters := tool.InputSchema
 			if len(parameters) == 0 {
-				parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+				parameters = emptyObjectParameters
 			}
 			mapped.Functions = append(mapped.Functions, antigravity.FunctionDeclaration{
 				Name: tool.Name, Description: tool.Description, Parameters: parameters, Strict: strict,
@@ -783,7 +830,7 @@ func anthropicComputerTool(typeName string, width, height int64, zoom bool) (str
 
 // anthropicToolChoice 把 tool_choice 转换为工具配置，省略时为 auto
 func anthropicToolChoice(raw json.RawMessage) (antigravity.ToolConfig, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return antigravity.ToolConfig{Mode: "auto"}, nil
 	}
 	var choice struct {
@@ -845,7 +892,8 @@ func buildAnthropicResponse(id string, model string, result generationResult, th
 	return response
 }
 
-// anthropicBlocks 按事件顺序构造内容块：思考事件为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，没有时在请求要求思考类块时为正文为空、带该签名的 thinking 块，紧跟 text 块的独立签名不输出，正文与函数调用为 text 与 tool_use 块，搜索来源为排在首个 text 块之前的 server_tool_use 与 web_search_tool_result 块，text 块带引用的来源
+// anthropicBlocks 按事件顺序构造 Anthropic 非流式内容块
+// 思考、签名与搜索引用的块映射规则见 docs/protocol.md「输出同形」与「响应格式」
 func anthropicBlocks(id string, result generationResult, thinking, omitted bool, media mediaOutput) []anthropicContentBlock {
 	blocks := make([]anthropicContentBlock, 0)
 	open := func() *anthropicContentBlock {
@@ -1207,7 +1255,8 @@ func (writer *anthropicStreamWriter) start() error {
 	return writer.emit("content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 }
 
-// live 写出一个事件：思考为 thinking 块，独立签名与函数调用签名并入正在进行的 thinking 块，紧跟 text 块的独立签名不输出，搜索来源为 server_tool_use 与 web_search_tool_result 块，重新生成时结束正在进行的块，新尝试的思考另起一块
+// live 按 Anthropic 流式事件格式写出单个规范事件
+// 思考、签名、搜索块与重新生成换块规则见 docs/protocol.md「输出同形」与「响应格式」
 func (writer *anthropicStreamWriter) live(event antigravity.Event) error {
 	switch event.Kind {
 	case antigravity.EventGrounding:
@@ -1409,11 +1458,11 @@ func (writer *anthropicStreamWriter) finish(result generationResult) error {
 	return writer.emit("message_stop", map[string]string{"type": "message_stop"})
 }
 
-// error 写出 error 事件
+// error 写出 error 事件，类型按 anthropicStreamErrorType
 func (writer *anthropicStreamWriter) error(err error) error {
 	return writer.emit("error", map[string]any{
 		"type":  "error",
-		"error": map[string]string{"type": anthropicErrorType(err), "message": retryMessage(publicErrorMessage(statusFromError(err), anthropicErrorMessage(err)), retryAfterSeconds(err))},
+		"error": map[string]string{"type": anthropicStreamErrorType(err), "message": retryMessage(publicErrorMessage(statusFromError(err), anthropicErrorMessage(err)), retryAfterSeconds(err))},
 	})
 }
 

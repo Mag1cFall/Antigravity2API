@@ -11,6 +11,9 @@ import (
 // customToolParameters 是 custom 工具作为函数声明时唯一的字符串参数
 var customToolParameters = json.RawMessage(`{"type":"object","properties":{"input":{"type":"string","description":"The raw input passed to the tool"}},"required":["input"]}`)
 
+// emptyObjectParameters 是未提供参数 Schema 的函数声明默认使用的空对象 Schema
+var emptyObjectParameters = json.RawMessage(`{"type":"object","properties":{}}`)
+
 // clientToolDeclarations 是 Responses 客户端执行工具对应的固定函数声明
 var clientToolDeclarations = map[string]antigravity.FunctionDeclaration{
 	"local_shell": {
@@ -132,6 +135,10 @@ func responsesToolKind(tools []responsesTool, name string) string {
 			}
 		case "computer_use_preview", "computer":
 			if name == "computer" {
+				return tool.Type
+			}
+		case "tool_search":
+			if name == "tool_search" && tool.Execution == "client" {
 				return tool.Type
 			}
 		case "namespace":

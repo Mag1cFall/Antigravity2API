@@ -18,7 +18,7 @@ export interface Model {
 export type ModelKind = 'chat' | 'image' | 'transcription' | 'completion'
 
 // kindOf 按目录能力返回模型用途
-export function kindOf(model: Model): ModelKind {
+export function kindOf(model: Pick<Model, 'capabilities'>): ModelKind {
   const capabilities = model.capabilities ?? {}
   if (capabilities.image_generation) return 'image'
   if (capabilities.transcription) return 'transcription'

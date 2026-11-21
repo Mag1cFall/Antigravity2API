@@ -159,8 +159,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := r.Context()
-	ctx, cancel := context.WithCancel(client)
-	defer cancel()
+	ctx := client
 	generate.Unary = !request.Stream || s.fakeStream()
 	if !request.Stream && !request.Background {
 		var stopKeepalive func()
@@ -169,9 +168,8 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 	}
 	created := time.Now().UTC().Format(time.RFC3339)
 	if request.Background {
-		ctx, cancel = context.WithCancel(client)
-		run := backgroundRun{cancel: cancel, done: make(chan struct{})}
-		s.background.Store(generate.ID, run)
+		var end func()
+		ctx, end = s.startBackground(client, generate.ID)
 		request.stream = newStreamLog()
 		following := make(chan struct{})
 		failure := &bytes.Buffer{}
@@ -179,9 +177,7 @@ func (s *server) handleInteraction(w http.ResponseWriter, r *http.Request) {
 			s.endBackgroundInteraction(ctx, request, generate, previous, current, created, failure.Bytes())
 			request.stream.finish()
 			<-following
-			s.background.Delete(generate.ID)
-			cancel()
-			close(run.done)
+			end()
 		}()
 		started := interactionObject(generate, request.PreviousID, created, "in_progress", nil)
 		s.storeInteraction(request, previous, current, generationResult{}, started)
@@ -744,7 +740,8 @@ func interactionSteps(result generationResult, summaries bool) []map[string]any 
 	return steps
 }
 
-// streamInteraction 输出 interaction.created、各步骤的 step.start、step.delta、step.stop 与 interaction.completed，返回生成失败的错误；正文之后的独立签名暂存到下一个事件，使搜索来源先以 text_annotation_delta 写在正文步骤内；后台交互的事件带从 1 起的 event_id
+// streamInteraction 按 Interactions 流式事件协议写出步骤与终态并返回生成错误
+// 独立签名暂存、搜索标注与后台 event_id 规则见 docs/protocol.md「Interactions」
 func (s *server) streamInteraction(w http.ResponseWriter, r *http.Request, request interactionRequest, generate antigravity.GenerateRequest, previous responseHistory, current []antigravity.Content, created string, events <-chan antigravity.Event) error {
 	stream, err := openStream(w, sseHeartbeat)
 	defer stream.stop()

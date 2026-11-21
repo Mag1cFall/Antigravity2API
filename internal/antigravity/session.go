@@ -22,19 +22,20 @@ import (
 //go:embed session.json
 var sessionJSON []byte
 
-// sessionTemplate 表示官方会话 clearcut 事件中随客户端版本固定的部分：各模型族的执行配置、请求覆盖配置、代理解析、已加载定制、提示段元数据、执行配置中的实验开关名、内置工具与各模型族的工具 token 数、系统提示段名与 Model、APIProvider 枚举
+// sessionTemplate 表示随官方客户端版本固定的会话 clearcut 事件模板
+// 各键含义与格式见 docs/protocol.md“伴随请求”的 session.json 表
 type sessionTemplate struct {
-	Cascade        map[string][]byte `json:"cascade"`
-	Override       []byte            `json:"override"`
-	Resolution     []byte            `json:"resolution"`
-	Customizations []byte            `json:"customizations"`
-	PromptSections []byte            `json:"promptSections"`
-	Experiments    []string          `json:"experiments"`
-	Tools          []string          `json:"tools"`
-	ToolTokens     map[string][]int  `json:"toolTokens"`
-	Sections       []string          `json:"sections"`
-	Models         map[string]int    `json:"models"`
-	Providers      map[string]int    `json:"providers"`
+	Cascade        map[string][]byte   `json:"cascade"`
+	Override       map[string][]byte   `json:"override"`
+	Resolution     []byte              `json:"resolution"`
+	Customizations []byte              `json:"customizations"`
+	PromptSections map[string][]byte   `json:"promptSections"`
+	Experiments    []string            `json:"experiments"`
+	Tools          map[string][]string `json:"tools"`
+	ToolTokens     map[string][]int    `json:"toolTokens"`
+	Sections       map[string][]string `json:"sections"`
+	Models         map[string]int      `json:"models"`
+	Providers      map[string]int      `json:"providers"`
 }
 
 // sessionFixed 为解析后的会话事件模板
@@ -52,8 +53,13 @@ var sectionGroups = map[string]struct {
 	kind int
 }{"subagents": {"Subagents", 6}, "skills": {"Skills", 5}, "featured_plugins": {"Plugins", 9}}
 
-// SessionSections 为官方系统提示 token 明细中各段的段名
-var SessionSections = sessionFixed.Sections
+// planExecuteExperiment 为目录条目 modelExperiments 中两阶段规划执行的实验名，值为 JSON，executionModel 为执行阶段的模型枚举名
+const planExecuteExperiment = "plan-execute-config"
+
+// SessionSections 返回所选目录条目在官方系统提示 token 明细中各段的段名
+func SessionSections(model CatalogModel) []string {
+	return sessionFixed.Sections[sessionFamily(model)]
+}
 
 const (
 	// stepUser 为用户输入步骤的类型
@@ -82,7 +88,8 @@ var postHooks = []string{"chain_check", "message_continue_check", "terminal_step
 // stopHooks 为执行结束前依次执行的内置钩子
 var stopHooks = []string{"goal_stop", "idle_subagent_guard", "swarm_park_guard"}
 
-// SessionTurn 表示一次生成请求在官方会话中对应的一轮：Contents 为包装后的规范消息，Sections 为官方系统提示各段的 token 数，顺序同 SessionSections，Anchor 为本轮生成前读取了插件市场目录时界面事件对齐的时刻：新会话为标题请求写出的时刻，其余为目录读取的开始时刻，没有读取时为零值
+// SessionTurn 表示一次生成请求在官方会话中对应的一轮
+// Sections 与 SessionSections 同序；Anchor 为本轮读取插件市场目录时的对齐时刻，未读取时为零值
 type SessionTurn struct {
 	Conversation Conversation
 	New          bool
@@ -102,7 +109,8 @@ type SessionReply struct {
 	Calls                []FunctionCall
 }
 
-// sessionTrack 表示虚拟 language_server 中一条会话的进度：mu 串行化同一会话的事件，used 为最后一次使用时刻，sent 为当前执行的发送时刻，invoked 为当前模型调用的开始时刻，seq 为执行内已用的钩子序号，outputs 为各模型回复步骤的输出 token 数，model 为上一次用户请求的模型，first 与 replied 为该次回复的首个事件与结束时刻
+// sessionTrack 表示虚拟进程内存中一条会话的跨请求进度
+// mu 串行化同一会话的事件，过期清理与缺失回退见 docs/protocol.md“伴随请求”
 type sessionTrack struct {
 	mu             sync.Mutex
 	used           time.Time
@@ -121,7 +129,8 @@ type sessionStep struct {
 	call   FunctionCall
 }
 
-// sessionSteps 按官方步骤模型展开规范消息：用户请求、模型回复与每个函数结果各占一个步骤，函数结果的步骤带上一次模型回复中同标识同名的调用；用户输入与工具结果按 ceil(UTF-8 字节数/3)+5 计 token，模型回复取记下的输出 token 数，没有记录时按 ceil(字节数/3)
+// sessionSteps 按官方步骤模型展开规范消息并计算每步的 token 数
+// 步骤划分与 token 计算规则见 docs/protocol.md“伴随请求”的对话消息 token 数表
 func sessionSteps(contents []Content, outputs map[int]int64) []sessionStep {
 	var steps []sessionStep
 	var calls []FunctionCall
@@ -179,9 +188,12 @@ func ceilThird(n int) int {
 	return (n + 2) / 3
 }
 
-// sessionFamily 返回模型所属的执行配置族
+// sessionFamily 返回模型所属的执行配置族，目录条目带 plan-execute-config 的 Orchestrator 各条目为 orchestrator
 func sessionFamily(model CatalogModel) string {
+	_, plan := model.ModelExperiments.Experiments[planExecuteExperiment]
 	switch {
+	case plan:
+		return "orchestrator"
 	case model.ModelProvider == ProviderAnthropic:
 		return "claude"
 	case model.ModelProvider == ProviderOpenAI:
@@ -198,17 +210,18 @@ func sessionFamily(model CatalogModel) string {
 
 // promptSections 返回 prompt_sections：所选目录条目带 template__system_prompts__<段名> 的段来源（4.1）为服务端模板 4，其余为模板中的值
 func promptSections(model CatalogModel) []byte {
-	nodes := pbParse(sessionFixed.PromptSections)
+	family := sessionFamily(model)
+	nodes, _ := pbParse(sessionFixed.PromptSections[family])
 	for index := range nodes {
-		if _, ok := model.ModelExperiments.Experiments["template__system_prompts__"+sessionFixed.Sections[index]]; ok {
+		if _, ok := model.ModelExperiments.Experiments["template__system_prompts__"+sessionFixed.Sections[family][index]]; ok {
 			nodes[index].raw = pbSet(nodes[index].raw, []int{4, 1}, pbNode{wire: 0, u: 4})
 		}
 	}
 	return pbEncode(nodes)
 }
 
-// shellToolTokens 为 run_command 工具说明按设备系统的 token 数相对模板（Windows）的差，官方 2.33.0 Linux 各模型族都少 3
-var shellToolTokens = map[string]int64{"linux": -3}
+// shellToolTokens 为 run_command 工具说明按设备系统的 token 数相对模板（Windows）的差，官方 2.33.0 各模型族 Linux 少 3、macOS 少 4
+var shellToolTokens = map[string]int64{"linux": -3, "darwin": -4}
 
 // shellName 返回设备系统上官方终端工具使用的 shell
 func shellName(os string) string {
@@ -233,7 +246,7 @@ func botID(trajectory string, step int) string {
 
 // pbSet 把 path 处第一个同号字段换成 node，中间各层按原顺序重新编码
 func pbSet(data []byte, path []int, node pbNode) []byte {
-	nodes := pbParse(data)
+	nodes, _ := pbParse(data)
 	for i := range nodes {
 		if nodes[i].num != path[0] {
 			continue
@@ -253,7 +266,8 @@ func pbSet(data []byte, path []int, node pbNode) []byte {
 func pbGet(data []byte, path ...int) pbNode {
 	var node pbNode
 	for _, number := range path {
-		for _, item := range pbParse(data) {
+		nodes, _ := pbParse(data)
+		for _, item := range nodes {
 			if item.num == number {
 				node = item
 				break
@@ -308,16 +322,27 @@ func appendDouble(b []byte, field int, value float64) []byte {
 	return binary.LittleEndian.AppendUint64(appendTag(b, field, 1), math.Float64bits(value))
 }
 
-// sessionCascade 按模型族模板填写执行配置：模型枚举、输出上限、模型名、终端 shell、终端的 enable_pty 与 enable_persistent_mode（取 mendelFlags 的 enable-pty 与 enable-persistent-terminals）、命令评估的 PolicyGuardianConfig（并入 mendelFlags 的 policy-guardian-config）与按 mendelFlags 取值的实验开关
+// sessionCascade 按模型族模板填写执行配置 CascadeConfig
+// 改写字段与实验来源见 docs/protocol.md“伴随请求”的会话事件载荷说明
 func (s companionState) sessionCascade(model CatalogModel, device Device) []byte {
 	config := sessionFixed.Cascade[sessionFamily(model)]
 	config = pbSet(config, []int{1, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[model.Model])})
 	config = pbSet(config, []int{1, 6}, pbNode{wire: 0, u: uint64(model.MaxOutputTokens)})
 	config = pbSet(config, []int{1, 28}, pbNode{wire: 2, raw: []byte(model.ID)})
+	if plan, ok := model.ModelExperiments.Experiments[planExecuteExperiment]; ok {
+		var value struct {
+			ExecutionModel string `json:"executionModel"`
+		}
+		json.Unmarshal([]byte(plan.StringValue), &value)
+		config = pbSet(config, []int{1, 60, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[value.ExecutionModel])})
+	}
 	config = pbSet(config, []int{1, 13, 8, 5}, pbNode{wire: 2, raw: []byte(shellName(device.OS))})
 	config = pbSet(config, []int{1, 13, 8, 13}, pbNode{wire: 0, u: s.mendelBool("enable-pty")})
 	config = pbSet(config, []int{1, 13, 8, 14}, pbNode{wire: 0, u: s.mendelBool("enable-persistent-terminals")})
 	config = pbSet(config, []int{3, 18, 2}, pbNode{wire: 2, raw: policyGuardian(pbGet(config, 3, 18, 2).raw, s.mendelString("policy-guardian-config"))})
+	if s.monitors != "" {
+		config = pbSet(config, []int{3, 18, 6}, pbNode{wire: 2, raw: []byte(s.monitors)})
+	}
 	return pbSet(config, []int{1, 43}, pbNode{wire: 2, raw: s.sessionExperiments()})
 }
 
@@ -343,7 +368,7 @@ func policyGuardian(template []byte, config string) []byte {
 	if json.Unmarshal([]byte(config), &values) != nil || len(values) == 0 {
 		return template
 	}
-	nodes := pbParse(template)
+	nodes, _ := pbParse(template)
 	for name, value := range values {
 		number, ok := policyGuardianFields[name]
 		if !ok {
@@ -431,7 +456,8 @@ func (s companionState) mendelIDs() []byte {
 	return out
 }
 
-// autoExecution 为官方客户端新装后的终端命令自动执行策略，键为设备是否为 Linux：setting 为 Hub user_config 存储事件中的设置，request 为请求覆盖配置中的 auto_execution_policy（官方 2.33.0 Windows 为 OFF 与 1，Linux 为 PROCEED_IN_SANDBOX 与 AUTO 的 2）
+// autoExecution 为按是否非 Windows 索引的终端命令自动执行策略
+// Windows 为 OFF 与 1，Linux 与 macOS 为 PROCEED_IN_SANDBOX 与 2，见 docs/protocol.md“伴随请求”
 var autoExecution = map[bool]struct {
 	setting string
 	request uint64
@@ -439,8 +465,8 @@ var autoExecution = map[bool]struct {
 
 // sessionOverride 返回填写模型枚举与设备系统的终端命令自动执行策略的请求覆盖配置
 func sessionOverride(model CatalogModel, device Device) []byte {
-	override := pbSet(sessionFixed.Override, []int{1, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[model.Model])})
-	return pbSet(override, []int{1, 13, 8, 3, 6}, pbNode{wire: 0, u: autoExecution[device.OS == "linux"].request})
+	override := pbSet(sessionFixed.Override[sessionFamily(model)], []int{1, 1}, pbNode{wire: 0, u: uint64(sessionFixed.Models[model.Model])})
+	return pbSet(override, []int{1, 13, 8, 3, 6}, pbNode{wire: 0, u: autoExecution[device.OS != "windows"].request})
 }
 
 // structuredEvent 编码带结构化载荷的会话 clearcut 事件：公共字段与名称事件相同并附实验开关，载荷写入扩展的 field，事件码为 kind
@@ -738,7 +764,7 @@ func (s companionState) generatorPayloads(turn SessionTurn, device Device, steps
 	}
 	var systemChildren, toolChildren, chatChildren, grouped []byte
 	var systemTotal, toolTotal, chatTotal, groupedTotal int64
-	for i, name := range sessionFixed.Sections {
+	for i, name := range sessionFixed.Sections[family] {
 		tokens := int64(turn.Sections[i])
 		if own, ok := sectionGroups[name]; ok {
 			grouped, groupedTotal = appendBytes(grouped, 1, group(own.name, own.kind, true, child(name, tokens), tokens)), groupedTotal+tokens
@@ -746,7 +772,7 @@ func (s companionState) generatorPayloads(turn SessionTurn, device Device, steps
 		}
 		systemChildren, systemTotal = append(systemChildren, child(name, tokens)...), systemTotal+tokens
 	}
-	for i, name := range sessionFixed.Tools {
+	for i, name := range sessionFixed.Tools[family] {
 		tokens := int64(sessionFixed.ToolTokens[family][i])
 		if name == "run_command" {
 			tokens += shellToolTokens[device.OS]
@@ -807,7 +833,7 @@ func (s companionState) generatorPayloads(turn SessionTurn, device Device, steps
 		chat = appendBytes(chat, 2, current)
 		chat = appendVarint(chat, 3, uint64(sessionFixed.Models[model.Model]))
 		chat = appendBytes(chat, 4, usage)
-		for _, name := range sessionFixed.Tools {
+		for _, name := range sessionFixed.Tools[family] {
 			chat = appendBytes(chat, 8, appendString(nil, 1, name))
 		}
 		chat = appendBytes(chat, 9, start)
@@ -920,7 +946,8 @@ func completed(steps []sessionStep) int {
 	return count
 }
 
-// SessionSend 在生成请求发出前按官方会话的先后记录 clearcut 事件并按 touchSidebar 记下发送：用户请求记录发送事件、用户输入步骤与调用前钩子，新会话另记新建会话、项目、trajectory、首次加载与标题事件，发送事件之后记 sidecar 的两次受限调用与 sidecar 事件，模型与上次不同时记录切换模型；带回工具结果的请求按工具依次记录工具前钩子（第一个工具除外）、工具后钩子与工具步骤，再记调用后钩子与调用前钩子；本轮读取过插件市场目录时，读取事件记在用户输入步骤或工具步骤之前，发送事件及更早的事件改以读取开始时刻为基准
+// SessionSend 在生成请求发出前按官方会话顺序记录 clearcut 事件并唤醒侧栏定时统计
+// 用户请求与工具结果请求的事件清单与时刻见 docs/protocol.md“伴随请求”的会话事件表
 func (c *Client) SessionSend(turn SessionTurn) {
 	c.touchSidebar()
 	now := time.Now()
@@ -975,7 +1002,7 @@ func (c *Client) SessionSend(turn SessionTurn) {
 	c.hub.state.Model = model.Model
 	state, save := c.hub.state, c.hub.save
 	c.mu.Unlock()
-	if changed && save != nil {
+	if changed {
 		if err := save(state); err != nil {
 			slog.Warn("保存虚拟 Hub 状态失败 | 错误="+err.Error(), "source", c.account)
 		}
@@ -1043,7 +1070,8 @@ func (c *Client) SessionSend(turn SessionTurn) {
 	c.preInvocation(hooked, turn, track, metadata)
 }
 
-// promptLatency 返回 prompt_latency 事件的参数：sent 为发送时刻，invoked 为模型调用开始时刻，first 为首个事件时刻，steps 为回复与其第一个工具步骤在内的步骤数；界面比 language_server 晚 26–86 ms 看到首个事件，新会话另有 166–295 ms 的会话准备耗时
+// promptLatency 返回用户请求首次回复的 prompt_latency 事件参数
+// 各段耗时公式与新会话准备耗时见 docs/protocol.md“伴随请求”的会话事件说明
 func promptLatency(turn SessionTurn, sent, invoked, first time.Time, steps int) map[string]any {
 	before, chunk := int(invoked.Sub(sent).Milliseconds()), int(first.Sub(invoked).Milliseconds())
 	token := before + chunk + between(26, 86)

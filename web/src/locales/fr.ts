@@ -61,7 +61,7 @@ export const messages: Catalog = {
     refreshQuotaOf: 'Actualiser le quota de {email}',
     quotaRefreshed: 'Quota de {email} actualisé',
     quotaRefreshFailed: 'Échec de la lecture du quota de {email} : {message}',
-    search: 'Rechercher un e-mail, un libellé ou un projet',
+    search: 'Rechercher un e-mail, un libellé, un projet ou une erreur',
     filter: 'Filtrer par état',
     all: 'Tous',
     ready: 'Prêt',
@@ -130,6 +130,7 @@ export const messages: Catalog = {
     proxyDescription:
       'Les requêtes de token, de profil, de génération et d’accompagnement de ce compte passent par ce proxy. Le compte est réinitialisé après l’enregistrement.',
     proxyLabel: 'URL du proxy',
+    loginProxyLabel: 'Proxy pour cette connexion et ce compte',
     proxyHint:
       'HTTP, HTTPS ou SOCKS5, avec user:pass@ facultatif, par exemple socks5://user:pass@127.0.0.1:1080. Saisissez direct pour une connexion sans proxy ; laissez vide pour utiliser le proxy amont des paramètres. Les mots de passe s’affichent sous la forme xxxxx.',
     proxyInvalid:
@@ -486,6 +487,10 @@ export const messages: Catalog = {
     editKeyHint:
       'Saisissez votre propre clé ou utilisez la clé aléatoire. Après une modification, les clients qui utilisent l’ancienne valeur doivent passer à la nouvelle.',
     keyValue: 'Clé',
+    keyName: 'Nom',
+    keyNameHint:
+      'Affiché avec la clé dans les pages Intégration, Utilisation et Requêtes pour distinguer les clés.',
+    errKeyName: 'Le nom ne peut pas contenir de virgule ni de deux-points',
     keyAccounts: 'Comptes',
     keyAccountsHint:
       'Seuls les comptes cochés traitent les requêtes de cette clé. Ne cochez rien pour utiliser tous les comptes.',
@@ -511,6 +516,7 @@ export const messages: Catalog = {
       'Choisissez un client et un modèle, copiez la configuration et lancez ; les modèles proviennent du catalogue en direct de vos comptes',
     clientLabel: 'Client',
     model: 'Modèle',
+    tierFable: 'Modèle pour Fable',
     tierOpus: 'Modèle pour Opus',
     tierSonnet: 'Modèle pour Sonnet',
     tierHaiku: 'Modèle pour Haiku',
@@ -532,7 +538,7 @@ export const messages: Catalog = {
       'Le catalogue de modèles est vide. Ajoutez un compte pour choisir des modèles ; la configuration utilise <model-id> pour l’instant',
     modelPlaceholder: '<model-id>',
     clientClaude:
-      'Agent de code en terminal d’Anthropic, connecté via Anthropic Messages, avec un modèle distinct pour chacun des niveaux Opus, Sonnet et Haiku',
+      'Agent de code en terminal d’Anthropic, connecté via Anthropic Messages, avec un modèle distinct pour chacun des niveaux Fable, Opus, Sonnet et Haiku',
     clientCodex: 'Agent de code en terminal d’OpenAI, connecté via OpenAI Responses',
     clientOpencode:
       'Agent de code open source en terminal, avec tous les modèles de chat listés dans sa configuration',
@@ -761,6 +767,13 @@ export const messages: Catalog = {
     now: 'Maintenant',
   },
   requests: {
+    failCapacity:
+      'Google n’a pas de capacité pour ce modèle pour le moment ; réessayez plus tard ou changez de modèle',
+    failQuota: 'Le quota du compte est épuisé ; il redevient utilisable après la réinitialisation',
+    failVerify: 'Le compte doit d’abord être vérifié auprès de Google',
+    failRejected:
+      'L’amont a refusé le contenu de la requête, souvent à cause d’une phrase de l’invite système ; ce n’est pas un problème de quota',
+    failTried: '{count} comptes essayés',
     pageTitle: 'Requêtes',
     tabs: 'Vues des requêtes',
     tabRecords: 'Historique',
@@ -780,7 +793,7 @@ export const messages: Catalog = {
     allModels: 'Tous les modèles',
     account: 'Compte',
     allAccounts: 'Tous les comptes',
-    search: 'Rechercher un ID de requête, un ID de réponse, une cascade ou une erreur',
+    search: 'Rechercher un ID de requête, un ID de réponse, un ID de conversation ou une erreur',
     export: 'Exporter en CSV',
     exportEmpty: 'Aucune requête à exporter',
     exportFailed: 'L’historique des requêtes n’a pas pu être chargé : rien à exporter',
@@ -840,7 +853,7 @@ export const messages: Catalog = {
     typeTab: 'Complétion de code',
     typeCheckpoint: 'Point de contrôle',
     tokenUsage: 'Tokens',
-    cascade: 'Cascade',
+    cascade: 'Conversation',
     stepOf: 'étape {step}',
     phaseRequest: 'Validation de la requête',
     phaseInternal: 'Interne',
@@ -980,7 +993,6 @@ export const messages: Catalog = {
       'Chaque message utilisateur est envoyé dans ce format, le message se trouvant à la place de {{.Text}}. Laissez vide pour envoyer les messages tels quels.',
     templateLoad: 'Charger un préréglage',
     templateInsert: 'Insérer',
-    templateSections: 'Sections officielles',
     templateVariables: 'Variables',
     templateChars: '{chars} caractères avec des données d’exemple',
     templateError: 'Erreur dans le gabarit : {message}',
@@ -1200,9 +1212,12 @@ export const messages: Catalog = {
     confirmHint:
       'Télécharge le paquet {version}, vérifie son SHA-256, remplace le programme et redémarre ; la page se recharge dès que la nouvelle version est prête.',
     confirm: 'Mettre à jour',
+    releasePage: 'Page de la version sur GitHub',
     cancel: 'Annuler',
     restarting:
       'Redémarrage sur {version} ; la page se recharge dès que la nouvelle version est prête',
+    restartStalled:
+      'La nouvelle version n’a pas démarré en 1 minute. Rouvrez Antigravity2API ; cette page se recharge dès qu’il fonctionne. S’il ne démarre toujours pas, consultez les journaux dans {path}.',
     downloading: 'Téléchargement de {version}',
     verifying: 'Vérification du paquet {version}',
     installing: 'Remplacement du programme',
@@ -1328,9 +1343,9 @@ export const messages: Catalog = {
     pickAll: 'Sélectionner tous les fichiers de ce dossier',
     pickNone: 'Désélectionner les fichiers de ce dossier',
     folder: 'Enregistrer dans le dossier',
-    folderRemote: 'Enregistrer dans un dossier de l’ordinateur qui exécute le service',
-    folderRemoteHint:
-      'Vous utilisez l’interface d’administration depuis un autre ordinateur : les fichiers sont enregistrés sur l’ordinateur qui exécute Antigravity2API. Pour en garder une copie sur cet ordinateur, cliquez sur « Copier le contenu » et collez-le dans un fichier texte.',
+    download: 'Télécharger',
+    downloadHint:
+      'Vous utilisez l’interface d’administration depuis un autre ordinateur : le navigateur télécharge {name} sur cet ordinateur.',
     save: 'Enregistrer',
     copy: 'Copier le contenu',
     copied: 'Copié',

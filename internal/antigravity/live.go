@@ -6,22 +6,24 @@ import (
 	"context"
 	"crypto/tls"
 	_ "embed"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"sync"
 
+	"google.golang.org/genproto/googleapis/rpc/code"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -32,7 +34,7 @@ import (
 // voiceMethod 为官方语音模式打开的双向流方法
 const voiceMethod = "/google.gca.aicode.v1alpha.JetskiRemoteAgentProxyService/StreamVoice"
 
-// liveDescriptors 为 language_server 内嵌的 aicode BidiGenerateContent 消息描述符，由 Lab live_descriptor.py 导出
+// liveDescriptors 为 language_server 内嵌的 aicode BidiGenerateContent 消息描述符
 //
 //go:embed live.desc.gz
 var liveDescriptors []byte
@@ -146,7 +148,7 @@ func grpcError(err error) error {
 	if !ok {
 		return err
 	}
-	code, known := grpcHTTP[st.Code()]
+	httpStatus, known := grpcHTTP[st.Code()]
 	if !known || st.Code() == codes.Canceled {
 		return err
 	}
@@ -166,22 +168,8 @@ func grpcError(err error) error {
 			details = append(details, detail{Type: "type.googleapis.com/google.rpc.RetryInfo", RetryDelay: strconv.FormatFloat(info.RetryDelay.AsDuration().Seconds(), 'f', -1, 64) + "s"})
 		}
 	}
-	body, _ := json.Marshal(map[string]any{"error": map[string]any{"code": code, "message": st.Message(), "status": codeName(st.Code()), "details": details}})
-	return &UpstreamError{Status: code, Body: body}
-}
-
-// codeName 返回 gRPC 状态码的 google.rpc.Code 名称，如 PERMISSION_DENIED
-func codeName(code codes.Code) string {
-	name := code.String()
-	var out []byte
-	for index := 0; index < len(name); index++ {
-		c := name[index]
-		if index > 0 && c >= 'A' && c <= 'Z' {
-			out = append(out, '_')
-		}
-		out = append(out, c&^0x20)
-	}
-	return string(out)
+	body, _ := json.Marshal(map[string]any{"error": map[string]any{"code": httpStatus, "message": st.Message(), "status": code.Code(st.Code()).String(), "details": details}})
+	return &UpstreamError{Status: httpStatus, Body: body}
 }
 
 // Close 取消流并关闭连接，阻塞中的 Send 随之返回
@@ -213,7 +201,7 @@ func (c *Client) openStream(ctx context.Context, method, userAgent string) (*Liv
 		stop()
 		cancel()
 		connection.Close()
-		return nil, fmt.Errorf("aicode %s: %w", methodName(method), grpcError(err))
+		return nil, fmt.Errorf("aicode %s: %w", path.Base(method), grpcError(err))
 	}
 	return &LiveStream{conn: connection, stream: stream, cancel: func() { stop(); cancel() }}, nil
 }
@@ -224,16 +212,6 @@ func connectAgent(userAgent string) string {
 		return grpcUserAgent
 	}
 	return userAgent + " " + grpcUserAgent
-}
-
-// methodName 返回 gRPC 方法路径的最后一段
-func methodName(method string) string {
-	for index := len(method) - 1; index >= 0; index-- {
-		if method[index] == '/' {
-			return method[index+1:]
-		}
-	}
-	return method
 }
 
 // OpenLive 按官方语音转写打开 BidiGenerateContent 双向流，User-Agent 为 grpc-go 默认值
@@ -324,17 +302,17 @@ func ObserverAudioMessage(pcm []byte) []byte {
 
 // ParseObserverMessage 返回转写模型消息中的识别文本：识别中的临时文本 final 为 false，识别结束的文本 final 为 true；setup 为 setupComplete
 func ParseObserverMessage(raw []byte) (text string, final, setup bool, err error) {
-	err = walkWire(raw, func(field protowire.Number, value []byte, number uint64) error {
+	err = walkWire(raw, func(field int, value []byte, number uint64) error {
 		switch field {
 		case 1:
 			setup = true
 		case 2:
-			return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+			return walkWire(value, func(field int, value []byte, number uint64) error {
 				if field != 6 && field != 11 {
 					return nil
 				}
 				final = field == 6
-				return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+				return walkWire(value, func(field int, value []byte, number uint64) error {
 					if field == 1 {
 						text = string(value)
 					}
@@ -401,16 +379,16 @@ type VoiceCall struct {
 // ParseVoiceMessage 解码 StreamVoiceResponse
 func ParseVoiceMessage(raw []byte) (VoiceMessage, error) {
 	var message VoiceMessage
-	err := walkWire(raw, func(field protowire.Number, value []byte, number uint64) error {
+	err := walkWire(raw, func(field int, value []byte, number uint64) error {
 		if field != 1 {
 			return nil
 		}
-		return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+		return walkWire(value, func(field int, value []byte, number uint64) error {
 			switch field {
 			case 1:
 				message.Audio = value
 			case 2:
-				return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+				return walkWire(value, func(field int, value []byte, number uint64) error {
 					switch field {
 					case 1:
 						message.State = int(number)
@@ -422,12 +400,12 @@ func ParseVoiceMessage(raw []byte) (VoiceMessage, error) {
 			case 3:
 				call := &VoiceCall{}
 				message.Call = call
-				return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+				return walkWire(value, func(field int, value []byte, number uint64) error {
 					switch field {
 					case 1:
 						call.ID = int64(number)
 					case 2:
-						return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+						return walkWire(value, func(field int, value []byte, number uint64) error {
 							switch field {
 							case 1:
 								call.Method = int(number)
@@ -442,14 +420,14 @@ func ParseVoiceMessage(raw []byte) (VoiceMessage, error) {
 					return nil
 				})
 			case 4:
-				return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+				return walkWire(value, func(field int, value []byte, number uint64) error {
 					if field == 1 {
 						message.Event = string(value)
 					}
 					return nil
 				})
 			case 7:
-				return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+				return walkWire(value, func(field int, value []byte, number uint64) error {
 					switch field {
 					case 1:
 						message.Speech = string(value)
@@ -460,7 +438,7 @@ func ParseVoiceMessage(raw []byte) (VoiceMessage, error) {
 				})
 			case 8:
 				message.UserFinal = true
-				return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+				return walkWire(value, func(field int, value []byte, number uint64) error {
 					switch field {
 					case 1:
 						message.User = string(value)
@@ -480,35 +458,6 @@ func ParseVoiceMessage(raw []byte) (VoiceMessage, error) {
 	return message, err
 }
 
-// walkWire 依次回调消息的各字段：长度前缀字段给出内容，varint 字段给出数值
-func walkWire(raw []byte, visit func(field protowire.Number, value []byte, number uint64) error) error {
-	for len(raw) > 0 {
-		field, kind, length := protowire.ConsumeTag(raw)
-		if length < 0 {
-			return protowire.ParseError(length)
-		}
-		raw = raw[length:]
-		var value []byte
-		var number uint64
-		switch kind {
-		case protowire.BytesType:
-			value, length = protowire.ConsumeBytes(raw)
-		case protowire.VarintType:
-			number, length = protowire.ConsumeVarint(raw)
-		default:
-			length = protowire.ConsumeFieldValue(field, kind, raw)
-		}
-		if length < 0 {
-			return protowire.ParseError(length)
-		}
-		raw = raw[length:]
-		if err := visit(field, value, number); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // VoiceHandoff 表示语音模式交给智能体的一次请求：文字（含官方语音说明与对话记录）与附带的语音片段
 type VoiceHandoff struct {
 	Text  []string
@@ -518,10 +467,10 @@ type VoiceHandoff struct {
 // ParseVoiceHandoff 解码 SendUserCascadeMessageRequest 中的文字项（字段 2）与媒体（字段 14）
 func ParseVoiceHandoff(raw []byte) (VoiceHandoff, error) {
 	var handoff VoiceHandoff
-	err := walkWire(raw, func(field protowire.Number, value []byte, number uint64) error {
+	err := walkWire(raw, func(field int, value []byte, number uint64) error {
 		switch field {
 		case 2:
-			return walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+			return walkWire(value, func(field int, value []byte, number uint64) error {
 				if field == 1 {
 					handoff.Text = append(handoff.Text, string(value))
 				}
@@ -529,7 +478,7 @@ func ParseVoiceHandoff(raw []byte) (VoiceHandoff, error) {
 			})
 		case 14:
 			var blob Blob
-			err := walkWire(value, func(field protowire.Number, value []byte, number uint64) error {
+			err := walkWire(value, func(field int, value []byte, number uint64) error {
 				switch field {
 				case 1:
 					blob.MIME = string(value)
@@ -572,14 +521,9 @@ func agentUpdate(trajectory string, status int, steps []byte, finished bool) []b
 
 // stepsUpdate 编码一个步骤的更新：下标、步骤与轨迹总步数
 func stepsUpdate(index int, step []byte) []byte {
-	b := appendBytes(nil, 1, appendVarintRaw(nil, uint64(index)))
+	b := appendBytes(nil, 1, binary.AppendUvarint(nil, uint64(index)))
 	b = appendBytes(b, 2, step)
 	return appendVarint(b, 3, uint64(index+1))
-}
-
-// appendVarintRaw 追加不带字段标签的 varint，用于 packed 重复字段
-func appendVarintRaw(b []byte, value uint64) []byte {
-	return protowire.AppendVarint(b, value)
 }
 
 // VoiceIdleState 返回订阅建立时官方回复的空闲状态

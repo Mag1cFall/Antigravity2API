@@ -28,7 +28,7 @@ type pathListing struct {
 	Entries []pathEntry `json:"entries"`
 }
 
-// listPaths 列出服务所在机器上 path 或其最近的已存在上级目录下不以点开头的子目录，files 为逗号分隔的扩展名时再列出这些扩展名的文件（排在目录之后），相对路径按工作目录解析，上级目录都不存在时返回文件系统根
+// listPaths 列出服务所在机器上 path 或其最近的已存在上级目录下的子目录（以点开头的排在其余目录之后），files 为逗号分隔的扩展名时再列出这些扩展名的不以点开头的文件（排在目录之后），相对路径按工作目录解析，上级目录都不存在时返回文件系统根
 func (s *server) listPaths(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == pathRootsQuery {
@@ -59,12 +59,9 @@ func (s *server) listPaths(w http.ResponseWriter, r *http.Request) {
 	extensions := strings.Split(strings.ToLower(r.URL.Query().Get("files")), ",")
 	entries := make([]pathEntry, 0, len(items))
 	for _, item := range items {
-		if strings.HasPrefix(item.Name(), ".") {
-			continue
-		}
 		if item.IsDir() {
 			entries = append(entries, pathEntry{Name: item.Name(), Path: filepath.Join(absolute, item.Name())})
-		} else if extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(item.Name())), "."); extension != "" && slices.Contains(extensions, extension) {
+		} else if extension := strings.TrimPrefix(strings.ToLower(filepath.Ext(item.Name())), "."); extension != "" && !strings.HasPrefix(item.Name(), ".") && slices.Contains(extensions, extension) {
 			if info, err := item.Info(); err == nil && info.Mode().IsRegular() {
 				entries = append(entries, pathEntry{Name: item.Name(), Path: filepath.Join(absolute, item.Name()), File: true, Size: info.Size()})
 			}
@@ -73,6 +70,12 @@ func (s *server) listPaths(w http.ResponseWriter, r *http.Request) {
 	slices.SortFunc(entries, func(a, b pathEntry) int {
 		if a.File != b.File {
 			if a.File {
+				return 1
+			}
+			return -1
+		}
+		if hidden := strings.HasPrefix(a.Name, "."); hidden != strings.HasPrefix(b.Name, ".") {
+			if hidden {
 				return 1
 			}
 			return -1

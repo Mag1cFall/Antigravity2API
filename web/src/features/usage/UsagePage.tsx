@@ -15,6 +15,7 @@ import { EmptyState, ErrorState, Loading } from '@/components/ui/states'
 import { dots, StatCards } from '@/components/ui/stats'
 import { stackThird, stackTwoThirds, Table, Td, Th } from '@/components/ui/table'
 import { Tooltip } from '@/components/ui/tooltip'
+import { useKeyName } from '@/features/connect/ApiKeys'
 import {
   customParams,
   type CustomRange,
@@ -84,11 +85,13 @@ function FilterMenu({
   options,
   selected,
   onChange,
+  format,
 }: {
   label: string
   options: string[]
   selected: string[]
   onChange: (values: string[]) => void
+  format: (value: string) => string
 }) {
   const m = useMessages('usage')
   const values = [...new Set([...selected, ...options])]
@@ -120,7 +123,7 @@ function FilterMenu({
                 onChange(checked ? [...selected, value] : selected.filter((item) => item !== value))
               }}
             >
-              <span className="font-mono text-xs">{value || m.none}</span>
+              <span className="font-mono text-xs">{value ? format(value) : m.none}</span>
             </DropdownMenuCheckboxItem>
           ))
         )}
@@ -148,6 +151,7 @@ export function UsagePage() {
   const filtered = filterDimensions.some((dimension) => filters[dimension].length > 0)
   const span = custom ?? ranges[range]
   const usage = useUsage(span, grouping === 'day' ? '86400' : 'auto', filters)
+  const keyName = useKeyName()
   const update = (changes: Record<string, string>) => {
     changeParams(setParams, changes)
   }
@@ -183,6 +187,7 @@ export function UsagePage() {
             label={m[dimension]}
             options={usage.data?.options[dimension] ?? []}
             selected={filters[dimension]}
+            format={dimension === 'api_key' ? keyName : (value: string) => value}
             onChange={(values) => {
               setParams(
                 (current) => {
@@ -389,7 +394,7 @@ export function UsagePage() {
               <tr key={row.key}>
                 <Tooltip label={row.key}>
                   <Td className="truncate font-mono text-xs max-sm:basis-full">
-                    {row.key || m.none}
+                    {row.key ? (grouping === 'api_key' ? keyName(row.key) : row.key) : m.none}
                   </Td>
                 </Tooltip>
                 <Td label={m.requests} className={'text-right max-sm:text-left ' + stackThird}>

@@ -23,14 +23,14 @@
 - **Claude 兼容**：`/v1/messages`、`/v1/messages/count_tokens`
 - **Gemini 兼容**：`/v1beta/models/{model}:generateContent`、`:streamGenerateContent`、`:countTokens`、Files API、Interactions API、Live API
 - **官方客户端身份**：以纯 Go HTTP 按 Antigravity 官方客户端的 TLS 与 HTTP 形态、User-Agent、请求信封、初始化顺序与伴随请求访问 Cloud Code，每个账户使用导入时生成的设备档案
-- **Agent 模型**：Gemini、Claude 与 GPT-OSS 的全部 Agent 模型，按账户实时目录公开，思考参数映射到同族 Low、Medium、High 思考档位
+- **Agent 模型**：Gemini、Claude 与 GPT-OSS 的全部 Agent 模型，按账户实时目录公开，思考参数映射到同族 Low、Medium、High、XHigh 思考档位
 - **流式输出**：文本、思考与思考签名实时增量返回，工具调用、并行函数调用、图片与 PDF 输入在 OpenAI Chat、OpenAI Responses、Claude Messages 与 Gemini 四个协议间互通
 - **图像与语音**：目录中的图像生成模型生成与编辑图片，上述四个协议与 OpenAI Images 接口输出图片；目录中的语音转写模型以官方语音输入的通道转写音频，OpenAI 转写与翻译接口省略 `model` 时使用它，Chat `input_audio` 与 Gemini 音频输入在所选模型为转写模型时由它转写，所选模型为其他模型时音频直接发给该模型
 - **文件**：OpenAI、Claude 与 Gemini 的 Files API 把文件保存在 `RUNTIME_DIR/files/`，请求中的文件引用在发送前内联
 - **系统提示档位**：全保留、中等、激进与自定义四档，控制官方系统提示与用户消息包装的保留程度
 - **多账户调度**：按账户优先级与 Gemini、第三方模型两组额度选择账户，请求在同级账户间轮换，同一会话固定在同一账户；指定的模型可优先使用低套餐账户；额度耗尽冷却到重置时间，限速、容量不足与服务端错误按原因冷却或换号；各账户额度定时刷新，账户页可随时刷新全部或单个账户
 - **token 计数**：按模型族本地计算输入 token，GPT-OSS 按官方聊天模板渲染后计数，Gemini 与 Claude 族同一会话以上游实际用量校准
-- **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置；账户详情列出该账户可用的模型与与该账户共用每周额度的其他账户（通常是同一 Google One 家庭群组），用量与请求记录可按预设或自定义的时间范围查看，趋势图悬停查看各时段的请求，导出的文件保存到运行服务的电脑上的文件夹；界面支持简体中文、繁体中文（台湾）、英文、日文、韩文、法文与德文，服务日志与错误说明随界面语言显示；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
+- **管理端与桌面版**：网页管理端提供首次使用引导、仪表盘、账户、客户端接入配置、模型、请求记录、用量与费用、进行中请求、日志与设置；账户详情列出该账户可用的模型，以及与该账户共用每周额度的其他账户（通常是同一 Google One 家庭群组），用量与请求记录可按预设或自定义的时间范围查看，趋势图悬停查看各时段的请求，导出的文件在运行服务的电脑上访问时保存到所选文件夹，从其他电脑访问时由浏览器下载；界面支持简体中文、繁体中文（台湾）、英文、日文、韩文、法文与德文，服务日志与错误说明随界面语言显示；Windows、macOS、Linux 桌面版带托盘、单实例与开机启动
 - **运行日志与请求账本**：结构化日志按请求记录选号、换号、冷却与上游尝试；SQLite 账本保存每个请求的账户、模型、token、缓存命中与分段耗时，并按官方 API 单价估算费用
 - **登录方式**：浏览器登录、粘贴授权码登录、导入本机官方客户端的账户、从另一台电脑配对上传，账户 JSON 导出与导入（全部、所选或单个账户；导入前列出文件中的账户，勾选后导入；兼容 Antigravity Manager、CLIProxyAPI、sub2api、gcli2api、opencode-antigravity-auth 与 antigravity-claude-proxy 的账户文件）
 - **代理**：HTTP、HTTPS、SOCKS5 全局代理与每账户代理，未设置时跟随系统代理
@@ -39,7 +39,13 @@
 
 | 模型 ID | 名称 | 思考档位 |
 | --- | --- | --- |
+| `gemini-4-neon` | Gemini 4 Neon | Low、Medium、High、XHigh |
+| `gemini-4-carbon` | Gemini 4 Carbon | Low、Medium、High |
 | `gemini-4-argon` | Gemini 4 Argon | Low、Medium、High |
+| `gemini-4-hydrogen` | Gemini 4 Hydrogen | Low、Medium、High、XHigh |
+| `gemini-pro-orchestrator-neon` | Orchestrator (Neon) | — |
+| `gemini-pro-orchestrator` | Orchestrator (Carbon) | — |
+| `gemini-pro-orchestrator-argon` | Orchestrator (Argon) | — |
 | `gemini-3.8-flash` | Gemini 3.8 Flash | Low、Medium、High |
 | `claude-opus-5-5` | Claude Opus 5.5 | Low、Medium、High |
 | `claude-sonnet-5-5` | Claude Sonnet 5.5 | Low、Medium、High |
@@ -47,7 +53,7 @@
 
 服务启动时读取各账户的 Antigravity 模型目录并保存到 `RUNTIME_DIR/catalogs/`，运行后以 `/v1/models` 为准：
 
-- 上表是官方客户端模型选择器中的 Agent 模型，每个模型的条目带可选思考档位与默认档位：OpenAI 格式为 `supported_reasoning_levels` 与 `default_reasoning_level`，Anthropic 格式为 `thinking_levels` 与 `default_thinking_level`，Gemini 格式为 `thinkingLevels` 与 `defaultThinkingLevel`
+- 上表是官方客户端模型选择器中的 Agent 模型，带思考档位的条目同时给出可选思考档位与默认档位：OpenAI 格式为 `supported_reasoning_levels` 与 `default_reasoning_level`，Anthropic 格式为 `thinking_levels` 与 `default_thinking_level`，Gemini 格式为 `thinkingLevels` 与 `defaultThinkingLevel`
 - 目录中的图像生成模型（例如 `gemini-3.1-flash-image`）与语音转写模型（例如 `proactive-observer-v10`）随后列出，能力分别标注 `image_generation` 与 `transcription`
 - 目录中其他可用条目以目录 ID 公开，例如 Pro 账户目录中的 `claude-sonnet-4-6` 与 `claude-opus-4-6-thinking`
 - 重启后账户初始化完成前，`/v1/models` 列出上一次保存的目录；只在初始化未完成的账户目录中的模型返回 503
@@ -103,7 +109,7 @@
 ./antigravity2api import
 ```
 
-`import` 读取官方客户端保存的 token 并导入这一个账户：先读系统凭据库（服务名 `gemini`、用户名 `antigravity`），读不到时再读 `~/.gemini/jetski-standalone-oauth-token`。
+`import` 读取官方客户端保存的 token 并导入这一个账户：先读系统凭据库（服务名 `gemini`、用户名 `antigravity`），读不到时再读 `~/.gemini/jetski-standalone-oauth-token`，仍读不到时读官方 agy CLI 的 `~/.gemini/antigravity-cli/antigravity-oauth-token`。
 
 反过来，把官方客户端切换到账户库中的某个账户：
 
@@ -307,6 +313,7 @@ docs/                 # 协议、开发与日志文档
 | `LISTEN` | 公开 API、管理 API 与管理端的监听地址；端口被 Windows 保留时改用其后第一个可用端口，管理端顶部显示实际地址 | `127.0.0.1:8017` |
 | `API_KEYS` | 公开 API key，逗号分隔多个 | 空 |
 | `API_KEY_ACCOUNTS` | API key 绑定的账户，每项写成 `key:账户\|账户`，逗号分隔多项；绑定了账户的 key 只用这些账户 | 空 |
+| `API_KEY_NAMES` | API key 的备注名，每项写成 `key:备注名`，逗号分隔多项；管理端与 key 一起显示 | 空 |
 | `AUTH_DIR` | 账户目录 | `auth` |
 | `RUNTIME_DIR` | 运行数据目录：请求账本 `requests.db`、日志 `logs/`、上传的 `files/`、生成媒体 `media/`、会话记录、模型目录与其他运行状态 | `runtime` |
 | `PROXY` | 全局 HTTP、HTTPS 或 SOCKS5 代理，逗号分隔的各项组成代理池，为空时跟随系统代理 | 空 |
@@ -357,10 +364,10 @@ docs/                 # 协议、开发与日志文档
 | `status` | 查看运行中服务与各账户的状态 |
 | `version` | 打印程序版本 |
 
-- `login` 默认在浏览器中登录；`--code` 粘贴授权码登录；`--remote <地址> --token <令牌>` 把账户上传到远程服务，可与 `--code` 同用；`--cloud --provider <名称>` 在本机以 Continue with Google Cloud 的企业 WIF 方式登录，不与 `--code`、`--remote` 同用
+- `login` 默认在浏览器中登录；`--code` 粘贴授权码登录；`--remote <地址> --token <令牌>` 把账户上传到远程服务，可与 `--code` 同用；`--proxy <URL>` 是本次登录的代理并绑定到该账户（`direct` 为直连），可与其他参数同用；`--cloud --provider <名称>` 在本机以 Continue with Google Cloud 的企业 WIF 方式登录，不与 `--code`、`--remote` 同用
 - `status` 经回环地址读取运行中服务的 `/api/status` 与 `/api/accounts`，打印版本、监听地址、启动时间与各账户的状态、套餐和各额度桶剩余比例；本机回环访问免登录
 
-各命令都接受 `--listen`、`--auth`、`--runtime` 与 `--proxy`，分别覆盖 `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR` 与 `PROXY`。命令出错时把原因写到标准错误并以退出码 1 结束，例如服务未运行时 `status` 打印 `服务未在 <LISTEN> 运行: <原因>`；`accounts` 与 `status` 的输出格式见 [开发文档](docs/development.md#子命令输出)。桌面版的可执行文件同样接受这些子命令，不带子命令时打开桌面窗口，`--hidden` 启动后只显示托盘。
+各命令都接受 `--listen`、`--auth`、`--runtime` 与 `--proxy`，分别覆盖 `LISTEN`、`AUTH_DIR`、`RUNTIME_DIR` 与 `PROXY`（`login` 的 `--proxy` 见上一条）。命令出错时把原因写到标准错误并以退出码 1 结束，例如服务未运行时 `status` 打印 `服务未在 <LISTEN> 运行: <原因>`；`accounts` 与 `status` 的输出格式见 [开发文档](docs/development.md#子命令输出)。桌面版的可执行文件同样接受这些子命令，不带子命令时打开桌面窗口，`--hidden` 启动后只显示托盘。
 
 ## 注意
 

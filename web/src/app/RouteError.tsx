@@ -1,18 +1,14 @@
 import { FileQuestion } from 'lucide-react'
-import { isRouteErrorResponse, Link, useLocation, useRouteError } from 'react-router'
+import { Link, useRouteError } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorState } from '@/components/ui/states'
 import { fill, useMessages } from '@/lib/i18n'
 
-// RouteError 是路由级错误边界，渲染失败与不存在的页面都在面板内说明
+// RouteError 是路由级错误边界，渲染失败时在面板内说明
 export function RouteError() {
   const m = useMessages('app')
   const error = useRouteError()
-  const location = useLocation()
-  if (isRouteErrorResponse(error) && error.status === 404) {
-    return <NotFound path={location.pathname} />
-  }
   console.error(error)
   return (
     <ErrorState

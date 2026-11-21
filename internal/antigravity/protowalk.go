@@ -3,9 +3,12 @@ package antigravity
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
-// pbNode 表示一个 protobuf 字段：wire 为线型，num 为字段号，u 为 varint 值，raw 为长度前缀字段的原始字节
+// pbNode 表示一个 protobuf 字段：wire 为线型，num 为字段号，u 为 varint 值，raw 为长度前缀或定长字段的原始字节
 type pbNode struct {
 	num  int
 	wire int
@@ -13,46 +16,58 @@ type pbNode struct {
 	raw  []byte
 }
 
-// pbParse 解析一段 protobuf 为字段序列，保持原有顺序；解析失败时返回 nil
-func pbParse(data []byte) []pbNode {
+// pbParse 解析一段 protobuf 为字段序列，保持原有顺序
+func pbParse(data []byte) ([]pbNode, error) {
 	var out []pbNode
-	for i := 0; i < len(data); {
-		key, n := binary.Uvarint(data[i:])
-		if n <= 0 {
-			return nil
+	for len(data) > 0 {
+		field, kind, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
 		}
-		i += n
-		node := pbNode{num: int(key >> 3), wire: int(key & 7)}
-		switch node.wire {
-		case 0:
-			v, m := binary.Uvarint(data[i:])
-			if m <= 0 {
-				return nil
+		data = data[n:]
+		node := pbNode{num: int(field), wire: int(kind)}
+		switch kind {
+		case protowire.VarintType:
+			node.u, n = protowire.ConsumeVarint(data)
+		case protowire.BytesType:
+			node.raw, n = protowire.ConsumeBytes(data)
+		case protowire.Fixed64Type, protowire.Fixed32Type:
+			n = protowire.ConsumeFieldValue(field, kind, data)
+			if n >= 0 {
+				node.raw = data[:n]
 			}
-			node.u, i = v, i+m
-		case 1:
-			if i+8 > len(data) {
-				return nil
-			}
-			node.raw, i = data[i:i+8], i+8
-		case 2:
-			l, m := binary.Uvarint(data[i:])
-			if m <= 0 || i+m+int(l) > len(data) {
-				return nil
-			}
-			i += m
-			node.raw, i = data[i:i+int(l)], i+int(l)
-		case 5:
-			if i+4 > len(data) {
-				return nil
-			}
-			node.raw, i = data[i:i+4], i+4
 		default:
-			return nil
+			return nil, errors.New("unsupported protobuf wire type")
 		}
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		data = data[n:]
 		out = append(out, node)
 	}
-	return out
+	return out, nil
+}
+
+// walkWire 解析消息并依次回调各字段：长度前缀字段给出内容，varint 字段给出数值
+func walkWire(raw []byte, visit func(field int, value []byte, number uint64) error) error {
+	nodes, err := pbParse(raw)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		var value []byte
+		var number uint64
+		switch node.wire {
+		case int(protowire.BytesType):
+			value = node.raw
+		case int(protowire.VarintType):
+			number = node.u
+		}
+		if err := visit(node.num, value, number); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pbEncode 把字段序列按原有顺序编码回字节
@@ -75,8 +90,8 @@ func pbEncode(nodes []pbNode) []byte {
 
 // pbWalk 对字段序列深度优先调用 fn，fn 先在每个字段上执行，随后只递归进可无损往返的子消息字段，字符串字段按叶子处理；返回重新编码后的字节
 func pbWalk(data []byte, fn func(n *pbNode)) []byte {
-	nodes := pbParse(data)
-	if nodes == nil {
+	nodes, err := pbParse(data)
+	if err != nil {
 		return data
 	}
 	for i := range nodes {
@@ -91,6 +106,6 @@ func pbWalk(data []byte, fn func(n *pbNode)) []byte {
 
 // pbRoundTrips 返回字节能否无损解析并重新编码为同一串，即它确实是一段子消息而非恰好可解析的字符串
 func pbRoundTrips(data []byte) bool {
-	sub := pbParse(data)
-	return sub != nil && bytes.Equal(pbEncode(sub), data)
+	sub, err := pbParse(data)
+	return err == nil && bytes.Equal(pbEncode(sub), data)
 }

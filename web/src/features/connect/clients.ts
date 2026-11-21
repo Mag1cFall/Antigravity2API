@@ -18,7 +18,7 @@ import terminalIcon from './icons/terminal.svg?raw'
 type ConnectText = Catalog['connect']
 
 // ConnectKey 是接入页文案的键
-export type ConnectKey = keyof ConnectText
+type ConnectKey = keyof ConnectText
 
 // Shell 是写环境变量的终端
 export type Shell = 'unix' | 'windows'
@@ -40,7 +40,7 @@ export interface ClientInput {
   key: string
   model: Model | undefined
   modelID: string
-  tiers: { opus: string; sonnet: string; haiku: string }
+  tiers: { fable: string; opus: string; sonnet: string; haiku: string }
   models: Model[]
   shell: Shell
   protocol: Protocol
@@ -48,26 +48,26 @@ export interface ClientInput {
 }
 
 // ClientField 是在客户端界面中填写的一个字段：客户端当前语言下的字段名与要填的值，choice 表示从选项中选择
-export interface ClientField {
+interface ClientField {
   label: string
   value: string
   choice?: boolean
 }
 
 // ClientBlock 是一段要写入文件或在终端运行的内容，file 为文件名，没有时按终端显示，wrap 时长行折行
-export interface ClientBlock {
+interface ClientBlock {
   file?: string
   code: string
   wrap?: boolean
 }
 
 // ClientStep 是客户端配置的一步：code 为要写入文件或在终端运行的内容，fields 为在客户端界面中填写的字段
-export type ClientStep =
+type ClientStep =
   | { kind: 'code'; text: ConnectKey; blocks: ClientBlock[] }
   | { kind: 'fields'; text: ConnectKey; fields: ClientField[] }
 
 // ClientLink 是一键导入客户端的链接
-export interface ClientLink {
+interface ClientLink {
   label: ConnectKey
   href: string
 }
@@ -118,6 +118,20 @@ const openCodePackages: Record<Protocol, string> = {
   anthropic: '@ai-sdk/anthropic',
   gemini: '@ai-sdk/google',
 }
+
+// openCodeVariants 返回 OpenCode 模型配置中一个思考档位变体的提供商选项，写法同 OpenCode 为各 AI SDK 包内置生成的变体
+const openCodeVariants: Record<Protocol, (level: string) => Record<string, unknown>> = {
+  chat: (level) => ({ reasoningEffort: level }),
+  responses: (level) => ({ reasoningEffort: level, reasoningSummary: 'auto' }),
+  anthropic: (level) => ({ thinking: { type: 'adaptive', display: 'summarized' }, effort: level }),
+  gemini: (level) => ({ thinkingConfig: { includeThoughts: true, thinkingLevel: level } }),
+}
+
+// openCodeLevels 是 OpenCode 为推理模型内置生成的变体可能用到的档位名，配置中停用模型没有的档位
+const openCodeLevels = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+// piThinkingLevels 是 pi 的全部思考档位，thinkingLevelMap 中模型没有的档位为 null
+const piThinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 // ccFormats 是 CC Switch 深度链接的 apiFormat 在各协议下的取值
 const ccFormats: Record<Protocol, string> = {
@@ -217,12 +231,13 @@ function base64(text: string): string {
   return btoa(String.fromCharCode(...new TextEncoder().encode(text)))
 }
 
-// claudeVariables 是 Claude Code 使用的环境变量：Anthropic 地址、key、主模型、opus、sonnet、haiku 三档模型与主模型的上下文窗口
+// claudeVariables 是 Claude Code 使用的环境变量：Anthropic 地址、key、主模型、fable、opus、sonnet、haiku 四档模型与主模型的上下文窗口
 function claudeVariables(input: ClientInput): [string, string][] {
   return [
     ['ANTHROPIC_BASE_URL', input.origin],
     ['ANTHROPIC_AUTH_TOKEN', input.key],
     ['ANTHROPIC_MODEL', input.modelID],
+    ['ANTHROPIC_DEFAULT_FABLE_MODEL', input.tiers.fable],
     ['ANTHROPIC_DEFAULT_OPUS_MODEL', input.tiers.opus],
     ['ANTHROPIC_DEFAULT_SONNET_MODEL', input.tiers.sonnet],
     ['ANTHROPIC_DEFAULT_HAIKU_MODEL', input.tiers.haiku],
@@ -267,7 +282,7 @@ export const claudeCode: Client = {
   ],
 }
 
-// clients 是接入页列出的客户端，配置写法取自各客户端文档与 clients runner 的实测
+// clients 是接入页列出的客户端
 export const clients: Client[] = [
   claudeCode,
   {
@@ -339,6 +354,24 @@ export const clients: Client[] = [
                       {
                         name: model.name || model.id,
                         limit: { context: limits(model).context, output: limits(model).output },
+                        reasoning: Boolean(model.capabilities?.thinking),
+                        modalities: {
+                          input: model.capabilities?.images ? ['text', 'image', 'pdf'] : ['text'],
+                          output: ['text'],
+                        },
+                        ...(model.thinking_levels?.length
+                          ? {
+                              variants: Object.fromEntries([
+                                ...openCodeLevels
+                                  .filter((level) => !model.thinking_levels?.includes(level))
+                                  .map((level) => [level, { disabled: true }] as const),
+                                ...model.thinking_levels.map(
+                                  (level) =>
+                                    [level, openCodeVariants[input.protocol](level)] as const,
+                                ),
+                              ]),
+                            }
+                          : {}),
                       },
                     ]),
                   ),
@@ -463,8 +496,18 @@ export const clients: Client[] = [
                     {
                       id: input.modelID,
                       name: input.model?.name ?? input.modelID,
-                      reasoning: true,
-                      input: ['text', 'image'],
+                      reasoning: Boolean(input.model?.capabilities?.thinking),
+                      ...(input.model?.thinking_levels?.length
+                        ? {
+                            thinkingLevelMap: Object.fromEntries(
+                              piThinkingLevels.map((level) => [
+                                level,
+                                input.model?.thinking_levels?.includes(level) ? level : null,
+                              ]),
+                            ),
+                          }
+                        : {}),
+                      input: input.model?.capabilities?.images ? ['text', 'image'] : ['text'],
                       contextWindow: limits(input.model).context,
                       maxTokens: limits(input.model).output,
                     },
@@ -652,7 +695,7 @@ export const clients: Client[] = [
             code: curlExample('anthropic', input.origin, input.key, input.modelID),
           },
           {
-            file: 'Gemini generateContent',
+            file: 'Gemini streamGenerateContent',
             code: curlExample('gemini', input.origin, input.key, input.modelID),
           },
         ],

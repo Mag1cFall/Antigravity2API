@@ -156,17 +156,26 @@ func lookupPublicModel(models []antigravity.Model, id string) (antigravity.Model
 	return antigravity.Model{}, false
 }
 
+// publicModels 读取实时模型目录，失败时按 Anthropic-Version 头写出对应协议的错误
+func (s *server) publicModels(w http.ResponseWriter, r *http.Request) ([]antigravity.Model, bool) {
+	models, err := s.service.Models(r.Context())
+	if err == nil {
+		return models, true
+	}
+	if shouldWriteRequestError(r, err) {
+		if r.Header.Get("Anthropic-Version") != "" {
+			writeAnthropicRequestError(w, err)
+		} else {
+			writeOpenAIRequestError(w, err)
+		}
+	}
+	return nil, false
+}
+
 // handleOpenAIModels 列出实时目录中的模型，带 Anthropic-Version 头时按 Anthropic 格式返回
 func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
-	models, err := s.service.Models(r.Context())
-	if err != nil {
-		if shouldWriteRequestError(r, err) {
-			if r.Header.Get("Anthropic-Version") != "" {
-				writeAnthropicRequestError(w, err)
-			} else {
-				writeOpenAIRequestError(w, err)
-			}
-		}
+	models, ok := s.publicModels(w, r)
+	if !ok {
 		return
 	}
 	if r.Header.Get("Anthropic-Version") != "" {
@@ -182,28 +191,22 @@ func (s *server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 
 // handleOpenAIModel 返回实时目录中的单模型或协议化错误
 func (s *server) handleOpenAIModel(w http.ResponseWriter, r *http.Request) {
-	models, err := s.service.Models(r.Context())
-	if err != nil {
-		if shouldWriteRequestError(r, err) {
-			if r.Header.Get("Anthropic-Version") != "" {
-				writeAnthropicRequestError(w, err)
-			} else {
-				writeOpenAIRequestError(w, err)
-			}
-		}
+	models, ok := s.publicModels(w, r)
+	if !ok {
 		return
 	}
+	anthropic := r.Header.Get("Anthropic-Version") != ""
 	model, ok := lookupPublicModel(models, r.PathValue("model"))
 	if !ok {
 		message := fmt.Sprintf("model %q is unavailable", r.PathValue("model"))
-		if r.Header.Get("Anthropic-Version") != "" {
+		if anthropic {
 			writeAnthropicError(w, http.StatusNotFound, "not_found_error", message)
 		} else {
 			writeOpenAIError(w, http.StatusNotFound, "model_not_found", message)
 		}
 		return
 	}
-	if r.Header.Get("Anthropic-Version") != "" {
+	if anthropic {
 		writeJSON(w, http.StatusOK, officialOrder("anthropic", anthropicModelObject(model)))
 	} else {
 		writeJSON(w, http.StatusOK, officialOrder("openai", openAIModelObject(model)))
@@ -237,7 +240,7 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	generateRequest.Session = clientSession(r, r.Header.Get("session_id"), r.Header.Get("conversation_id"), request.PromptCacheKey, request.User)
+	generateRequest.Session = clientSession(r, append(append([]string{r.Header.Get("session_id"), r.Header.Get("conversation_id")}, headerSessions(r)...), request.PromptCacheKey, request.User)...)
 	count := 1
 	if request.N != nil {
 		count = int(*request.N)
@@ -468,7 +471,7 @@ func prependSystemMedia(contents []antigravity.Content, media []antigravity.Part
 
 // openAIContentParts 转换文本与媒体并省略空文本占位
 func openAIContentParts(raw json.RawMessage) ([]antigravity.Part, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return nil, nil
 	}
 	var text string
@@ -620,7 +623,7 @@ func mapOpenAITools(tools []openAITool, choice json.RawMessage) (antigravity.Too
 			}
 			parameters := tool.Function.Parameters
 			if len(parameters) == 0 {
-				parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+				parameters = emptyObjectParameters
 			}
 			mapped.Functions = append(mapped.Functions, antigravity.FunctionDeclaration{
 				Name:        tool.Function.Name,
@@ -653,7 +656,7 @@ func mapOpenAITools(tools []openAITool, choice json.RawMessage) (antigravity.Too
 
 // openAIToolChoice 转换 tool_choice，类型为 allowed_tools 时另外返回允许的工具引用
 func openAIToolChoice(raw json.RawMessage) (antigravity.ToolConfig, []toolReference, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return antigravity.ToolConfig{Mode: "auto"}, nil, nil
 	}
 	var mode string
@@ -778,7 +781,7 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 		return config, err
 	}
 	config.StopSequences = stop
-	if len(request.Reasoning) > 0 && string(request.Reasoning) != "null" {
+	if rawJSONConfigured(request.Reasoning) {
 		var reasoning struct {
 			Effort  string `json:"effort"`
 			Summary string `json:"summary"`
@@ -802,7 +805,7 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 		}
 	}
 	config.HideThinking = config.HideThinking || strings.EqualFold(config.ReasoningEffort, "none")
-	if len(request.ResponseFormat) > 0 && string(request.ResponseFormat) != "null" {
+	if rawJSONConfigured(request.ResponseFormat) {
 		var format struct {
 			Type       string `json:"type"`
 			JSONSchema struct {
@@ -810,8 +813,10 @@ func (request chatRequest) generationConfig() (antigravity.GenerationConfig, err
 				Schema      json.RawMessage `json:"schema"`
 			} `json:"json_schema"`
 		}
-		if err := json.Unmarshal(request.ResponseFormat, &format); err != nil {
-			return config, fmt.Errorf("invalid response_format: %w", err)
+		if json.Unmarshal(request.ResponseFormat, &format.Type) != nil {
+			if err := json.Unmarshal(request.ResponseFormat, &format); err != nil {
+				return config, fmt.Errorf("invalid response_format: %w", err)
+			}
 		}
 		switch format.Type {
 		case "json_object":
@@ -850,7 +855,7 @@ func describedSchema(schema json.RawMessage, description string) (json.RawMessag
 
 // decodeStopSequences 读取字符串或字符串数组形式的 stop
 func decodeStopSequences(raw json.RawMessage) ([]string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+	if !rawJSONConfigured(raw) {
 		return nil, nil
 	}
 	var single string

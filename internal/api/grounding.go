@@ -83,7 +83,8 @@ func interactionAnnotations(text string, grounding *antigravity.Grounding) []map
 	return annotations
 }
 
-// holdUntilGrounding 返回声明搜索时的写出函数与补发函数：首个正文起暂存事件，直到搜索来源或结束事件到达，先写出搜索来源再补发暂存的事件，使搜索结果排在正文之前；preview 不为空时在写出搜索来源前收到暂存的事件；生成中途失败时由补发函数写出暂存的事件
+// holdUntilGrounding 包装搜索流式写出函数并返回失败时补发暂存事件的函数
+// 从首个正文起暂存事件直到搜索来源或结束到达，preview 非空时在写出搜索来源前收到暂存事件；规则见 docs/protocol.md「输出同形」
 func holdUntilGrounding(live func(antigravity.Event) error, preview func([]antigravity.Event, *antigravity.Grounding)) (func(antigravity.Event) error, func() error) {
 	var held []antigravity.Event
 	holding, released := false, false

@@ -10,6 +10,7 @@ import { ErrorState, Loading } from '@/components/ui/states'
 import { useAccounts } from '@/features/accounts/queries'
 import { nameOf, quotaHistory } from '@/features/quota/quota'
 import type { QuotaSnapshot } from '@/features/quota/types'
+import { rangeQuery } from '@/features/usage/queries'
 import { api } from '@/lib/api'
 import { formatPercent } from '@/lib/format'
 import { useI18n, useMessages } from '@/lib/i18n'
@@ -51,16 +52,12 @@ export function QuotaHistory() {
     queryKey: ['quota-snapshots', range, account],
     queryFn: async () => {
       const to = Date.now()
-      const from = to - span
-      const query = new URLSearchParams({
-        from: new Date(from).toISOString(),
-        to: new Date(to + 1000).toISOString(),
-      })
+      const query = rangeQuery(span, to)
       if (account !== 'all') query.set('account', account)
       const data = await api<{ snapshots: QuotaSnapshot[] }>(
         '/api/quota/snapshots?' + query.toString(),
       )
-      return quotaHistory(data.snapshots, from, to, bins)
+      return quotaHistory(data.snapshots, to - span, to, bins)
     },
     placeholderData: keepPreviousData,
   })

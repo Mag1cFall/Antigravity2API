@@ -23,3 +23,25 @@ export function Checkbox({ className, ...props }: ComponentProps<typeof Primitiv
     </Primitive.Root>
   )
 }
+
+// SelectAllCheckbox 是带半选态的全选复选框：selected 为已选数，total 为总数，onCheckedChange 传入勾选或取消勾选的布尔值
+export function SelectAllCheckbox({
+  selected,
+  total,
+  onCheckedChange,
+  ...props
+}: Omit<ComponentProps<typeof Checkbox>, 'checked' | 'onCheckedChange'> & {
+  selected: number
+  total: number
+  onCheckedChange: (checked: boolean) => void
+}) {
+  return (
+    <Checkbox
+      checked={selected === 0 ? false : selected === total ? true : 'indeterminate'}
+      onCheckedChange={(checked) => {
+        onCheckedChange(checked === true)
+      }}
+      {...props}
+    />
+  )
+}

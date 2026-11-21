@@ -279,3 +279,27 @@ func TestAPIKeyAccounts(t *testing.T) {
 		t.Fatal("empty accounts accepted")
 	}
 }
+
+// TestAPIKeyNames 验证 API_KEY_NAMES 按最后一个冒号分隔 key 与备注名，保存后读回同一映射，缺备注名时拒绝
+func TestAPIKeyNames(t *testing.T) {
+	isolateEnv(t)
+	cfg := Default()
+	if err := cfg.Set(map[string]string{"API_KEY_NAMES": " sk:a:b : 笔记本 , sk-2:CI"}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIKeyNames["sk:a:b"] != "笔记本" || cfg.APIKeyNames["sk-2"] != "CI" {
+		t.Fatalf("names = %v", cfg.APIKeyNames)
+	}
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil || len(loaded.Changed(cfg)) != 0 {
+		t.Fatalf("loaded %v, %v", loaded.APIKeyNames, err)
+	}
+	empty := Default()
+	if err := empty.Set(map[string]string{"API_KEY_NAMES": "sk-1: "}); err == nil {
+		t.Fatal("empty name accepted")
+	}
+}

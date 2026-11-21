@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
+	"github.com/Mag1cFall/Antigravity2API/internal/proxypool"
 	"github.com/Mag1cFall/Antigravity2API/internal/requestdb"
 	"github.com/Mag1cFall/Antigravity2API/internal/service"
 )
@@ -92,15 +92,6 @@ func verifyURL(message string) string {
 	return link
 }
 
-// redactProxy 把代理 URL 中的密码替换为 xxxxx
-func redactProxy(proxy string) string {
-	parsed, err := url.Parse(proxy)
-	if err != nil {
-		return proxy
-	}
-	return parsed.Redacted()
-}
-
 // watch 定期同步账户目录与读取账户状态，目录变化时后台刷新账户池，列表变化时推送 accounts 事件
 func (s *server) watch() {
 	ticker := time.NewTicker(pollInterval)
@@ -176,7 +167,7 @@ func (book *familyBook) observe(id, bucket string, reset time.Time, fraction flo
 	}
 }
 
-// members 记下各账户最近一次读到的每周额度桶，返回每个账户同一家庭群组的其他账户：两个账户都已消耗的每周额度桶重置时刻相差都不超过 familySkew，且其中至少一个桶在两个账户上读到过相同的剩余比例（同一个额度桶）
+// members 更新各账户的每周额度桶观测并返回每个账户同一家庭群组的其他账户，判定规则见 docs/development.md「家庭群组」
 func (book *familyBook) members(ledger *requestdb.Store, statuses []service.AccountStatus) map[string][]string {
 	book.mu.Lock()
 	defer book.mu.Unlock()
@@ -235,7 +226,7 @@ func sharesBuckets(a, b map[string]*weeklyRun) bool {
 // account 投影一个账户，只保留未到期的冷却
 func (s *server) account(status service.AccountStatus, now time.Time) account {
 	item := account{
-		ID: status.ID, Label: status.Label, Tier: status.Tier, Project: status.Project, Proxy: redactProxy(status.Proxy), Priority: status.Priority, AddedAt: status.AddedAt.UTC(),
+		ID: status.ID, Label: status.Label, Tier: status.Tier, Project: status.Project, Proxy: proxypool.Redact(status.Proxy), Priority: status.Priority, AddedAt: status.AddedAt.UTC(),
 		Active: status.Active, Error: status.Error, VerifyURL: verifyURL(status.Error), Quota: []quotaBucket{}, Shared: status.Shared, AICredits: status.AICredits,
 		Device: device{Device: status.Device, Hostname: status.Device.Hostname(), UserAgent: status.Device.UserAgent()},
 	}

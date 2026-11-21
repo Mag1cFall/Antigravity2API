@@ -8,6 +8,7 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
+// TestGeminiOutputParts_MergeTextAndReasoning 合并相邻思考与相邻正文，签名挂在思考 part 上
 func TestGeminiOutputParts_MergeTextAndReasoning(t *testing.T) {
 	result := generationResult{
 		events: []antigravity.Event{
@@ -44,6 +45,7 @@ func TestGeminiOutputParts_MergeTextAndReasoning(t *testing.T) {
 	}
 }
 
+// TestGeminiOutputParts_TextOnly 把相邻正文合并为一个 part
 func TestGeminiOutputParts_TextOnly(t *testing.T) {
 	result := generationResult{
 		events: []antigravity.Event{
@@ -66,6 +68,7 @@ func TestGeminiOutputParts_TextOnly(t *testing.T) {
 	}
 }
 
+// TestGeminiOutputParts_LeadingThoughtSignature 把思考之前的签名挂在其后的思考 part 上
 func TestGeminiOutputParts_LeadingThoughtSignature(t *testing.T) {
 	result := generationResult{
 		events: []antigravity.Event{
@@ -91,6 +94,7 @@ func TestGeminiOutputParts_LeadingThoughtSignature(t *testing.T) {
 	}
 }
 
+// TestGeminiOutputParts_StandaloneThoughtSignatureFallback 只有签名时输出一个带签名的空文本 part
 func TestGeminiOutputParts_StandaloneThoughtSignatureFallback(t *testing.T) {
 	result := generationResult{
 		events: []antigravity.Event{
@@ -110,6 +114,7 @@ func TestGeminiOutputParts_StandaloneThoughtSignatureFallback(t *testing.T) {
 	}
 }
 
+// TestGeminiOutputParts_WithToolCall 函数调用之前的签名挂在思考 part 上，函数调用另成一个 part
 func TestGeminiOutputParts_WithToolCall(t *testing.T) {
 	call := antigravity.FunctionCall{
 		ID:        "call_1",

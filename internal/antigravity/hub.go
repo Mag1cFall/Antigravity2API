@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -40,7 +41,8 @@ type HubState struct {
 	Marketplaces  map[string]MarketplaceCache `json:"marketplaces,omitempty"`
 }
 
-// hub 表示虚拟 Hub 的本地状态、保存函数、language_server 启动时刻、界面会话标识、是否冷启动、最早一个带实验开关的 Hub 事件的时刻、启动耗时与启动耗时事件的记录时刻、冷启动 userinfo 的发出时刻、最近一次 fetchUserInfo 的结束时刻、是否已加载过会话、各会话的进度、待上报的 clearcut 事件、本虚拟进程第一次生成前的插件市场目录读取（没有发起时为 nil，结束时关闭）、本虚拟进程第一次目录读取结束时关闭的通道、最近一次发送消息的时刻与唤醒侧栏定时统计的通道、待记录的目录读取事件、下一个新会话是否列出远程插件与是否轮询远程列表
+// hub 保存虚拟 Hub 的运行状态、clearcut 上报队列、会话进度与插件市场读取状态
+// 全部字段由所属 Client.mu 保护，本地状态见 docs/protocol.md“虚拟进程”
 type hub struct {
 	state     HubState
 	save      func(HubState) error
@@ -64,7 +66,8 @@ type hub struct {
 	remote    bool
 }
 
-// eventShape 表示 clearcut 事件的外层形态：blank 为真时公共参数留空，flags 为真时附实验开关，empty 为真时附空的开关字段，ui 为真时带界面会话与事件时刻，env 为真时载荷带客户端环境，compared 为真时开关取对照用的 listExperiments 开关
+// eventShape 控制 clearcut 事件扩展的公共参数、实验开关、界面字段与环境字段
+// 各形态定义见 docs/protocol.md“伴随请求”的 clearcut 上报说明
 type eventShape struct {
 	blank, flags, empty, ui, env, compared bool
 }
@@ -97,9 +100,6 @@ func (c *Client) countConversation() {
 	c.hub.state.Conversations++
 	state, save := c.hub.state, c.hub.save
 	c.mu.Unlock()
-	if save == nil {
-		return
-	}
 	if err := save(state); err != nil {
 		slog.Warn("保存虚拟 Hub 状态失败 | 错误="+err.Error(), "source", c.account)
 	}
@@ -125,7 +125,8 @@ func eventMillis(event []byte) uint64 {
 	return at
 }
 
-// flushClearcut 把队列前部最多 clearcutBatch 个事件合成一个 LogRequest，以账户 Bearer 经 HTTP/2 上报，队列为空时不发；连接失败或返回 408、429、5xx 时这些事件留在队列前部随下一次上报重发，其余状态码时把发出的这些事件移出队列，上报期间新插入的事件留在队列中
+// flushClearcut 把队列前部最多 clearcutBatch 个事件合成一个 LogRequest 经 HTTP/2 上报
+// 连接失败或返回 408、429、5xx 时事件留在队列前部重发，其余状态码移出队列
 func (c *Client) flushClearcut(ctx context.Context) {
 	c.mu.Lock()
 	events := slices.Clone(c.hub.queue[:min(len(c.hub.queue), clearcutBatch)])
@@ -176,9 +177,7 @@ func hubParams(device Device, blank bool, params map[string]any) map[string]any 
 	if blank {
 		out = map[string]any{"machineId": "", "subclientType": "", "environmentType": "", "ideVersion": "", "ideName": "", "os": ""}
 	}
-	for key, value := range params {
-		out[key] = value
-	}
+	maps.Copy(out, params)
 	return out
 }
 
@@ -234,7 +233,8 @@ var startupRegions = []string{
 	"SetUpTelemetryErrorReporter", "SetUpWorkspaceManager",
 }
 
-// hubStartup 在冷启动第一次 fetchUserInfo 之后同一时刻记录安装状态、用户配置与 Hub 存储加载、会话摘要核对、language_server 启动耗时与摘要订阅事件，并记下启动耗时与记录时刻：client_event_time_ms 为各事件在 language_server 启动后实际发生的时刻，三个存储加载在 34–111 ms 内相隔 0–2 ms，会话摘要核对在第一个存储加载之后 0–313 ms，启动耗时事件在各阶段耗时之和再加 18–35 ms 处，摘要订阅在 1127–2769 ms，摘要存储写入批次的锁等待事件在第一个存储加载之后 3992–4996 ms（官方 2.32.2 与 2.33.0 冷启动），事件按实际时刻排列
+// hubStartup 在冷启动首次 fetchUserInfo 后同一时刻记录存储加载、摘要核对、启动耗时与锁等待事件
+// 返回记录时刻，事件顺序与时间区间见 docs/protocol.md“伴随请求”的 clearcut 事件表
 func (c *Client) hubStartup() time.Time {
 	conversations := c.conversations()
 	c.mu.Lock()
@@ -245,15 +245,13 @@ func (c *Client) hubStartup() time.Time {
 		return map[string]any{"client_event_time_ms": int(launched.UnixMilli()) + offset}
 	}
 	with := func(params map[string]any, extra map[string]any) map[string]any {
-		for key, value := range extra {
-			params[key] = value
-		}
+		maps.Copy(params, extra)
 		return params
 	}
 	loaded := between(34, 111)
 	offsets := []int{loaded, loaded + between(0, 2)}
 	offsets = append(offsets, offsets[1]+between(0, 2))
-	stores := []map[string]any{{"file_type": "app_state"}, {"file_type": "user_config", "auto_execution_policy": autoExecution[c.device.OS == "linux"].setting}, {}}
+	stores := []map[string]any{{"file_type": "app_state"}, {"file_type": "user_config", "auto_execution_policy": autoExecution[c.device.OS != "windows"].setting}, {}}
 	reconcile := map[string]any{"duration_ms": between(5, 317), "outcome": "success", "rows": conversations, "trigger": "startup", "pruned": 0}
 	if conversations == 0 {
 		reconcile = map[string]any{"duration_ms": 0, "outcome": "empty", "rows": 0, "trigger": "empty_on_open", "pruned": 0}
@@ -290,7 +288,8 @@ func (c *Client) hubStartup() time.Time {
 	return at
 }
 
-// hubMigrations 记录冷启动带实验开关的迁移、摘要订阅、摘要核对、搜索索引预热与摘要存储对照事件，后四个事件的先后按 migrationOrders 随机取一种；实验开关为空（listExperiments 失败）时以 retroactive_migration_skipped_feature_disabled 代替前两个迁移事件
+// hubMigrations 记录冷启动迁移组与摘要核对、索引预热、存储对照事件
+// 开关为空时替换前两个迁移事件，后四项先后按 migrationOrders 随机，见 docs/protocol.md“伴随请求”
 func (c *Client) hubMigrations() {
 	conversations := c.conversations()
 	c.mu.Lock()
@@ -371,13 +370,15 @@ func (c *Client) coldStarted() bool {
 	return c.hub.cold
 }
 
-// loadOrders 为界面加载各事件的先后，最后都是侧栏加载与项目列表加载：a 依次为摘要加载、项目列表、会话数统计与带项目标识的项目列表，b 依次为不带开关的项目列表、会话数统计、带项目标识的项目列表与摘要加载，c 依次为摘要加载、会话数统计、项目列表与带项目标识的项目列表；会话数统计之后随即记录 sidecar 启动事件；按官方 2.31.1 的 10 次冷启动出现的次数各列一次
+// loadOrders 为冷启动界面加载前四个事件的先后（a、b、c 按 5:1:3 分布，对应 9 次正常冷启动）
+// 三种顺序与后续事件见 docs/protocol.md“伴随请求”的界面加载表
 var loadOrders = []byte("aaaaabccc")
 
 // clusterOrders 为界面加载末尾会话列表加载完成、分组方式与分组会话数统计三个事件的先后：l 列表加载完成、g 分组方式、c 分组会话数，取官方 2.30.0 冷启动中出现过的四种
 var clusterOrders = []string{"lgc", "lcg", "cgl", "clg"}
 
-// hubInterface 按官方界面加载的先后与间隔记录侧栏、项目与输入区事件：启动事件之后 376–457 ms 起按 loadOrders 取一种先后记录界面加载（不分组的会话数统计为 0，侧栏此时还没有载入会话，官方 2.32.2 与 2.33.0 冷启动），项目列表加载后 2–16 ms 记录登录状态，1.24–1.65 s 记录 clusterOrders 的三个事件，再过 12–40 ms 记录输入区渲染（启动各阶段耗时取官方 2.33.0 冷启动的关系），渲染后 170–253 ms 再记录一次分组方式，渲染后 13–139 ms 读取 cascadeNuxes 并此后每 120 s 读取一次，第一次读取的时刻之后 −4–320 ms 列出远程插件，列出结束 4–12 ms 后读取远程会话列表，其后 200–448 ms 读取远程项目列表、269–352 ms 再列出一次远程插件，再过 164–356 ms 读取插件市场目录；按 sidebarTicks 定时统计侧栏会话数，首次会话数统计 60 s 后重新读取账户资料，此后每过 statusRefresh 按 refreshSettings 读取账户设置，第一次同时记录分组方式与分组会话数；ctx 结束时返回
+// hubInterface 按官方冷启动界面加载的先后与间隔记录界面事件、远程列表与周期刷新，ctx 结束时返回
+// 事件顺序、间隔与后续刷新节奏见 docs/protocol.md“伴随请求”的界面加载表
 func (c *Client) hubInterface(ctx context.Context) {
 	conversations := c.conversations()
 	shift := between(83, 143)
@@ -521,7 +522,8 @@ func (c *Client) hubInterface(ctx context.Context) {
 	}
 }
 
-// sidebarTicks 按官方 2.33.0 记录侧栏的定时会话数统计：不分组统计（有会话时随后记录无项目会话统计）在首条统计之后 58.6–59.9 s、分组统计在界面加载的分组统计之后 60.0 s 各记一次，此后各自每 60 s 一次；上一周期内没有发送消息时这一周期不记录并停止，下一次发送时立即记录不分组统计、39–55 ms 后记录分组统计并重新计时（v2330-families 与 v2330-session 的侧栏事件）
+// sidebarTicks 按官方节奏定时记录侧栏不分组与分组会话数统计，ctx 结束时返回
+// 上一周期无发送消息时停止，下一次发送时由 touchSidebar 唤醒，间隔见 docs/protocol.md“伴随请求”
 func (c *Client) sidebarTicks(ctx context.Context, counted, grouped time.Time) {
 	plain := counted.Add(time.Duration(between(58604, 59860)) * time.Millisecond)
 	group := grouped.Add(time.Duration(between(59999, 60015)) * time.Millisecond)
@@ -573,7 +575,7 @@ func (c *Client) touchSidebar() {
 	}
 }
 
-// sidebarGrouped 记录按项目分组的侧栏会话数统计，有会话时随后记录无项目会话统计（官方 2.33.0 没有会话时不记录，v2330-vm）
+// sidebarGrouped 记录按项目分组的侧栏会话数统计，有会话时随后记录无项目会话统计（官方 2.33.0 没有会话时不记录）
 func (c *Client) sidebarGrouped(conversations int) {
 	c.hubEvent("sidebar_conversations", eventShape{flags: true, ui: true, env: true}, map[string]any{
 		"conversationCount": conversations, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "pinnedConversationCount": 0, "loadedProjectCount": 1, "knownProjectCount": 1, "mode": "agentManager", "project_4k_mode": "default",

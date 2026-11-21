@@ -179,7 +179,7 @@ func (s *server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		slog.InfoContext(r.Context(), message, "source", stored.ID)
 	}
 	if input.Proxy != nil {
-		slog.InfoContext(r.Context(), "账户代理已设置 | 代理="+cmp.Or(redactProxy(stored.Proxy), "跟随全局"), "source", stored.ID)
+		slog.InfoContext(r.Context(), "账户代理已设置 | 代理="+cmp.Or(proxypool.Redact(stored.Proxy), "跟随全局"), "source", stored.ID)
 	}
 	if input.Priority != nil {
 		slog.InfoContext(r.Context(), "账户优先级已设置 | 优先级="+strconv.Itoa(stored.Priority), "source", stored.ID)
@@ -623,11 +623,13 @@ func decodeJSON(r *http.Request, target any) error {
 	return nil
 }
 
-// writeJSON 写出 JSON 响应
+// writeJSON 写出 JSON 响应，&、<、> 原样写出，从响应中复制的授权链接可直接打开
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(value)
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	encoder.Encode(value)
 }
 
 // writeError 写出 {"error":{"code","message"}} 错误响应

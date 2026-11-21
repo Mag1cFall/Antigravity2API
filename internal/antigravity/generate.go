@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -79,7 +80,7 @@ func (e *ContentPolicyError) Error() string {
 	return "上游因内容策略结束生成: " + e.Reason
 }
 
-// AbnormalFinishError 表示上游以格式错误的函数调用、意外的工具调用或格式错误的回复结束、重新生成用完仍如此且这次生成没有输出，Usage 为上游最后给出的用量
+// AbnormalFinishError 表示上游以格式错误的函数调用、意外的工具调用或格式错误的回复结束、重新生成或续写用完仍如此且这次生成没有函数调用，Usage 为上游最后给出的用量
 type AbnormalFinishError struct {
 	Reason  string
 	Message string
@@ -88,9 +89,9 @@ type AbnormalFinishError struct {
 
 func (e *AbnormalFinishError) Error() string {
 	if e.Message != "" {
-		return "上游异常结束生成且没有输出: " + e.Reason + ": " + e.Message
+		return "上游异常结束生成: " + e.Reason + ": " + e.Message
 	}
-	return "上游异常结束生成且没有输出: " + e.Reason
+	return "上游异常结束生成: " + e.Reason
 }
 
 // PromptFeedbackError 表示上游以 promptFeedback 按输入本身拒绝请求且没有返回候选，同一输入重发仍被拒绝；Reason 为 blockReason，Message 为 blockReasonMessage，Usage 为上游计入的输入用量
@@ -298,7 +299,8 @@ type WireGenerationConfig struct {
 // thinkingLevels 为目录 thinkingLevel 中有枚举名的取值，其余取值（如 XHigh 档的 100）按官方客户端以数字发出
 var thinkingLevels = map[int]string{1: "LOW", 2: "MEDIUM", 3: "HIGH"}
 
-// BuildEnvelope 按官方客户端的信封格式组装一次 Agent 生成请求，system 为已按档位组装好的系统指令，config 中只有模型族接受且生效的参数进入 generationConfig，GPT-OSS 族没有描述的函数以函数名为描述，Claude 族的参数 Schema 去掉 anyOf；函数结果的配对与改写见 wireContents，函数结果转录失败时返回错误
+// BuildEnvelope 按官方客户端格式组装一次 Agent 生成请求信封
+// 参数筛选、工具声明改写与函数结果配对见 docs/protocol.md“信封”与“工具声明”
 func BuildEnvelope(project string, model CatalogModel, conversation Conversation, system string, contents []Content, tools Tools, config GenerationConfig, now time.Time) (Envelope, error) {
 	wired, err := wireContents(contents, model)
 	if err != nil {
@@ -386,7 +388,8 @@ func labels(model CatalogModel, conversation Conversation) map[string]string {
 	return values
 }
 
-// wireContents 把规范消息转成上游消息：Claude 与 GPT-OSS 族没有 ID 的函数调用生成 ID，函数结果按调用补齐名称与 ID，结果所在轮的角色 Claude 族为 user、其余族为 model，相邻消息的结果并入同一轮，被 user 轮隔开的结果移回调用之后，同一消息中的其余 part 在其他族另成 user 轮；Claude 族的函数调用在其后的 user 消息与函数结果消息中没有结果时补上中断结果，末尾 assistant 轮的函数调用保持原样
+// wireContents 把规范消息转换为上游 contents，并按模型族处理函数调用与函数结果
+// 角色映射、合并与 Claude 族中断结果补齐规则见 docs/protocol.md“contents 与工具往返编码”
 func wireContents(contents []Content, model CatalogModel) ([]WireContent, error) {
 	claude := model.ModelProvider == ProviderAnthropic
 	google := model.ModelProvider == ProviderGoogle
@@ -612,7 +615,8 @@ func regroupResults(contents []Content) []Content {
 	return regrouped
 }
 
-// linkFunctionResults 记录消息中的函数调用，为缺少名称或 ID 的函数结果先按调用 ID、再按调用顺序取第一个同名（结果无名称时取第一个）待返回调用补齐；关联不到调用的函数结果改写为 {"functionResponse":{"name","response"}} 文本转录，其中的媒体随后作为普通 part；不含函数结果的 user 轮清空待返回调用
+// linkFunctionResults 按调用 ID 与名称把函数结果配对到待返回的函数调用，未配对结果转录为文本
+// 配对与转录规则见 docs/protocol.md“contents 与工具往返编码”
 func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content, error) {
 	if content.Role == RoleUser && !slices.ContainsFunc(content.Parts, func(part Part) bool { return part.FunctionResult != nil }) {
 		*pendingCalls = nil
@@ -628,7 +632,8 @@ func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content
 			continue
 		}
 		matched := slices.IndexFunc(*pendingCalls, func(call FunctionCall) bool { return result.ID != "" && call.ID == result.ID })
-		if matched < 0 {
+		byID := matched >= 0
+		if !byID {
 			matched = slices.IndexFunc(*pendingCalls, func(call FunctionCall) bool { return result.Name == "" || call.Name == result.Name })
 		}
 		if matched < 0 {
@@ -639,9 +644,14 @@ func linkFunctionResults(content Content, pendingCalls *[]FunctionCall) (Content
 			parts = append(append(parts, Part{Text: string(transcript)}), result.Parts...)
 			continue
 		}
-		if result.Name == "" || result.ID == "" {
+		call := (*pendingCalls)[matched]
+		name := cmp.Or(result.Name, call.Name)
+		if byID {
+			name = call.Name
+		}
+		if name != result.Name || result.ID == "" {
 			linked := *result
-			linked.Name, linked.ID = cmp.Or(result.Name, (*pendingCalls)[matched].Name), cmp.Or(result.ID, (*pendingCalls)[matched].ID)
+			linked.Name, linked.ID = name, cmp.Or(result.ID, call.ID)
 			part.FunctionResult = &linked
 		}
 		parts = append(parts, part)
@@ -678,17 +688,42 @@ func functionOutput(content json.RawMessage) string {
 	return string(canonicalJSON(content))
 }
 
-// canonicalJSON 按官方客户端回放函数参数的方式重写 JSON：对象键排序、去空白、不转义 HTML 字符
+// canonicalJSON 按官方客户端回放函数参数的方式重写 JSON：对象键排序、去空白、不转义 HTML 字符，数字按 float64 写出，按 float64 写出与原文不同的整数保留原文
 func canonicalJSON(raw json.RawMessage) json.RawMessage {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := decoder.Decode(&value); err != nil || decoder.More() {
 		return raw
 	}
-	data, err := marshal(value)
-	if err != nil {
-		return raw
-	}
+	data, _ := marshal(exactNumbers(value))
 	return data
+}
+
+// exactNumbers 把 json.Number 换成 float64，按 float64 写出与原文不同的整数保留为 json.Number
+func exactNumbers(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, item := range value {
+			value[key] = exactNumbers(item)
+		}
+	case []any:
+		for index, item := range value {
+			value[index] = exactNumbers(item)
+		}
+	case json.Number:
+		float, err := value.Float64()
+		if err != nil {
+			return value
+		}
+		if _, ok := new(big.Int).SetString(value.String(), 10); ok {
+			if encoded, _ := json.Marshal(float); string(encoded) != value.String() {
+				return value
+			}
+		}
+		return float
+	}
+	return value
 }
 
 // marshal 按官方客户端的 JSON 编码输出，不转义 HTML 字符，末尾不带换行
@@ -752,9 +787,7 @@ type streamChunk struct {
 	} `json:"response"`
 	TraceID string `json:"traceId"`
 	Error   *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Status  string `json:"status"`
+		Code int `json:"code"`
 	} `json:"error"`
 }
 
@@ -765,7 +798,8 @@ type Exchange struct {
 	Response []byte
 }
 
-// StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回本次请求与响应的正文；Tab 补全信封以编辑器版的 User-Agent 发出。上游以 CONTINUATION 结束一跳时以同一信封带上续接令牌发下一跳，一跳在流中出现过续接令牌之后中断或没有结束原因时以最近一次的令牌重拨，同一跳最多 midStreamResumes 次，各跳事件接在同一通道，后续各跳的用量加上此前各跳的合计，以 CONTINUATION 结束的一跳不发出自己的 usage 事件；交换记录的请求正文为第一跳的，响应正文为各跳依次相接
+// StreamGenerateContent 发送信封并把 SSE 响应解码为规范事件，同时返回请求与响应正文
+// Tab 补全信封以编辑器版 User-Agent 发出；遇 CONTINUATION 或中断续接令牌时自动续接，规则见 docs/protocol.md“长解码续接”
 func (c *Client) StreamGenerateContent(ctx context.Context, envelope Envelope) (<-chan Event, *Exchange, error) {
 	exchange := &Exchange{URL: c.base + "/v1internal:streamGenerateContent?alt=sse"}
 	response, payload, err := c.streamHop(ctx, envelope, exchange)
@@ -885,6 +919,7 @@ func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exc
 	}
 	request.Header.Set("User-Agent", agent)
 	request.Header.Set("Content-Type", "application/json")
+	c.userProject(request)
 	request = c.traced(request)
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -897,12 +932,13 @@ func (c *Client) streamHop(ctx context.Context, envelope Envelope, exchange *Exc
 		defer response.Body.Close()
 		body, _ := io.ReadAll(response.Body)
 		exchange.Response = append(exchange.Response, body...)
-		return nil, payload, &UpstreamError{Status: response.StatusCode, Body: body}
+		return nil, payload, &UpstreamError{Status: response.StatusCode, Body: body, RetryAfter: response.Header.Get("Retry-After")}
 	}
 	return response, payload, nil
 }
 
-// DecodeStream 逐行读取 SSE，把 data 事件转成规范事件，candidate 的 groundingMetadata 转成搜索事件，正文、思考、函数调用与签名事件带所在事件的累计用量与 modelVersion，usageMetadata 没有 promptTokenCount 时输入用量取总量减去输出与思考；结束时发出 usage 与带 finishReason、finishMessage 的 finish，只有 finishMessage 的 candidate 以 IMAGE_OTHER 结束，两者都没有时以 ErrIncompleteStream 结束；没有发出函数调用时流中断或以 ErrIncompleteStream 结束的错误事件带流中最近一次的续接令牌；已发出函数调用后上游没有结束帧就结束或读取中断时以 STOP 结束、结束事件的 Err 带该原因；promptFeedback 的 blockReason 在没有发出函数调用时以安全设置、屏蔽词或禁止内容结束为 PromptFeedbackError；不带 role 的账户受限通知以 AccountRestrictedError 结束，不带 role 的过滤提示记为原因 OTHER，它、其余 blockReason 与内容策略类原因在已发出函数调用时以 STOP 结束、结束事件的 Err 带被忽略的 ContentPolicyError，否则以 ContentPolicyError 结束
+// DecodeStream 逐行读取 SSE 响应并向 events 发送规范事件
+// 事件映射、累计用量、内容策略、输入拒绝与异常结束规则见 docs/protocol.md“规范事件”与“过滤提示与内容策略”
 func DecodeStream(reader io.Reader, events chan<- Event) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, 64<<20)
@@ -912,8 +948,10 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 	var checkpoint string
 	finish := Event{Kind: EventFinish}
 	for scanner.Scan() {
-		line, ok := bytes.CutPrefix(scanner.Bytes(), []byte("data: "))
-		if !ok {
+		line, ok := bytes.CutPrefix(scanner.Bytes(), []byte("data:"))
+		if ok {
+			line = bytes.TrimPrefix(line, []byte(" "))
+		} else if len(line) == 0 || line[0] != '{' || !json.Valid(line) {
 			continue
 		}
 		var chunk streamChunk
@@ -939,11 +977,14 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 				TotalTokens:     metadata.TotalTokenCount,
 			}
 		}
-		if feedback := chunk.Response.PromptFeedback; feedback != nil && feedback.BlockReason != "" {
+		if feedback := chunk.Response.PromptFeedback; feedback != nil && feedback.BlockReason != "" && feedback.BlockReason != "BLOCK_REASON_UNSPECIFIED" {
 			prompted = true
 			finish.FinishReason, finish.FinishMessage = feedback.BlockReason, feedback.BlockReasonMessage
 		}
 		for _, candidate := range chunk.Response.Candidates {
+			if candidate.FinishReason == "FINISH_REASON_UNSPECIFIED" {
+				candidate.FinishReason = ""
+			}
 			if parts := candidate.Content.Parts; candidate.Content.Role == "" && len(parts) == 1 && strings.HasPrefix(parts[0].Text, restrictedText) {
 				events <- Event{Kind: EventError, Err: &AccountRestrictedError{Message: parts[0].Text}, TraceID: finish.TraceID, ResponseID: finish.ResponseID}
 				return
@@ -1005,7 +1046,8 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 	events <- finish
 }
 
-// emitPart 把上游的一个 part 转成文本、思考、函数调用、内联媒体或独立签名事件，所在事件带 usageMetadata 时附上累计用量，model 为所在事件的 modelVersion，final 为所在 candidate 是否带结束原因
+// emitPart 把上游的一个 part 转为规范事件写入 events
+// 思考中的内联媒体只保留签名，字段映射见 docs/protocol.md“规范事件”
 func emitPart(part WirePart, counted, final bool, usage *Usage, model string, events chan<- Event) {
 	if !counted {
 		usage = nil
@@ -1017,6 +1059,10 @@ func emitPart(part WirePart, counted, final bool, usage *Usage, model string, ev
 			id = fmt.Sprintf("call_%06d", rand.IntN(1000000))
 		}
 		events <- Event{Kind: EventToolCall, Usage: usage, ProviderModel: model, Final: final, ToolCall: &FunctionCall{ID: id, Name: part.FunctionCall.Name, Arguments: part.FunctionCall.Args, ThoughtSignature: part.ThoughtSignature}}
+	case part.InlineData != nil && part.Thought:
+		if part.ThoughtSignature != "" {
+			events <- Event{Kind: EventThoughtSignature, Usage: usage, ProviderModel: model, Final: final, ThoughtSignature: part.ThoughtSignature}
+		}
 	case part.InlineData != nil:
 		events <- Event{Kind: EventMedia, Usage: usage, ProviderModel: model, Final: final, Media: &Blob{MIME: part.InlineData.MIMEType, Data: part.InlineData.Data}, ThoughtSignature: part.ThoughtSignature}
 	case part.Thought && part.Text != "":

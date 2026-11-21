@@ -2,6 +2,7 @@ package proxypool
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"slices"
 	"sync"
@@ -235,4 +236,13 @@ func Redact(value string) string {
 		return value
 	}
 	return parsed.Redacted()
+}
+
+// Fixed 返回固定代理值的选择函数：direct 直连，其余按代理 URL
+func Fixed(value string) func(*http.Request) (*url.URL, error) {
+	if value == Direct {
+		return func(*http.Request) (*url.URL, error) { return nil, nil }
+	}
+	proxy, err := url.Parse(value)
+	return func(*http.Request) (*url.URL, error) { return proxy, err }
 }

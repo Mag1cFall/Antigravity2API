@@ -27,11 +27,13 @@ const finishStopSequence = "STOP_SEQUENCE"
 // finishUnexpectedToolCall 为请求没有声明函数而上游返回函数调用时的结束原因
 const finishUnexpectedToolCall = "UNEXPECTED_TOOL_CALL"
 
-// output 表示一次生成在转发给客户端前对上游事件的处理：输出上限与本地计数所用的上游请求、函数名还原、思考可见性、停止序列、请求是否没有声明函数、工具约定、JSON 输出与搜索来源的域名过滤，并按模型族记下思考签名、收到首个上游事件与最后一个思考事件的时刻
+// output 表示一次生成在转发给客户端前对上游事件的状态与过滤处理器
+// 负责输出上限、停止序列、思考可见性、工具约定、JSON 校验、搜索域名过滤与签名收集
 type output struct {
 	first       time.Time
 	thought     time.Time
 	limit       *int64
+	local       antigravity.Usage
 	prompt      antigravity.WireRequest
 	names       map[string]string
 	hide        bool
@@ -41,6 +43,7 @@ type output struct {
 	json        *jsonOutput
 	search      *antigravity.SearchOptions
 	provider    string
+	origin      string
 	signed      signatureRecord
 	usage       *antigravity.Usage
 	calls       int
@@ -76,12 +79,17 @@ func (o *output) process(event antigravity.Event) []antigravity.Event {
 	return out
 }
 
-// reply 返回已转发回答的指纹
-func (o *output) reply() string {
-	return answerKey(o.answer)
+// answerText 返回已转发回答的正文
+func (o *output) answerText() string {
+	var text strings.Builder
+	for _, part := range o.answer {
+		text.WriteString(part.Text)
+	}
+	return text.String()
 }
 
-// handle 返回一个上游事件处理后应转发的事件；请求没有声明函数时丢弃函数调用；停止序列命中或约定不满足时 done 置位，其后的上游事件丢弃；停止序列命中时上游尚未给出用量则丢弃其后的事件直到上游给出用量或结束，再随用量发出结束事件
+// handle 返回单个上游事件处理后应转发的事件
+// 停止序列命中或约定不满足后置位 done 丢弃后续事件；命中停止序列而尚无用量时等到用量或结束再收尾
 func (o *output) handle(event antigravity.Event) []antigravity.Event {
 	if o.done {
 		return nil
@@ -95,7 +103,7 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 		}
 		return o.finish(*o.stopped)
 	}
-	o.signed.origin(event.ThoughtSignature, o.provider)
+	o.signed.origin(event.ThoughtSignature, o.origin)
 	var out []antigravity.Event
 	if event.Kind != antigravity.EventText && event.Kind != antigravity.EventUsage {
 		if pending := o.stop.flush(); pending != "" {
@@ -142,7 +150,7 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 		o.calls++
 		if call.ThoughtSignature != "" {
 			o.signed.calls[call.ID] = call.ThoughtSignature
-			o.signed.origin(call.ThoughtSignature, o.provider)
+			o.signed.origin(call.ThoughtSignature, o.origin)
 		}
 		if err := o.tools.check(call, o.calls); err != nil {
 			o.done = true
@@ -218,12 +226,7 @@ func (o *output) prefixTokens(reported antigravity.Usage) int64 {
 	return tokens
 }
 
-// signatures 返回本次输出中的思考签名
-func (o *output) signatures() signatureRecord {
-	return o.signed
-}
-
-// signatureRecord 表示思考签名：calls 为各函数调用 ID 与各回答指纹的签名，origins 为各签名摘要对应的模型族，reply 为本次回答正文上与正文之后的签名
+// signatureRecord 表示思考签名：calls 为各函数调用 ID 与各回答指纹的签名，origins 为各签名摘要对应的来源（见 signatureOrigin），reply 为本次回答正文上与正文之后的签名
 type signatureRecord struct {
 	calls   map[string]string
 	origins map[string]string
@@ -235,20 +238,28 @@ func newSignatureRecord() signatureRecord {
 	return signatureRecord{calls: map[string]string{}, origins: map[string]string{}}
 }
 
-// origin 记下签名来自的模型族
-func (r signatureRecord) origin(signature, provider string) {
+// origin 记下签名来自的模型（见 signatureOrigin）
+func (r signatureRecord) origin(signature, origin string) {
 	if signature != "" {
-		r.origins[signatureDigest(signature)] = provider
+		r.origins[signatureDigest(signature)] = origin
 	}
 }
 
-// foreign 判断签名是否由 provider 之外的模型族生成，Gemini 族以外的请求接受任何签名
-func (r signatureRecord) foreign(signature, provider string) bool {
-	if signature == "" || provider != antigravity.ProviderGoogle {
+// foreign 判断签名不能回放给 origin 对应的模型：Gemini 族请求中不是 Base64 文本的签名，以及会话中记为其他模型生成的签名；其余模型族接受任何签名
+func (r signatureRecord) foreign(signature, origin string) bool {
+	if signature == "" || !strings.HasPrefix(origin, antigravity.ProviderGoogle) {
 		return false
 	}
-	origin, ok := r.origins[signatureDigest(signature)]
-	return ok && origin != provider
+	recorded, ok := r.origins[signatureDigest(signature)]
+	return !base64Signature.MatchString(signature) || ok && recorded != origin
+}
+
+// signatureOrigin 返回签名来源的记法：Gemini 族为模型族与去掉思考档位的目录 ID（同一模型的各档位可互相回放签名，不同模型不能），其余为模型族
+func signatureOrigin(model antigravity.CatalogModel) string {
+	if model.ModelProvider != antigravity.ProviderGoogle {
+		return model.ModelProvider
+	}
+	return model.ModelProvider + "/" + levelSuffix.ReplaceAllString(model.ID, "")
 }
 
 // signatureDigest 返回签名的 SHA-256 前 16 字节十六进制
@@ -312,10 +323,8 @@ func (o *output) claudeArguments(call antigravity.FunctionCall) json.RawMessage 
 			if json.Unmarshal(declaration.Parameters, &schema) != nil || decoder.Decode(&arguments) != nil || !unquoteEnums(schema, arguments) {
 				return call.Arguments
 			}
-			if encoded, err := json.Marshal(arguments); err == nil {
-				return encoded
-			}
-			return call.Arguments
+			encoded, _ := json.Marshal(arguments)
+			return encoded
 		}
 	}
 	return call.Arguments
@@ -429,7 +438,7 @@ type jsonOutput struct {
 	instruction string
 }
 
-// validate 去掉首尾空白与 Markdown 代码块围栏后校验 JSON 与 Schema，返回去掉围栏的正文；要求枚举时正文去掉引号后须为其中一个值
+// validate 去掉首尾空白与 Markdown 代码块围栏（含写在一行内的 ```json{…}```）后校验 JSON 与 Schema，返回去掉围栏的正文；要求枚举时正文去掉引号后须为其中一个值
 func (j *jsonOutput) validate(text string) (string, error) {
 	trimmed := strings.TrimSpace(text)
 	if j.enum != nil {
@@ -445,6 +454,8 @@ func (j *jsonOutput) validate(text string) (string, error) {
 	if fenced, ok := strings.CutPrefix(trimmed, "```"); ok {
 		if newline := strings.IndexByte(fenced, '\n'); newline >= 0 {
 			fenced = fenced[newline+1:]
+		} else if len(fenced) >= 4 && strings.EqualFold(fenced[:4], "json") {
+			fenced = fenced[4:]
 		}
 		if body, ok := strings.CutSuffix(strings.TrimSpace(fenced), "```"); ok {
 			trimmed = strings.TrimSpace(body)

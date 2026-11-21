@@ -16,8 +16,9 @@ export interface Session {
   local: boolean
 }
 
-// UpdateStatus 对应 GET /api/update，mode 为 binary（可在线更新）、container（随镜像更新）或 development（源码构建）
+// UpdateStatus 对应 GET /api/update，mode 为 binary（可在线更新）、container（随镜像更新）或 development（源码构建），log_dir 为服务日志目录的绝对路径
 export interface UpdateStatus {
+  log_dir: string
   current: string
   latest?: string
   available: boolean
@@ -32,7 +33,7 @@ export interface UpdateStatus {
 }
 
 // UpdateProgress 是在线更新的阶段与发行包的已下载和总字节数，总字节数未知时为 0
-export interface UpdateProgress {
+interface UpdateProgress {
   stage: 'download' | 'verify' | 'install' | 'restart'
   downloaded: number
   total: number

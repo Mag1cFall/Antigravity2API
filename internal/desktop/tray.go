@@ -71,7 +71,8 @@ type trayEntry struct {
 	sub                []trayEntry
 }
 
-// addTray 创建托盘图标并按平台惯例设置单击、双击与右键（见 attach）；菜单依次为各额度组剩余、各账户额度、刷新额度、显示窗口（window 为真时）、在浏览器中打开、复制 API 地址、开机启动与退出，文字按界面语言；应用启动后每分钟、刷新额度后与界面语言变化时读取额度并重建菜单
+// addTray 创建托盘图标、绑定交互事件（见 attach）并定时按账户额度与界面语言重建菜单，菜单项见 docs/development.md「命令行版与桌面版」
+// window 为 false 时菜单省略“显示窗口”项
 func addTray(app *application.App, options Options, page *url.URL, window bool, show func()) *tray {
 	uiLocale.Store(i18n.SystemLocale())
 	item := app.SystemTray.New()

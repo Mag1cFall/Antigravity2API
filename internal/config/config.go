@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Mag1cFall/Antigravity2API/internal/prompt"
+	"github.com/Mag1cFall/Antigravity2API/internal/robustio"
 )
 
 // File 是服务读取与保存配置的 env 文件
@@ -27,6 +28,7 @@ var Keys = []string{
 	"LISTEN",
 	"API_KEYS",
 	"API_KEY_ACCOUNTS",
+	"API_KEY_NAMES",
 	"AUTH_DIR",
 	"RUNTIME_DIR",
 	"PROXY",
@@ -61,20 +63,20 @@ var Keys = []string{
 // RestartKeys 是重启服务后才生效的配置项，其余项保存后下一次请求生效
 var RestartKeys = []string{"LISTEN", "AUTH_DIR", "RUNTIME_DIR"}
 
-// SystemPrompts 是系统提示档位：全保留、中等、激进与自定义
-var SystemPrompts = []string{"full", "medium", "aggressive", "custom"}
+// systemPrompts 是系统提示档位：全保留、中等、激进与自定义
+var systemPrompts = []string{string(prompt.TierFull), string(prompt.TierMedium), string(prompt.TierAggressive), string(prompt.TierCustom)}
 
-// MediaOutputs 是 MEDIA_OUTPUT 的取值：inline 以 data URL 内联，url 保存后以本服务链接引用
-var MediaOutputs = []string{"inline", "url"}
+// mediaOutputs 是 MEDIA_OUTPUT 的取值：inline 以 data URL 内联，url 保存后以本服务链接引用
+var mediaOutputs = []string{"inline", "url"}
 
-// RoutingStrategies 是账户调度策略：轮询与先用满一个账户
-var RoutingStrategies = []string{"round-robin", "fill-first"}
+// routingStrategies 是账户调度策略：轮询与先用满一个账户
+var routingStrategies = []string{"round-robin", "fill-first"}
 
-// LogLevels 是服务日志级别
-var LogLevels = []string{"debug", "info", "warn", "error"}
+// logLevels 是服务日志级别
+var logLevels = []string{"debug", "info", "warn", "error"}
 
-// LogFormats 是服务日志格式
-var LogFormats = []string{"json", "text"}
+// logFormats 是服务日志格式
+var logFormats = []string{"json", "text"}
 
 // FirstEventHedgeOff 表示首字超时不发起备用请求
 const FirstEventHedgeOff = "off"
@@ -91,10 +93,12 @@ type Config struct {
 	APIKeys []string
 	// APIKeyAccounts 是 API key 到它可用账户的绑定，没有绑定的 key 可用全部账户
 	APIKeyAccounts map[string][]string
-	AuthDir        string
-	RuntimeDir     string
-	Proxy          string
-	SystemPrompt   string
+	// APIKeyNames 是 API key 到备注名的映射，管理端以备注名显示该 key
+	APIKeyNames  map[string]string
+	AuthDir      string
+	RuntimeDir   string
+	Proxy        string
+	SystemPrompt string
 	// SystemPromptTemplate 是 custom 档的 system 模板
 	SystemPromptTemplate string
 	// SystemPromptUserTemplate 是 custom 档的 user 轮模板，为空时 user 轮不包装
@@ -214,7 +218,7 @@ func Load(path string) (Config, error) {
 			}
 		}
 	}
-	return cfg, cfg.Validate()
+	return cfg, nil
 }
 
 // Set 把 env 文本值解析到配置，未出现的项保持原值
@@ -252,6 +256,9 @@ func (c *Config) Set(values map[string]string) error {
 	}
 	if value, ok := values["API_KEY_ACCOUNTS"]; ok && err == nil {
 		c.APIKeyAccounts, err = parseAPIKeyAccounts(value)
+	}
+	if value, ok := values["API_KEY_NAMES"]; ok && err == nil {
+		c.APIKeyNames, err = parseAPIKeyNames(value)
 	}
 	text("AUTH_DIR", &c.AuthDir)
 	text("RUNTIME_DIR", &c.RuntimeDir)
@@ -309,6 +316,7 @@ func (c Config) Values() map[string]string {
 		"LISTEN":                      c.Listen,
 		"API_KEYS":                    strings.Join(c.APIKeys, ","),
 		"API_KEY_ACCOUNTS":            formatAPIKeyAccounts(c.APIKeyAccounts),
+		"API_KEY_NAMES":               formatAPIKeyNames(c.APIKeyNames),
 		"AUTH_DIR":                    c.AuthDir,
 		"RUNTIME_DIR":                 c.RuntimeDir,
 		"PROXY":                       c.Proxy,
@@ -353,11 +361,8 @@ func (c Config) Changed(other Config) []string {
 	return keys
 }
 
-// Save 校验后把与默认值不同的配置项原子写入 env 文件，进程环境变量决定的项保留文件中原有的值
+// Save 把与默认值不同的配置项原子写入 env 文件，进程环境变量决定的项保留文件中原有的值
 func (c Config) Save(path string) error {
-	if err := c.Validate(); err != nil {
-		return err
-	}
 	saved, err := readEnvFile(path)
 	if err != nil {
 		return err
@@ -396,8 +401,8 @@ var checks = []struct {
 	}},
 	{[]string{"PROXY"}, func(c Config) error { return ValidateProxies(c.Proxy) }},
 	{[]string{"SYSTEM_PROMPT"}, func(c Config) error {
-		if !slices.Contains(SystemPrompts, c.SystemPrompt) {
-			return fmt.Errorf("SYSTEM_PROMPT 必须是 %s", strings.Join(SystemPrompts, "、"))
+		if !slices.Contains(systemPrompts, c.SystemPrompt) {
+			return fmt.Errorf("SYSTEM_PROMPT 必须是 %s", strings.Join(systemPrompts, "、"))
 		}
 		return nil
 	}},
@@ -414,8 +419,8 @@ var checks = []struct {
 		return nil
 	}},
 	{[]string{"MEDIA_OUTPUT"}, func(c Config) error {
-		if !slices.Contains(MediaOutputs, c.MediaOutput) {
-			return fmt.Errorf("MEDIA_OUTPUT 必须是 %s", strings.Join(MediaOutputs, "、"))
+		if !slices.Contains(mediaOutputs, c.MediaOutput) {
+			return fmt.Errorf("MEDIA_OUTPUT 必须是 %s", strings.Join(mediaOutputs, "、"))
 		}
 		return nil
 	}},
@@ -434,8 +439,8 @@ var checks = []struct {
 		return nil
 	}},
 	{[]string{"ROUTING_STRATEGY"}, func(c Config) error {
-		if !slices.Contains(RoutingStrategies, c.RoutingStrategy) {
-			return fmt.Errorf("ROUTING_STRATEGY 必须是 %s", strings.Join(RoutingStrategies, "、"))
+		if !slices.Contains(routingStrategies, c.RoutingStrategy) {
+			return fmt.Errorf("ROUTING_STRATEGY 必须是 %s", strings.Join(routingStrategies, "、"))
 		}
 		return nil
 	}},
@@ -462,14 +467,14 @@ var checks = []struct {
 		return nil
 	}},
 	{[]string{"LOG_LEVEL"}, func(c Config) error {
-		if !slices.Contains(LogLevels, c.LogLevel) {
-			return fmt.Errorf("LOG_LEVEL 必须是 %s", strings.Join(LogLevels, "、"))
+		if !slices.Contains(logLevels, c.LogLevel) {
+			return fmt.Errorf("LOG_LEVEL 必须是 %s", strings.Join(logLevels, "、"))
 		}
 		return nil
 	}},
 	{[]string{"LOG_FORMAT"}, func(c Config) error {
-		if !slices.Contains(LogFormats, c.LogFormat) {
-			return fmt.Errorf("LOG_FORMAT 必须是 %s", strings.Join(LogFormats, "、"))
+		if !slices.Contains(logFormats, c.LogFormat) {
+			return fmt.Errorf("LOG_FORMAT 必须是 %s", strings.Join(logFormats, "、"))
 		}
 		return nil
 	}},
@@ -588,6 +593,29 @@ func formatAPIKeyAccounts(bindings map[string][]string) string {
 	items := make([]string, 0, len(bindings))
 	for _, key := range slices.Sorted(maps.Keys(bindings)) {
 		items = append(items, key+":"+strings.Join(bindings[key], "|"))
+	}
+	return strings.Join(items, ",")
+}
+
+// parseAPIKeyNames 解析逗号分隔的 API key:备注名，以最后一个冒号分隔
+func parseAPIKeyNames(value string) (map[string]string, error) {
+	names := map[string]string{}
+	for _, item := range SplitList(value) {
+		index := strings.LastIndexByte(item, ':')
+		name := strings.TrimSpace(item[index+1:])
+		if index <= 0 || name == "" {
+			return nil, fmt.Errorf("API_KEY_NAMES 的每一项必须是 API key:备注名")
+		}
+		names[strings.TrimSpace(item[:index])] = name
+	}
+	return names, nil
+}
+
+// formatAPIKeyNames 按 API key 排序写出 API_KEY_NAMES
+func formatAPIKeyNames(names map[string]string) string {
+	items := make([]string, 0, len(names))
+	for _, key := range slices.Sorted(maps.Keys(names)) {
+		items = append(items, key+":"+names[key])
 	}
 	return strings.Join(items, ",")
 }
@@ -735,14 +763,7 @@ func formatEnvValue(value string) string {
 
 // atomicWrite 经同目录临时文件替换目标文件，权限为 0600
 func atomicWrite(path string, data []byte) error {
-	target, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("解析配置路径: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("创建配置目录: %w", err)
-	}
-	temporary, err := os.CreateTemp(filepath.Dir(target), ".env-*.tmp")
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".env-*.tmp")
 	if err != nil {
 		return fmt.Errorf("创建临时配置: %w", err)
 	}
@@ -762,7 +783,7 @@ func atomicWrite(path string, data []byte) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("关闭配置: %w", err)
 	}
-	if err := os.Rename(temporary.Name(), target); err != nil {
+	if err := robustio.Rename(temporary.Name(), path); err != nil {
 		return fmt.Errorf("替换配置: %w", err)
 	}
 	return nil

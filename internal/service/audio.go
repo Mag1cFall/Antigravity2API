@@ -17,12 +17,8 @@ import (
 	"github.com/Mag1cFall/Antigravity2API/internal/antigravity"
 )
 
-const (
-	// transcriptionRate 为语音转写模型接收的 PCM 采样率
-	transcriptionRate = 16000
-	// resamplerQuality 为 Speex 重采样器的最高质量档
-	resamplerQuality = 10
-)
+// resamplerQuality 为 Speex 重采样器的最高质量档
+const resamplerQuality = 10
 
 // transcriptionPCM 把 WAV、MP3、FLAC 或带 rate 参数的 audio/l16 解码为 16 kHz 单声道 16 位小端 PCM，多声道取平均
 func transcriptionPCM(blob antigravity.Blob) ([]byte, error) {
@@ -53,10 +49,10 @@ func transcriptionPCM(blob antigravity.Blob) ([]byte, error) {
 	if len(samples) == 0 {
 		return nil, errors.New("audio contains no samples")
 	}
-	if rate != transcriptionRate {
-		converter := resampler.NewWithSkipZeros(1, rate, transcriptionRate, resamplerQuality)
+	if rate != antigravity.VoiceMicRate {
+		converter := resampler.NewWithSkipZeros(1, rate, antigravity.VoiceMicRate, resamplerQuality)
 		input := append(samples, make([]float64, converter.InputLatency())...)
-		output := make([]float64, (len(samples)*transcriptionRate+rate-1)/rate)
+		output := make([]float64, (len(samples)*antigravity.VoiceMicRate+rate-1)/rate)
 		_, written := converter.ProcessFloat64(0, input, output)
 		samples = output[:written]
 	}

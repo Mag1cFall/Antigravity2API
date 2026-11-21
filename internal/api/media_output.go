@@ -225,7 +225,7 @@ func (s *server) mediaLinkParts(part antigravity.Part) ([]antigravity.Part, erro
 				return nil, err
 			}
 			s.media.touch(name)
-			image = antigravity.Part{InlineData: &antigravity.Blob{MIME: mediaTypes[filepath.Ext(name)], Data: data}}
+			image = antigravity.Part{InlineData: &antigravity.Blob{MIME: mediaMIME(filepath.Ext(name)), Data: data}}
 		}
 		if match[0] > position {
 			parts = append(parts, antigravity.Part{Text: text[position:match[0]]})
@@ -242,8 +242,15 @@ func (s *server) mediaLinkParts(part antigravity.Part) ([]antigravity.Part, erro
 	return parts, nil
 }
 
-// mediaTypes 为媒体目录中图片扩展名对应的 MIME 类型
-var mediaTypes = map[string]string{".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}
+// mediaMIME 按 mediaExtensions 反查文件扩展名对应的 MIME 类型
+func mediaMIME(ext string) string {
+	for mimeType, extension := range mediaExtensions {
+		if extension == ext {
+			return mimeType
+		}
+	}
+	return ""
+}
 
 // handleMedia 返回链接模式下保存的生成媒体并刷新它的使用时间，内容不变，长期缓存
 func (s *server) handleMedia(w http.ResponseWriter, r *http.Request) {

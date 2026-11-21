@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -213,11 +212,15 @@ func parameters(config antigravity.GenerationConfig) string {
 		text(config.Temperature), text(config.TopP), cmp.Or(config.ReasoningEffort, "-"), integer(config.ThinkingBudget), integer(config.MaxOutputTokens))
 }
 
-// recordPublic 为通过 API key 校验的 POST 请求建立 Trace 与停止入口，结束后写入请求账本并推送请求事件与日志；multipart 请求体由处理函数边读边记，其余请求体先读完以取得流式、模型与后台标记；Responses 后台请求的 context 不随客户端连接关闭而取消
+// recordPublic 为通过 API key 校验的公开 POST 与 WebSocket 请求建立 Trace 与停止入口，结束后写入账本并推送事件与日志
+// 请求体先经 api.DecodeBody 解压；multipart 由处理函数边读边记，其余先读完以取得流式、模型与后台标记；后台请求的 context 不随客户端断开而取消
 func (s *server) recordPublic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.live.Load()
-		key, authorized := apiKey(r, cfg.APIKeys)
+		key, authorized := "", true
+		if len(cfg.APIKeys) > 0 {
+			key, authorized = api.MatchedAPIKey(r, cfg.APIKeys)
+		}
 		if r.Method != http.MethodPost && !strings.HasPrefix(r.URL.Path, "/ws/") || !authorized {
 			next.ServeHTTP(w, r)
 			return
@@ -229,11 +232,13 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 			APIKey: maskKey(key), ClientIP: clientIP(r), UserAgent: r.UserAgent(), PromptTier: cfg.SystemPrompt,
 		})
 		trace.Watch(s.events.begin)
+		api.DecodeBody(w, r)
 		request := &recordReader{ReadCloser: r.Body}
 		r.Body = request
 		background := false
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
 			body, _ := io.ReadAll(request)
+			request.Close()
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			var stream bool
 			var model string
@@ -277,26 +282,6 @@ func (s *server) recordPublic(next http.Handler) http.Handler {
 		}
 		slog.Log(r.Context(), level, text, "event", "request.finished", "source", cmp.Or(row.Account, "request"), "request", row)
 	})
-}
-
-// apiKey 返回请求所带的 API key 与是否通过校验，keys 为空时全部通过且 key 为空
-func apiKey(r *http.Request, keys []string) (string, bool) {
-	if len(keys) == 0 {
-		return "", true
-	}
-	candidates := []string{r.Header.Get("X-Goog-API-Key"), r.Header.Get("X-API-Key"), r.URL.Query().Get("key")}
-	if scheme, value, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " "); ok && strings.EqualFold(scheme, "Bearer") {
-		candidates = append(candidates, value)
-	}
-	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		for _, key := range keys {
-			if candidate != "" && subtle.ConstantTimeCompare([]byte(candidate), []byte(key)) == 1 {
-				return key, true
-			}
-		}
-	}
-	return "", false
 }
 
 // maskKey 保留 key 的前后各不超过四分之一，前缀最多 3 个字符、后缀最多 4 个字符
