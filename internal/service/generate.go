@@ -246,16 +246,15 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 			current.client.SessionSend(*turn)
 			turns[lease.ID] = turn
 		}
-		if !hedge {
-			trace.SetAccount(lease.ID)
-			trace.SetUpstream(lease.Model.ID, lease.Model.QuotaGroup(), envelope.RequestType)
-			trace.SetConversation(upstream.Cascade, conversation.Step)
-		}
 		size, err := current.client.Encode(&envelope)
 		if err != nil {
 			return nil, &Error{Status: http.StatusBadRequest, Message: err.Error()}
 		}
-		return send(deadline, trace, &upstreamStream{lease: lease, current: current, out: out, turn: turn, hedge: hedge, bytes: size}, envelope), nil
+		stream := &upstreamStream{lease: lease, current: current, out: out, turn: turn, hedge: hedge, bytes: size, cascade: upstream.Cascade, step: conversation.Step, requestType: envelope.RequestType}
+		if !hedge {
+			stream.applyTrace(trace)
+		}
+		return send(deadline, trace, stream, envelope), nil
 	}
 	// settle 把失败的尝试写入账本、归还槽位并按失败原因处理账户，返回是否换账户重试
 	settle := func(stream *upstreamStream) bool {
@@ -351,9 +350,6 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 			}
 			stream = s.await(ctx, stream, plan, func(failed *upstreamStream) { settle(failed) })
 			if stream.err == nil {
-				if stream.hedge {
-					trace.SetAccount(stream.lease.ID)
-				}
 				return stream, nil
 			}
 			err = stream.err
@@ -385,22 +381,36 @@ func (s *Service) Generate(ctx context.Context, request antigravity.GenerateRequ
 // upstreamStream 表示一次进行中或已开始的上游生成尝试
 // done 关闭后 events、exchange、first、firstAt 与 err 可读；standby 为尚未落败的另一方
 type upstreamStream struct {
-	lease    *balancer.Lease
-	current  *account
-	events   <-chan antigravity.Event
-	exchange *antigravity.Exchange
-	started  time.Time
-	out      *output
-	turn     *antigravity.SessionTurn
-	hedge    bool
-	begun    time.Time
-	first    antigravity.Event
-	firstAt  time.Time
-	err      error
-	cancel   context.CancelFunc
-	done     chan struct{}
-	bytes    int
-	standby  *upstreamStream
+	lease       *balancer.Lease
+	current     *account
+	events      <-chan antigravity.Event
+	exchange    *antigravity.Exchange
+	started     time.Time
+	out         *output
+	turn        *antigravity.SessionTurn
+	hedge       bool
+	begun       time.Time
+	first       antigravity.Event
+	firstAt     time.Time
+	err         error
+	cancel      context.CancelFunc
+	done        chan struct{}
+	bytes       int
+	cascade     string
+	step        int
+	requestType string
+	standby     *upstreamStream
+}
+
+// applyTrace 把本次尝试的上游模型、会话 ID、步序与账户写入请求账本
+func (stream *upstreamStream) applyTrace(trace *requestdb.Trace) {
+	if stream.requestType != "" {
+		trace.SetUpstream(stream.lease.Model.ID, stream.lease.Model.QuotaGroup(), stream.requestType)
+	}
+	if stream.cascade != "" {
+		trace.SetConversation(stream.cascade, stream.step)
+	}
+	trace.SetAccount(stream.lease.ID)
 }
 
 // record 返回本次尝试的账本记录，备用请求带 Hedge 标记
@@ -841,7 +851,7 @@ func (s *Service) relay(ctx context.Context, deadline *watchdog, stream *upstrea
 						s.fail(ctx, stream.current, stream.lease.Model, err, tier)
 					}
 					stream.lease.Release()
-					requestdb.TraceFrom(ctx).SetAccount(standby.lease.ID)
+					standby.applyTrace(requestdb.TraceFrom(ctx))
 					slog.WarnContext(ctx, "先返回首个事件的一方在给出内容前失败，改用另一方 | 原因="+cmp.Or(retry, err).Error(), "source", standby.lease.ID)
 					if delivered {
 						deliver(ctx, events, antigravity.Event{Kind: antigravity.EventRestart})

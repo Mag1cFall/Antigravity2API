@@ -225,6 +225,7 @@ func (s *Service) await(ctx context.Context, primary *upstreamStream, plan *hedg
 				supersede(ctx, hedge, "备用请求的首个上游事件为错误")
 				continue
 			}
+			hedge.applyTrace(requestdb.TraceFrom(ctx))
 			if hedge.err != nil {
 				return hedge
 			}

@@ -109,6 +109,24 @@ func (c *Client) LoadMarketplace(ctx context.Context) time.Time {
 	return started
 }
 
+// warmMarketplaces 在初始化读到实验开关后预热插件市场目录并立即记录读取事件，避免首次生成前重复读取；实验开关尚未就绪时不占槽
+func (c *Client) warmMarketplaces(ctx context.Context) {
+	c.mu.Lock()
+	flags := c.state.mendelFlags()
+	flag, _ := findFlag(flags, flagPluginMarketplaces)
+	if c.hub.reading != nil || !marketplaceEnabled(flags) || flag.StringListValue == nil {
+		c.mu.Unlock()
+		return
+	}
+	reading := make(chan struct{})
+	c.hub.reading = reading
+	c.mu.Unlock()
+	defer close(reading)
+	if c.readMarketplaces(ctx) {
+		c.logMarketplace()
+	}
+}
+
 // marketplaceRead 表示一次插件市场目录读取的结果：目录名、响应状态码、读到或保存的目录与起止时刻
 type marketplaceRead struct {
 	name           string

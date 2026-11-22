@@ -38,20 +38,23 @@ const wmClose = 0x0010
 var (
 	// postMessage 为 user32 的 PostMessageW
 	postMessage = windows.NewLazySystemDLL("user32.dll").NewProc("PostMessageW")
-	// closing 为本次要关闭窗口的进程 ID，由 closeMu 保护
-	closing map[uint32]bool
-	closeMu sync.Mutex
-	// closeWindow 为 EnumWindows 的回调，向 closing 中进程的可见顶层窗口发送 WM_CLOSE
+	// closing 为本次要关闭窗口的候选主进程 ID，closePosted 为实际收到 WM_CLOSE 的进程 ID，均由 closeMu 保护
+	closing     map[uint32]bool
+	closePosted map[uint32]bool
+	closeMu     sync.Mutex
+	// closeWindow 为 EnumWindows 的回调，向 closing 中进程的可见顶层窗口发送 WM_CLOSE 并记入 closePosted
 	closeWindow = windows.NewCallback(func(window windows.HWND, _ uintptr) uintptr {
 		var pid uint32
 		if _, err := windows.GetWindowThreadProcessId(window, &pid); err == nil && closing[pid] && windows.IsWindowVisible(window) {
-			postMessage.Call(uintptr(window), wmClose, 0, 0)
+			if ret, _, _ := postMessage.Call(uintptr(window), wmClose, 0, 0); ret != 0 {
+				closePosted[pid] = true
+			}
 		}
 		return 1
 	})
 )
 
-// stopOfficial 让可执行文件位于官方客户端安装目录内的全部进程退出并等待，返回主进程的启动参数：先向它们的可见顶层窗口发送 WM_CLOSE，closeTimeout 内没有退出的进程被结束
+// stopOfficial 让可执行文件位于官方客户端安装目录内的全部进程退出并等待，返回有可见窗口的主进程的启动参数：先向候选主进程的可见顶层窗口发送 WM_CLOSE 并只在 closeTimeout 内等待这些主进程正常退出，随后立即结束安装目录内其余仍在运行的进程
 func stopOfficial(app string) ([]string, error) {
 	dir := strings.ToLower(filepath.Dir(app)) + `\`
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
@@ -59,8 +62,9 @@ func stopOfficial(app string) ([]string, error) {
 		return nil, err
 	}
 	defer windows.CloseHandle(snapshot)
-	var args []string
 	processes := map[uint32]windows.Handle{}
+	candidates := map[uint32][]string{}
+	var order []uint32
 	defer func() {
 		for _, process := range processes {
 			windows.CloseHandle(process)
@@ -77,32 +81,62 @@ func stopOfficial(app string) ([]string, error) {
 		if windows.QueryFullProcessImageName(process, 0, &name[0], &size) == nil {
 			if path := windows.UTF16ToString(name[:size]); strings.HasPrefix(strings.ToLower(path), dir) {
 				if main, ok := mainArgs(process, path, app); ok {
-					args = main
+					candidates[entry.ProcessID] = main
 				}
 				processes[entry.ProcessID] = process
+				order = append(order, entry.ProcessID)
 				continue
 			}
 		}
 		windows.CloseHandle(process)
 	}
 	closeMu.Lock()
-	closing = map[uint32]bool{}
-	for pid := range processes {
+	closing = make(map[uint32]bool, len(candidates))
+	for pid := range candidates {
 		closing[pid] = true
 	}
+	closePosted = map[uint32]bool{}
 	windows.EnumWindows(closeWindow, nil)
+	windowed := closePosted
+	closing, closePosted = nil, nil
 	closeMu.Unlock()
+	var args []string
+	for _, pid := range order {
+		if windowed[pid] {
+			args = candidates[pid]
+			break
+		}
+	}
 	deadline := time.Now().Add(closeTimeout)
-	for pid, process := range processes {
-		if event, _ := windows.WaitForSingleObject(process, uint32(max(time.Until(deadline), 0).Milliseconds())); event == windows.WAIT_OBJECT_0 {
+	for _, pid := range order {
+		if !windowed[pid] {
 			continue
 		}
-		if err := windows.TerminateProcess(process, 1); err != nil && err != windows.ERROR_ACCESS_DENIED {
-			return nil, fmt.Errorf("结束官方客户端进程 %d: %w", pid, err)
+		if err := terminateOfficial(pid, processes[pid], uint32(max(time.Until(deadline), 0).Milliseconds())); err != nil {
+			return nil, err
 		}
-		windows.WaitForSingleObject(process, windows.INFINITE)
+	}
+	for _, pid := range order {
+		if windowed[pid] {
+			continue
+		}
+		if err := terminateOfficial(pid, processes[pid], 0); err != nil {
+			return nil, err
+		}
 	}
 	return args, nil
+}
+
+// terminateOfficial 等待进程在 timeout 内退出，未退出时强杀并等待结束
+func terminateOfficial(pid uint32, process windows.Handle, timeout uint32) error {
+	if event, _ := windows.WaitForSingleObject(process, timeout); event == windows.WAIT_OBJECT_0 {
+		return nil
+	}
+	if err := windows.TerminateProcess(process, 1); err != nil && err != windows.ERROR_ACCESS_DENIED {
+		return fmt.Errorf("结束官方客户端进程 %d: %w", pid, err)
+	}
+	windows.WaitForSingleObject(process, windows.INFINITE)
+	return nil
 }
 
 // mainArgs 在 process 为官方客户端主进程（可执行文件为 app 且没有 --type= 参数）时返回其启动参数

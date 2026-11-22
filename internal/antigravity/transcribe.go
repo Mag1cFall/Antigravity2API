@@ -217,7 +217,7 @@ func (c *Client) dialAICode(ctx context.Context, address, agent string) (net.Con
 			return nil, err
 		}
 	}
-	dialer := &net.Dialer{}
+	dialer := upstreamDialer()
 	if target == nil {
 		return dialer.DialContext(ctx, "tcp", address)
 	}

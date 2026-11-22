@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -31,6 +32,8 @@ const (
 	endpointAICode   = "https://aicode.googleapis.com"
 	// endpointConfig 为 aicode 实验配置接口
 	endpointConfig = endpointAICode + "/v1alpha:fetchConfig"
+	// endpointLicenses 为 aicode 许可证查询接口
+	endpointLicenses = endpointAICode + "/v1alpha:fetchLicenses"
 	// ideType 为 loadCodeAssist 元数据中的客户端类型
 	ideType = "ANTIGRAVITY"
 	// updateChannel 为 listExperiments 元数据中的更新通道
@@ -238,10 +241,38 @@ func NewClient(account string, source oauth2.TokenSource, device Device, proxy P
 	}
 }
 
-// http1Transport 返回只走 HTTP/1.1 的 Transport：ALPN 只带 http/1.1，每主机保留的空闲连接数与总数相同，其余字段同 http.DefaultTransport（空闲连接 90 s 后关闭）
+const (
+	// upstreamDialTimeout 为建立上游 TCP 连接的超时，同 http.DefaultTransport
+	upstreamDialTimeout = 30 * time.Second
+	// upstreamKeepAliveIdle 为空闲后发出首次 TCP keep-alive 探测的间隔，同官方 2.34.0 language_server
+	upstreamKeepAliveIdle = 30 * time.Second
+	// upstreamKeepAliveInterval 为未收到探测应答后的重试间隔
+	upstreamKeepAliveInterval = 5 * time.Second
+	// upstreamKeepAliveCount 为连续未收到探测应答后判死连接的次数
+	upstreamKeepAliveCount = 3
+	// upstreamTCPUserTimeout 为 Linux 上未确认数据或探测无应答时内核中止连接的时限，等于 Idle + Interval × Count
+	upstreamTCPUserTimeout = upstreamKeepAliveIdle + upstreamKeepAliveInterval*upstreamKeepAliveCount
+)
+
+// upstreamDialer 返回上游连接使用的 net.Dialer：探测空闲间隔保持官方 2.34.0 的 30 s，未收到应答时每 5 s 重试 3 次判死，Linux 另设 TCP_USER_TIMEOUT
+func upstreamDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout: upstreamDialTimeout,
+		KeepAliveConfig: net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     upstreamKeepAliveIdle,
+			Interval: upstreamKeepAliveInterval,
+			Count:    upstreamKeepAliveCount,
+		},
+		Control: upstreamDialControl,
+	}
+}
+
+// http1Transport 返回只走 HTTP/1.1 的 Transport：ALPN 只带 http/1.1，每主机保留的空闲连接数与总数相同，拨号使用 upstreamDialer，其余字段同 http.DefaultTransport（空闲连接 90 s 后关闭）
 func http1Transport(proxy Proxy) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = proxy
+	transport.DialContext = upstreamDialer().DialContext
 	transport.ForceAttemptHTTP2 = false
 	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	transport.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
@@ -249,10 +280,11 @@ func http1Transport(proxy Proxy) *http.Transport {
 	return transport
 }
 
-// http2Transport 返回以代理选择函数克隆的 http.DefaultTransport，ALPN 为 h2 与 http/1.1
+// http2Transport 返回以代理选择函数与 upstreamDialer 克隆的 http.DefaultTransport，ALPN 为 h2 与 http/1.1
 func http2Transport(proxy Proxy) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = proxy
+	transport.DialContext = upstreamDialer().DialContext
 	return transport
 }
 
@@ -366,8 +398,13 @@ func (c *Client) Project() string {
 
 // Tier 表示 loadCodeAssist 返回的套餐
 type Tier struct {
-	ID               string   `json:"id"`
-	AvailableCredits []Credit `json:"availableCredits"`
+	ID                      string   `json:"id"`
+	Name                    string   `json:"name,omitempty"`
+	Description             string   `json:"description,omitempty"`
+	UpgradeSubscriptionText string   `json:"upgradeSubscriptionText,omitempty"`
+	UpgradeSubscriptionURI  string   `json:"upgradeSubscriptionUri,omitempty"`
+	UpgradeButtonText       string   `json:"upgradeButtonText,omitempty"`
+	AvailableCredits        []Credit `json:"availableCredits"`
 }
 
 // Credit 表示付费套餐的一种积分：余额为零时上游省略 creditAmount，MinimumCreditAmountForUsage 为以积分生成所需的最低余额
@@ -483,6 +520,14 @@ func (c *Client) Initialize(ctx context.Context) (Initialization, error) {
 			if pause(ctx, 3, 15) == nil {
 				c.report()
 			}
+			if c.shadowLicensesEnabled() {
+				bg := context.WithoutCancel(ctx)
+				go func() {
+					if pause(bg, 30, 50) == nil {
+						c.shadowLicenses(bg)
+					}
+				}()
+			}
 		}
 		return nil
 	}
@@ -563,14 +608,16 @@ func (c *Client) avatar(ctx context.Context, picture string) {
 	c.logRequest(request, response.StatusCode, started, nil)
 }
 
-// LoadCodeAssist 向指定端点查询套餐与项目，把项目记为后续请求的 project，付费套餐（没有时为当前套餐）记入伴随状态
+// LoadCodeAssist 向指定端点查询套餐与项目，把项目记为后续请求的 project，付费套餐（没有时为当前套餐）、响应与耗时记入伴随状态
 func (c *Client) LoadCodeAssist(ctx context.Context, base string) (LoadCodeAssistResponse, error) {
+	started := time.Now()
 	var response LoadCodeAssistResponse
 	if err := c.post(ctx, base+"/v1internal:loadCodeAssist", assistRequest{Metadata: assistMetadata{IDEType: ideType}}, &response); err != nil {
 		return LoadCodeAssistResponse{}, err
 	}
+	latency := time.Since(started)
 	c.mu.Lock()
-	c.project, c.state.tier = response.CloudAICompanionProject, response.tier()
+	c.project, c.state.tier, c.state.assist, c.state.assistLatency = response.CloudAICompanionProject, response.tier(), response, latency
 	c.mu.Unlock()
 	c.notify(Observed{Assist: &response})
 	return response, nil

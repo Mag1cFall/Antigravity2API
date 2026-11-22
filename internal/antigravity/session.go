@@ -27,7 +27,7 @@ var sessionJSON []byte
 type sessionTemplate struct {
 	Cascade        map[string][]byte   `json:"cascade"`
 	Override       map[string][]byte   `json:"override"`
-	Resolution     []byte              `json:"resolution"`
+	Resolution     map[string][]byte   `json:"resolution"`
 	Customizations []byte              `json:"customizations"`
 	PromptSections map[string][]byte   `json:"promptSections"`
 	Experiments    []string            `json:"experiments"`
@@ -188,10 +188,12 @@ func ceilThird(n int) int {
 	return (n + 2) / 3
 }
 
-// sessionFamily 返回模型所属的执行配置族，目录条目带 plan-execute-config 的 Orchestrator 各条目为 orchestrator
+// sessionFamily 返回模型所属的执行配置族，目录条目带 plan-execute-config 的 Orchestrator 按是否 Neon 分为 orchestrator-neon 与 orchestrator
 func sessionFamily(model CatalogModel) string {
 	_, plan := model.ModelExperiments.Experiments[planExecuteExperiment]
 	switch {
+	case plan && strings.Contains(model.ID, "neon"):
+		return "orchestrator-neon"
 	case plan:
 		return "orchestrator"
 	case model.ModelProvider == ProviderAnthropic:
@@ -204,6 +206,8 @@ func sessionFamily(model CatalogModel) string {
 		return "carbon"
 	case strings.Contains(model.ID, "hydrogen"):
 		return "hydrogen"
+	case strings.Contains(model.ID, "neon"):
+		return "neon"
 	}
 	return "gemini"
 }
@@ -220,7 +224,7 @@ func promptSections(model CatalogModel) []byte {
 	return pbEncode(nodes)
 }
 
-// shellToolTokens 为 run_command 工具说明按设备系统的 token 数相对模板（Windows）的差，官方 2.33.0 各模型族 Linux 少 3、macOS 少 4
+// shellToolTokens 为 run_command 工具说明按设备系统的 token 数相对模板（Windows）的差，官方 2.34.0 各模型族 Linux 少 3、macOS 少 4
 var shellToolTokens = map[string]int64{"linux": -3, "darwin": -4}
 
 // shellName 返回设备系统上官方终端工具使用的 shell
@@ -356,10 +360,21 @@ func (s companionState) mendelString(name string) string {
 	return ""
 }
 
-// policyGuardianFields 为 PolicyGuardianConfig 中标量字段的 JSON 名与字段号（官方 2.33.0 cortex.proto）
+// policyGuardianFields 为 PolicyGuardianConfig 中标量与枚举字段的 JSON 名与字段号（官方 2.34.0 cortex.proto）
 var policyGuardianFields = map[string]int{
 	"enabled": 1, "antivirus_enabled": 4, "max_tool_rounds": 7, "enable_url_vetting": 8, "enable_denied_repeat_precheck": 9, "http_timeout_seconds": 10, "antivirus_enforced": 11,
 	"allowed": 12, "deployment": 15, "max_concurrent_tool_calls": 17, "enable_irreversible_vetting": 18, "enable_reversibility_adjudication": 19, "use_intent_alignment_for_destruction": 20,
+	"sensitivity_tracking": 21, "record_provenance": 22,
+}
+
+// policyGuardianEnums 为 PolicyGuardianConfig 枚举字段的字符串值到枚举号映射
+var policyGuardianEnums = map[string]map[string]uint64{
+	"sensitivity_tracking": {
+		"SENSITIVITY_TRACKING_UNSPECIFIED": 0,
+		"SENSITIVITY_TRACKING_OFF":         1,
+		"SENSITIVITY_TRACKING_LOG":         2,
+		"SENSITIVITY_TRACKING_ENFORCE":     3,
+	},
 }
 
 // policyGuardian 把开关 policy-guardian-config 的 JSON 并入模板的 PolicyGuardianConfig：同号字段换成开关的值，按 Go protobuf 的编码顺序排列，即普通字段按字段号升序、oneof 的 model（2）与 model_tier（5）在最后；开关为空时原样返回
@@ -381,7 +396,15 @@ func policyGuardian(template []byte, config string) []byte {
 		case float64:
 			node.u = uint64(v)
 		case string:
-			node.wire, node.raw = 2, []byte(v)
+			if enums, ok := policyGuardianEnums[name]; ok {
+				enum, known := enums[v]
+				if !known {
+					continue
+				}
+				node.u = enum
+			} else {
+				node.wire, node.raw = 2, []byte(v)
+			}
 		default:
 			continue
 		}
@@ -642,7 +665,7 @@ func userStep(conversation Conversation, model CatalogModel, device Device, prev
 	if previous != "" {
 		input = appendBytes(input, 13, sessionOverride(CatalogModel{Model: previous}, device))
 	}
-	input = appendBytes(input, 18, pbGet(sessionFixed.Resolution, 1).raw)
+	input = appendBytes(input, 18, pbGet(sessionFixed.Resolution[sessionFamily(model)], 1).raw)
 	input = appendString(input, 19, uuid.NewString())
 	step := appendVarint(nil, 1, stepUser)
 	step = appendVarint(step, 4, stepDone)
@@ -880,7 +903,7 @@ func (s companionState) executionPayload(turn SessionTurn, device Device, invoca
 	if model.ModelProvider != ProviderGoogle {
 		metadata = appendVarint(metadata, 13, 1)
 	}
-	metadata = appendBytes(metadata, 16, sessionFixed.Resolution)
+	metadata = appendBytes(metadata, 16, sessionFixed.Resolution[sessionFamily(model)])
 	metadata = appendBytes(metadata, 17, sessionOverride(model, device))
 	metadata = appendBytes(metadata, 18, sessionFixed.Customizations)
 	payload := appendString(nil, 2, execution)
@@ -1042,7 +1065,7 @@ func (c *Client) SessionSend(turn SessionTurn) {
 	c.hubEventAt(sent, "SEND_USER_CASCADE_MESSAGE_LATENCY", eventShape{flags: true}, map[string]any{
 		"cascade_id": conversation.CascadeID, "trajectory_id": conversation.TrajectoryID, "message_origin": "AGENT_MESSAGE_ORIGIN_UNSPECIFIED", "status": "OK", "blocking": "false",
 		"total_latency_ms": latency, "cascade_send_latency_ms": latency, "hydrate_slash_commands_latency_ms": 0, "active_user_state_latency_ms": 0, "load_trajectory_latency_ms": 0,
-		"resolve_agent_config_latency_ms": 0, "save_media_latency_ms": 0, "media_summaries_latency_ms": 0, "media_count": media, "saved_media_count": media,
+		"resolve_agent_config_latency_ms": 0, "save_media_latency_ms": 0, "media_summaries_latency_ms": 0, "user_prompt_submit_hooks_latency_ms": 0, "media_count": media, "saved_media_count": media,
 	})
 	delay, intent := between(8, 11), "follow_up"
 	if turn.New {

@@ -36,6 +36,8 @@ type output struct {
 	local       antigravity.Usage
 	prompt      antigravity.WireRequest
 	names       map[string]string
+	unary       bool
+	sent        bool
 	hide        bool
 	stop        *stopMatcher
 	noFunctions bool
@@ -105,7 +107,7 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 	}
 	o.signed.origin(event.ThoughtSignature, o.origin)
 	var out []antigravity.Event
-	if event.Kind != antigravity.EventText && event.Kind != antigravity.EventUsage {
+	if event.Kind != antigravity.EventText && event.Kind != antigravity.EventUsage && event.Kind != antigravity.EventCitation && event.Kind != antigravity.EventGrounding {
 		if pending := o.stop.flush(); pending != "" {
 			out = append(out, o.text(antigravity.Event{Kind: antigravity.EventText, Text: pending, ProviderModel: event.ProviderModel})...)
 		}
@@ -134,6 +136,10 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 			return out
 		}
 		return append(out, antigravity.Event{Kind: antigravity.EventThoughtSignature, Usage: event.Usage, ProviderModel: event.ProviderModel, Final: event.Final, ThoughtSignature: event.ThoughtSignature})
+	case antigravity.EventMedia:
+		if !o.unary {
+			o.sent = true
+		}
 	case antigravity.EventToolCall:
 		if o.noFunctions {
 			o.unexpected = true
@@ -152,7 +158,7 @@ func (o *output) handle(event antigravity.Event) []antigravity.Event {
 			o.signed.calls[call.ID] = call.ThoughtSignature
 			o.signed.origin(call.ThoughtSignature, o.origin)
 		}
-		if err := o.tools.check(call, o.calls); err != nil {
+		if err := o.tools.check(call, o.calls, o.sent); err != nil {
 			o.done = true
 			return append(out, antigravity.Event{Kind: antigravity.EventError, Err: err})
 		}
@@ -271,6 +277,9 @@ func signatureDigest(signature string) string {
 // text 转发正文，要求 JSON 输出时暂存到结束
 func (o *output) text(event antigravity.Event) []antigravity.Event {
 	if o.json == nil {
+		if !o.unary && event.Text != "" {
+			o.sent = true
+		}
 		return []antigravity.Event{event}
 	}
 	o.json.text.WriteString(event.Text)
@@ -397,8 +406,8 @@ func (e *callError) HTTPStatus() int {
 	return http.StatusBadGateway
 }
 
-// check 核对第 count 个函数调用
-func (contract *toolContract) check(call antigravity.FunctionCall, count int) error {
+// check 核对第 count 个函数调用；sent 为真时客户端已收到正文或媒体、不能再重新生成，不再核对非 strict 声明的必填参数
+func (contract *toolContract) check(call antigravity.FunctionCall, count int, sent bool) error {
 	if contract == nil {
 		return nil
 	}
@@ -411,12 +420,14 @@ func (contract *toolContract) check(call antigravity.FunctionCall, count int) er
 	case contract.single && count > 1:
 		return fail("upstream returned more than one function call with parallel tool calls disabled")
 	}
-	if required := contract.arguments[call.Name]; len(required) > 0 {
-		var arguments map[string]json.RawMessage
-		json.Unmarshal(call.Arguments, &arguments)
-		for _, key := range required {
-			if _, ok := arguments[key]; !ok {
-				return fail("upstream call of function %q is missing required argument %q", call.Name, key)
+	if !sent {
+		if required := contract.arguments[call.Name]; len(required) > 0 {
+			var arguments map[string]json.RawMessage
+			json.Unmarshal(call.Arguments, &arguments)
+			for _, key := range required {
+				if _, ok := arguments[key]; !ok {
+					return fail("upstream call of function %q is missing required argument %q", call.Name, key)
+				}
 			}
 		}
 	}

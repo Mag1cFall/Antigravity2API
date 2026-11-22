@@ -21,19 +21,26 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 
 - **OpenAI compatible**: `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/models`, `/v1/images`, `/v1/audio`, `/v1/files`
 - **Claude compatible**: `/v1/messages`, `/v1/messages/count_tokens`
-- **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens`, Files API, Interactions API, Live API
-- **Official client identity**: plain Go HTTP that reaches Cloud Code with the TLS and HTTP shape, User-Agent, request envelope, initialization order and companion requests of the official Antigravity client; every account uses the device profile generated when it was added
-- **Agent models**: every Gemini, Claude and GPT-OSS Agent model, published from each account's live catalog; thinking parameters map to the Low, Medium, High and XHigh thinking levels of the same family
-- **Streaming**: text, thinking and thought signatures stream incrementally; tool calls, parallel function calls, image and PDF input work across the four protocols OpenAI Chat, OpenAI Responses, Claude Messages and Gemini
-- **Images and speech**: the image generation model of the catalog generates and edits images, returned by these four protocols and the OpenAI Images endpoints; the speech transcription model of the catalog transcribes audio over the channel of the official voice input: the OpenAI transcription and translation endpoints use it when `model` is omitted, and Chat `input_audio` and Gemini audio input are transcribed by it when the selected model is the transcription model, while any other selected model receives the audio directly
-- **Files**: the OpenAI, Claude and Gemini Files APIs store files in `RUNTIME_DIR/files/`, and file references in requests are inlined before sending
+- **Gemini compatible**: `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, `:countTokens`, Context Caching, Files API, Interactions API, Live API
+- **Official client identity**: plain Go HTTP reaching Cloud Code with the TLS and HTTP shape, User-Agent, request envelope, initialization order and companion requests of the official Antigravity client; every account uses the device profile generated when added
+- **Agent models**: every Gemini, Claude and GPT-OSS Agent model published from each account's live catalog; thinking parameters map to the Low, Medium, High and XHigh thinking levels of the same family
+- **Streaming**: text, thinking and thought signatures stream incrementally; tool calls, parallel function calls, image and PDF input work across OpenAI Chat, OpenAI Responses, Claude Messages and Gemini
+- **Images and speech**:
+  - The catalog image generation model generates and edits images across the four protocols and OpenAI Images endpoints
+  - The catalog speech transcription model transcribes audio over the official voice input channel; OpenAI transcription and translation endpoints use it when `model` is omitted, while Chat `input_audio` and Gemini audio input are transcribed when it is selected or passed directly to any other selected model
+- **Files**: OpenAI, Claude and Gemini Files APIs store files in `RUNTIME_DIR/files/` and inline file references before sending
 - **System prompt tiers**: full, medium, aggressive and custom tiers control how much of the official system prompt and user message wrapping is kept
-- **Multi-account scheduling**: accounts are picked by account priority and the Gemini and third-party quota groups, requests rotate across accounts of the same priority, and a conversation stays on one account; selected models can prefer lower-plan accounts; exhausted quota cools down until reset, rate limits, capacity errors and server errors cool down or switch accounts by reason; account quota refreshes on a schedule, and the Accounts page can refresh all accounts or one at any time
-- **Token counting**: input tokens are counted locally per model family; GPT-OSS prompts are rendered with the official chat template before counting, and Gemini and Claude counts are calibrated with the upstream usage of the same conversation
-- **Admin UI and desktop app**: the web admin UI provides a first-run guide, a dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings; account details list the models the account can use and the other accounts that share its weekly quota (usually the same Google One family group), usage and request records can be viewed over preset or custom time ranges, the trend chart shows each period on hover, and exported files are saved to a chosen folder when the admin UI is opened on the computer running the service, and downloaded by the browser when it is opened from another computer; in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German, with service logs and error messages shown in the interface language; desktop apps for Windows, macOS and Linux add a tray icon, single instance and launch at login
-- **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores the account, model, tokens, cache hits and timing of every request and estimates cost with official API prices
-- **Sign-in**: browser sign-in, pasted authorization code, import from the local official client, upload from another computer by pairing, account JSON export and import (all, selected or single accounts; the accounts in a file are listed and checked before import; accepts the account files of Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
-- **Proxy**: global and per-account HTTP, HTTPS and SOCKS5 proxies; the system proxy is used when none is set
+- **Multi-account scheduling**:
+  - Schedules by account priority and the Gemini, Gemini Argon (when the account has a dedicated Argon weekly bucket) and third-party quota groups, rotating within the same priority, keeping a conversation on one account, and letting selected models prefer lower-plan accounts
+  - Exhausted quota cools down until reset, while rate limits, capacity errors and server errors cool down or switch accounts by reason; quota refreshes on a schedule and on demand for all accounts or a single account
+- **Token counting**: counts input tokens locally per model family; renders GPT-OSS with the official chat template and calibrates Gemini and Claude counts against upstream usage of the same conversation
+- **Admin UI and desktop app**:
+  - Web admin UI with first-run guide, dashboard, accounts, client setup, models, request records, usage and cost, in-flight requests, logs and settings; account details show available models and accounts sharing weekly quota (typically the same Google One family group)
+  - Preset and custom time ranges for usage and request records, interactive trend chart hover details, local folder export on the host machine and browser download on remote machines
+  - Available in Simplified Chinese, Traditional Chinese (Taiwan), English, Japanese, Korean, French and German with localized logs and errors; Windows, macOS and Linux desktop apps include a tray icon, single instance and launch at login
+- **Logs and request ledger**: structured logs record account selection, switches, cooldowns and upstream attempts per request; the SQLite ledger stores account, model, tokens, cache hits, timings and official-price cost estimates
+- **Sign-in and migration**: browser sign-in, pasted authorization code, local official client import, cross-machine pairing upload, and account JSON export and selective import (accepting files from Antigravity Manager, CLIProxyAPI, sub2api, gcli2api, opencode-antigravity-auth and antigravity-claude-proxy)
+- **Proxy**: global and per-account HTTP, HTTPS and SOCKS5 proxies; falls back to the system proxy when unset
 
 ## Supported Models
 
@@ -53,71 +60,78 @@ Turns the Agent models of Google Antigravity into OpenAI, Claude and Gemini comp
 
 The service reads the Antigravity model catalog of every account at startup and saves it to `RUNTIME_DIR/catalogs/`; `/v1/models` is authoritative once it runs:
 
-- The table lists the Agent models of the official model picker; entries with thinking levels carry their available and default levels: `supported_reasoning_levels` and `default_reasoning_level` in the OpenAI format, `thinking_levels` and `default_thinking_level` in the Anthropic format, `thinkingLevels` and `defaultThinkingLevel` in the Gemini format
-- The image generation model (for example `gemini-3.1-flash-image`) and the speech transcription model (for example `proactive-observer-v10`) of the catalog follow, with the capabilities `image_generation` and `transcription`
-- Other usable entries in the catalog are published with their catalog IDs, for example `claude-sonnet-4-6` and `claude-opus-4-6-thinking` in the catalog of a Pro account
-- After a restart, `/v1/models` lists the saved catalogs until the accounts finish initialization; models that only appear in the catalogs of accounts still initializing return 503
-- Context windows, output limits and capabilities come from the catalog, and the account plan decides the available models and quota
+- The table lists the Agent models of the official model picker; entries with thinking levels carry their available and default levels: `supported_reasoning_levels` and `default_reasoning_level` in OpenAI format, `thinking_levels` and `default_thinking_level` in Anthropic format, `thinkingLevels` and `defaultThinkingLevel` in Gemini format
+- The image generation model (for example `gemini-3.1-flash-image`) and the speech transcription model (for example `proactive-observer-v10`) follow, marked with `image_generation` and `transcription`
+- Other usable catalog entries are published with their catalog IDs, such as `claude-sonnet-4-6` and `claude-opus-4-6-thinking` on Pro accounts
+- After a restart, `/v1/models` serves saved catalogs until accounts finish initializing; models only present on still-initializing accounts return 503
+- Context windows, output limits and capabilities come from the catalog, and the account plan decides available models and quota
 
 The thinking level is decided in this order:
 
-1. A level named in the model name: a catalog ID with a level such as `claude-opus-5-5-high`, a parenthesized suffix such as `claude-opus-5-5(low)` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, a thinking budget in tokens, or `auto` for no level), or the `-thinking` suffix (High)
-2. The thinking parameters of the request: OpenAI `reasoning_effort` `none`, `minimal` and `low` map to Low, `medium` to Medium, `high` to High, `xhigh` and `max` to XHigh (High when the model has no XHigh level); Anthropic `thinking.budget_tokens` and Gemini `thinkingConfig.thinkingBudget` up to 1024 map to Low, up to 8192 to Medium, larger to High, and `-1` or any negative value sets no level
-3. Medium, or the only level of the model
+1. A level named in the model name: a tiered catalog ID such as `claude-opus-5-5-high`, a parenthesized suffix such as `claude-opus-5-5(low)` (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, a thinking budget in tokens, or `auto` for no level), or the `-thinking` suffix (High)
+2. Request thinking parameters: OpenAI `reasoning_effort` maps `none`, `minimal`, `low` to Low, `medium` to Medium, `high` to High, and `xhigh`, `max` to XHigh (High when the model has no XHigh level); Anthropic `thinking.budget_tokens` and Gemini `thinkingConfig.thinkingBudget` map up to 1024 to Low, up to 8192 to Medium, up to 16384 to High, and larger to XHigh (High when the model has no XHigh level), while `-1` and other negative values set no level
+3. Medium, or the model's only level
 
 Model names also match the catalog as follows:
 
 | Name | Result |
 | --- | --- |
-| With a date version or `-latest`, such as `claude-opus-5-5-20261001` | Matched after removing it |
 | With the `models/` prefix | Matched after removing the prefix |
-| An alias in `MODEL_MAPPING`, including one named like a catalog model | The mapped model |
+| With a `[<number>k]` or `[<number>m]` context window suffix, such as `claude-opus-5-5[1m]` | Matched after removing it |
+| With a date version or `-latest`, such as `claude-opus-5-5-20261001` | Matched after removing it |
+| An alias in `MODEL_MAPPING` (including one named like a catalog model) | The mapped model, matched by exact name or after removing a `[<number>k]` / `[<number>m]` suffix |
 
 ## Quick Start
 
 ### Desktop App
 
-Download the desktop app for your system from [Releases](https://github.com/Mag1cFall/Antigravity2API/releases); every package is portable and runs after unzipping:
+Download the portable desktop package for your system from [Releases](https://github.com/Mag1cFall/Antigravity2API/releases) and extract to run:
 
 | System | File | Start | Data directory (`.env`, `auth/` and `runtime/`) |
 | --- | --- | --- | --- |
-| Windows | `windows-amd64.zip` | Double-click `antigravity2api.exe` | The folder of `antigravity2api.exe`; the whole folder can be copied or moved as is |
+| Windows | `windows-amd64.zip` | Double-click `antigravity2api.exe` | Folder of `antigravity2api.exe` (portable as a whole folder) |
 | macOS | `desktop-<version>-darwin-universal.tar.gz` | Open `Antigravity2API.app` | `~/Library/Application Support/Antigravity2API` |
-| Linux | `desktop-<version>-linux-amd64.tar.gz` or `linux-arm64.tar.gz` | Run `antigravity2api`; requires the system GTK 3 and WebKitGTK 4.1; on Ubuntu 22.04 run `sudo apt install libwebkit2gtk-4.1-0` first | `~/.config/Antigravity2API` |
+| Linux | `desktop-<version>-linux-amd64.tar.gz` or `linux-arm64.tar.gz` | Run `antigravity2api` | `~/.config/Antigravity2API` |
 
-The app opens the admin UI in a window; sign in with a Google account or import the account of the local official client on the Accounts page. On Windows without the WebView2 runtime the admin UI opens in the default browser. On Windows and macOS closing the window keeps the app in the tray: double-clicking the tray icon on Windows or clicking the menu bar icon on macOS shows the window, and right-clicking opens the tray menu with a quota summary, Refresh Quota, Open in Browser, Copy API Address, Start at Login and Quit, whose text follows the interface language and, on Windows, whose colors follow the interface theme; on Linux closing the window quits, and on desktops without a system tray (such as GNOME without the AppIndicator extension) the tray icon does not appear and `--hidden` still opens the window.
+- **Runtime requirements**: Linux requires system GTK 3 and WebKitGTK 4.1 (on Ubuntu 22.04 run `sudo apt install libwebkit2gtk-4.1-0` first); on Windows without the WebView2 runtime, the admin UI opens in the default browser
+- **First account**: open the Accounts page in the window to sign in with Google or import the account of the local official client
+- **Window and tray**:
+  - On Windows and macOS, closing the window keeps the app in the tray: double-click the Windows tray icon or click the macOS menu bar icon to show the window, and right-click for the tray menu (quota summary, Refresh Quota, Open in Browser, Copy API Address, Start at Login and Quit; menu text follows the UI language and Windows menu colors follow the UI theme)
+  - On Linux, closing the window quits; on desktops without a system tray (such as GNOME without the AppIndicator extension) the window is always used, including with `--hidden`
 
 ### Command Line
 
-Download and extract the command-line build `<version>-<os>-<arch>.tar.gz` from [Releases](https://github.com/Mag1cFall/Antigravity2API/releases). On Windows use the desktop `antigravity2api.exe`; in cmd or PowerShell write the commands below as `cmd /c start /wait antigravity2api.exe <command>` so the prompt returns after the program exits. Add an account first:
+Download and extract `<version>-<os>-<arch>.tar.gz` from [Releases](https://github.com/Mag1cFall/Antigravity2API/releases). On Windows use the desktop `antigravity2api.exe`, written as `cmd /c start /wait antigravity2api.exe <command>` in cmd or PowerShell so the prompt waits until the command exits.
+
+Add an account first:
 
 ```bash
 ./antigravity2api login
 ```
 
-`login` opens the Google authorization page in the system browser. After authorization the account is saved to `auth/<email>/`; the service initializes it in the order of the official client at startup. Where no browser is available (a server reached over SSH), sign in with an authorization code:
+`login` opens Google authorization in the system browser, saves the account to `auth/<email>/`, and initializes it in the official client order at startup. On headless hosts (such as over SSH), sign in with an authorization code:
 
 ```bash
 ./antigravity2api login --code
 ```
 
-The command prints an authorization link. Open it in a browser on any device, authorize, and paste the code shown on the page back into the terminal. Both ways wait until authorization completes, with no time limit; press Ctrl+C to cancel.
+Open the printed link in a browser on any device, authorize, and paste the code back into the terminal. Both flows wait with no time limit; press Ctrl+C to cancel.
 
-When the official Antigravity client is signed in on this computer, import its account directly:
+Import an account directly when the official Antigravity client is already signed in on this computer:
 
 ```bash
 ./antigravity2api import
 ```
 
-`import` reads the token saved by the official client and imports that one account: it reads the system credential store (service `gemini`, user `antigravity`) first then `~/.gemini/jetski-standalone-oauth-token`, and then `~/.gemini/antigravity-cli/antigravity-oauth-token` of the official agy CLI.
+`import` checks the system credential store (service `gemini`, user `antigravity`), then `~/.gemini/jetski-standalone-oauth-token`, then `~/.gemini/antigravity-cli/antigravity-oauth-token` of the official agy CLI, importing the first token found.
 
-In the other direction, switch the official client to an account in the account store:
+Switch the local official client to an account in the store:
 
 ```bash
 ./antigravity2api switch <email>
 ```
 
-`switch` closes the running official client, writes the account's token where the official client keeps its sign-in, and opens the official client again.
+`switch` closes the running official client, writes that account's token to the official client's sign-in location, and relaunches it.
 
 Start the service:
 
@@ -125,19 +139,17 @@ Start the service:
 ./antigravity2api serve
 ```
 
-It listens on `127.0.0.1:8017` by default and reads `.env`, `auth/` and `runtime/` from the current directory. The command-line build started without any argument runs `serve --open-ui` and opens the admin UI in the browser once the service is ready; on Windows `antigravity2api.exe` is the desktop app, and double-clicking it opens the desktop window.
+Listens on `127.0.0.1:8017` by default and reads `.env`, `auth/` and `runtime/` from the current directory. Running the command-line build with no arguments runs `serve --open-ui` and opens the admin UI in the browser once ready; double-clicking `antigravity2api.exe` on Windows opens the desktop window.
 
 ### Remote Server
 
-When the service runs on another machine, create a pairing token on the Accounts page of the server's admin UI (valid for 10 minutes), then sign in and upload from a computer with a browser:
+When running on another machine, create a pairing token on the server's Accounts page (valid for 10 minutes), then sign in and upload from a computer with a browser:
 
 ```bash
 ./antigravity2api login --remote https://server.example.com --token <pairing token>
 ```
 
-The local sign-in uses the browser, or an authorization code with `--code`. After sign-in the token is only uploaded to the remote service; the account is saved in the remote service's `auth/`, and the local `auth/` stays unchanged.
-
-The Accounts page of the server's admin UI can also start an authorization code sign-in, or run `login --code` on the server.
+Local sign-in uses the browser by default, or an authorization code with `--code`; the token is uploaded only to the remote service's `auth/` while local `auth/` stays unchanged. You can also start authorization-code sign-in directly on the server's Accounts page or run `login --code` on the server.
 
 ### Docker
 
@@ -145,16 +157,18 @@ The Accounts page of the server's admin UI can also start an authorization code 
 docker run -d --name antigravity2api -p 8017:8017 -v ./data:/data ghcr.io/mag1cfall/antigravity2api:latest
 ```
 
-`latest` points to the latest stable release; use a `v<version>` tag to pin a version. The image works in `/data`; `.env`, `auth/` and `runtime/` are stored in the mounted directory, and the container listens on `0.0.0.0:8017`. Set `API_KEYS` when the port is reachable from outside; opening the admin UI from outside the container requires `ADMIN_AUTH_ENABLED=true` and `ADMIN_PASSWORD`. Add accounts with the authorization code sign-in of the admin UI, by remote pairing, with `docker exec -it antigravity2api antigravity2api login --code`, or by copying `auth/<email>/` from another computer into `data/auth/`; the running service loads new accounts within 2 seconds.
+- **Image and storage**: `latest` tracks the latest stable release and `v<version>` pins a release; the container works in `/data` storing `.env`, `auth/` and `runtime/` in the mounted directory and listening on `0.0.0.0:8017`
+- **Remote security**: set `API_KEYS` when exposing the port; opening the admin UI from outside the container requires `ADMIN_AUTH_ENABLED=true` and `ADMIN_PASSWORD`
+- **Adding accounts**: use authorization-code sign-in in the admin UI, remote pairing, `docker exec -it antigravity2api antigravity2api login --code`, or copy `auth/<email>/` from another machine into `data/auth/` (loaded automatically within 2 seconds)
 
 ### Proxy
 
-`PROXY` is a global HTTP, HTTPS or SOCKS5 proxy such as `socks5://127.0.0.1:1080` or `http://user:pass@127.0.0.1:7890`. Sign-in, token refresh, account initialization, generation and companion requests all go through it. The proxy exit must be in a region supported by Antigravity.
+`PROXY` configures a global HTTP, HTTPS or SOCKS5 proxy (such as `socks5://127.0.0.1:1080` or `http://user:pass@127.0.0.1:7890`) for sign-in, token refresh, account initialization, generation and companion requests; its exit must be in a region supported by Antigravity.
 
-- Proxy pool: the proxies in `PROXY` (comma separated; one per line in the admin UI; a single proxy as well) form a proxy pool, and each account is bound to the proxy with the fewest accounts; requests that belong to no account, such as sign-in and online update, use the first proxy
-- Checks: the proxies are checked at startup, every 5 minutes, when a public API request hits a connection error upstream (repeated errors merge into one check), when settings are saved and when you click "Check now" in Settings, and accounts on a proxy that is down move to the available proxy with the fewest accounts; Settings shows each proxy's status, latency and accounts
-- System proxy: when `PROXY` is empty the system proxy is used, that is the `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` environment variables, plus the system proxy settings on Windows
-- Account proxy: a single account can have its own proxy on the Accounts page of the admin UI; all requests of that account then use it, and `direct` connects without a proxy
+- **Proxy pool**: proxies in `PROXY` (comma separated; one per line in the admin UI; a single proxy as well) form a pool where each account binds to the proxy with the fewest accounts; non-account requests such as sign-in and online update use the first proxy
+- **Health checks**: run at startup, every 5 minutes, on upstream connection errors from public API requests (repeated errors merge into one check), when settings are saved, and via "Check now" in Settings; accounts on an unavailable proxy move to the available proxy with the fewest accounts; Settings shows each proxy's status, latency and bound accounts
+- **System proxy**: when `PROXY` is empty, `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` are used, plus Windows system proxy settings
+- **Account proxy**: individual accounts can set their own proxy on the Accounts page; `direct` connects without a proxy
 
 ## API Endpoints
 
@@ -183,10 +197,10 @@ GET    /v1/files/{id}/content
 DELETE /v1/files/{id}
 ```
 
-- Requests to Chat, Responses or Claude with an image generation model return images: a Markdown image with a data URL in the Chat and Claude content, an `image_generation_call` in Responses. The Responses `image_generation` tool is offered to text models, and its calls are served by the image generation model
-- `/v1/completions` treats `prompt` as the text before the cursor and `suffix` as the text after it, and the Tab completion model generates the completion at the cursor
-- `/v1/images/generations` and `/v1/images/edits` use the image generation model of the catalog when `model` is omitted; `size` maps to the nearest aspect ratio and `quality` to a 1K, 2K or 4K resolution; the transparent area of the edit `mask` is the area to edit
-- `/v1/audio/transcriptions` without `model` or with the transcription model transcribes WAV, MP3, FLAC or PCM audio with the transcription model; audio is sent at real-time pace, so a transcription takes about as long as the audio; `response_format` is `json` or `text`; `/v1/audio/translations` transcribes and then translates to English with the first text model of the catalog, or transcribes and translates with the given text model
+- **Image models and tool**: calling Chat, Responses or Claude with an image generation model returns images (Markdown data URL image in Chat and Claude, `image_generation_call` in Responses); the Responses `image_generation` tool is exposed to text models and executed by the image generation model
+- **Tab completion**: `/v1/completions` treats `prompt` as text before the cursor and `suffix` as text after it, generating the completion with the Tab completion model
+- **Images endpoints**: `/v1/images/generations` and `/v1/images/edits` use the catalog image generation model when `model` is omitted, map `size` to the nearest aspect ratio and scale down to the target size without upscaling, and map `quality` to 1K, 2K or 4K; `/v1/images/edits` accepts both `multipart/form-data` (`image` / `image[]` and `mask`) and `application/json` (`images` and `mask`, each with `image_url` or `file_id`), editing the transparent region of `mask`
+- **Audio endpoints**: `/v1/audio/transcriptions` transcribes WAV, MP3, FLAC or PCM audio using the transcription model when `model` is omitted or set to it, streamed at real-time pace (taking about the audio duration), with `response_format` `json` or `text`; `/v1/audio/translations` transcribes and translates to English using the first catalog text model, or uses the specified text model directly
 
 ### Claude Compatible
 
@@ -196,7 +210,7 @@ POST   /v1/messages/count_tokens
 GET    /v1/models
 ```
 
-`/v1/models` with an `anthropic-version` header returns the Anthropic format, and `/v1/files` with an `anthropic-version` or `anthropic-beta: files-api-*` header returns the Anthropic Files API format.
+`/v1/models` with an `anthropic-version` header returns the Anthropic format; `/v1/files` with an `anthropic-version` or `anthropic-beta: files-api-*` header returns the Anthropic Files API format.
 
 ### Gemini Compatible
 
@@ -206,6 +220,11 @@ POST   /v1beta/models/{model}:streamGenerateContent?alt=sse
 POST   /v1beta/models/{model}:countTokens
 GET    /v1beta/models
 GET    /v1beta/models/{model}
+POST   /v1beta/cachedContents
+GET    /v1beta/cachedContents
+GET    /v1beta/cachedContents/{cache}
+PATCH  /v1beta/cachedContents/{cache}
+DELETE /v1beta/cachedContents/{cache}
 POST   /upload/v1beta/files
 GET    /v1beta/files
 GET    /v1beta/files/{name}
@@ -217,19 +236,30 @@ POST   /v1beta/interactions/{id}/cancel
 GET    /ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent
 ```
 
-`streamGenerateContent` without `alt=sse` returns a JSON array. The four Interactions endpoints are also served under `/v1/interactions`. The `/v1` paths that Gemini SDKs use by default also work: replace `v1beta` with `v1` for model methods, context caching and file upload, and `/v1/models` and `/v1/files` return the Gemini format when authenticated with `x-goog-api-key` or `key`. The Live API connects at the WebSocket address above (`v1alpha` also works): transcription models return text transcripts of speech, and Agent models talk in voice mode with 24 kHz audio output. `generationConfig.responseModalities` with `IMAGE` requires an image generation model; images return as `inlineData` parts, and `aspectRatio` and `imageSize` of `imageConfig` apply as given.
+- **Streaming and `/v1` paths**: `streamGenerateContent` without `alt=sse` returns a JSON array; model methods, context caching, file upload and Interactions are also served under `/v1` (replace `v1beta` with `v1`); `/v1/models` and `/v1/files` return Gemini format when authenticated with `x-goog-api-key` or `key`
+- **Live API**: connects at the WebSocket path above (`v1alpha` also works); transcription models return text transcripts of speech, and Agent models talk in voice mode with 24 kHz audio output
+- **Image output**: `generationConfig.responseModalities` with `IMAGE` requires an image generation model; images return as `inlineData` parts and `imageConfig.aspectRatio` and `imageConfig.imageSize` apply as given
 
 ### Authentication
 
-`API_KEYS` sets one or more public API keys. Requests carry a key with `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key` or `?key=`; when `API_KEYS` is empty no key is checked, but browser requests with an `Origin` header are accepted only from pages on localhost or a loopback address; other web origins and `Origin: null` get 401 `Invalid API Key`, so set `API_KEYS` before connecting a web client. Request records and usage are grouped by key. A request with the `X-Antigravity-Account-Id: <account>` header is handled only by that account, written as the email shown on the Accounts page; when the account does not exist, is not bound to the key, or is unavailable, the request returns an error stating the reason and does not move to another account.
+- **API keys**: `API_KEYS` sets one or more public API keys passed via `Authorization: Bearer <key>`, `x-api-key`, `x-goog-api-key` or `?key=`; request records and usage are grouped by key
+- **Browser origin protection**: when `API_KEYS` is empty, browser requests with an `Origin` header are accepted only from localhost or loopback addresses; other origins and `Origin: null` return 401 `Invalid API Key`, so set `API_KEYS` for web clients
+- **Pinned account**: `X-Antigravity-Account-Id: <account>` (the email shown on the Accounts page) routes the request exclusively to that account; if it does not exist, is not bound to the key, or is unavailable, the request returns an error stating the reason without switching accounts
 
 ### Admin UI and Service Status
 
-Open `http://127.0.0.1:8017/` in a browser for the admin UI, which uses the `/api/*` endpoints. Loopback access needs no sign-in; after setting `ADMIN_AUTH_ENABLED=true`, `ADMIN_USERNAME` and `ADMIN_PASSWORD`, other devices can sign in. Behind a reverse proxy, forward `Host` unchanged (`proxy_set_header Host $http_host;` in nginx); the admin UI recognizes remote access by the domain it is reached at and requires sign-in. Settings saved in the UI are written back to `.env`; `LISTEN`, `AUTH_DIR` and `RUNTIME_DIR` take effect after a restart, the others on the next request. The About section of Settings shows the latest GitHub release; after confirming, the app downloads the package for its platform, verifies the SHA-256, replaces the program and restarts into the new version, downloading through `PROXY`; Docker deployments update with the image.
+- **Access and sign-in**: open `http://127.0.0.1:8017/` for the admin UI (backed by `/api/*`); loopback access requires no sign-in, while setting `ADMIN_AUTH_ENABLED=true`, `ADMIN_USERNAME` and `ADMIN_PASSWORD` enables remote sign-in
+- **Reverse proxy**: forward `Host` unchanged (`proxy_set_header Host $http_host;` in nginx) so the admin UI recognizes remote access by host and requires sign-in
+- **Settings activation**: settings saved in the UI write back to `.env`; `LISTEN`, `AUTH_DIR` and `RUNTIME_DIR` take effect after restart, all other settings on the next request
+- **Online update**: the About section of Settings displays the latest GitHub release; upon confirmation, the app downloads the platform package through `PROXY`, verifies SHA-256, replaces the binary and restarts (Docker deployments update via the image)
 
 ## Client Setup
 
-OpenAI SDKs use the base URL `http://127.0.0.1:8017/v1`; Anthropic and Google GenAI SDKs use `http://127.0.0.1:8017`. The Connect page of the admin UI generates ready-to-copy configs for Claude Code, Codex, OpenCode, OpenClaw, Magpie, pi, omp, dsh, Cherry Studio and curl from the current address, API key and live model catalog; OpenCode, OpenClaw, pi, omp, dsh and Cherry Studio let you pick the protocol, and Claude Code, Codex, OpenCode, OpenClaw, pi, Cherry Studio and Magpie also offer one-click import links. The Connect page also lists every endpoint and common capability; open one to see its main parameters, a curl example and the official docs.
+OpenAI SDKs use the base URL `http://127.0.0.1:8017/v1`; Anthropic and Google GenAI SDKs use `http://127.0.0.1:8017`.
+
+- The Connect page generates ready-to-copy configs for Claude Code, Codex, OpenCode, OpenClaw, Magpie, pi, omp, dsh, Cherry Studio and curl from the current address, API key and live catalog
+- OpenCode, OpenClaw, pi, omp, dsh and Cherry Studio support protocol selection; Claude Code, Codex, OpenCode, OpenClaw, pi, Cherry Studio and Magpie include one-click import links
+- The Connect page also lists all endpoints and common capabilities with key parameters, curl examples and official documentation links
 
 ```bash
 curl http://127.0.0.1:8017/v1/chat/completions \
@@ -252,7 +282,7 @@ export ANTHROPIC_MODEL=claude-opus-5-5
 claude
 ```
 
-Map the small model name used by Claude Code background tasks to a catalog model with `MODEL_MAPPING`, for example `MODEL_MAPPING=claude-haiku-5-5:gemini-3.8-flash-low`. The "Model mapping" tab on the models page of the admin UI adds and edits entries row by row.
+Map the small model name used by Claude Code background tasks to a catalog model with `MODEL_MAPPING`, for example `MODEL_MAPPING=claude-haiku-5-5:gemini-3.8-flash-low`. The "Model mapping" tab on the Models page adds and edits entries row by row.
 
 Codex (`~/.codex/config.toml`):
 
@@ -278,77 +308,63 @@ The system instruction of every generation request combines the system prompt of
 | `aggressive` | identity only | Sent as is |
 | `custom` | The template in `SYSTEM_PROMPT_TEMPLATE` | The template in `SYSTEM_PROMPT_USER_TEMPLATE` |
 
-"View text" on the settings page of the admin UI shows the system instruction and first user message each system prompt tier sends upstream. For `custom`, the settings page edits two texts directly: the system instruction and the user message wrapper. "Load preset" puts the full text of a built-in tier into the editor, and "Insert" places an official section or a variable at the cursor. `{{.Client}}` stands for the client's own system prompt and `{{.Text}}` for the original user message. Both texts are Go `text/template` templates, and the line under each editor shows the character count with sample data filled in, or the template error.
+"View text" on the Settings page shows the system instruction and first user message each tier sends upstream. With `custom`, Settings edits two Go `text/template` templates and shows the sample-rendered character count or template error beneath each:
 
-Google rejects requests whose system prompt contains certain client identity sentences and instructions (it returns 429). The service removes the sentences containing them before sending. The rule list lives in [`rules/rejected.txt`](rules/rejected.txt) and updates automatically at startup and every hour; the settings page shows the list version and the last check result, "Update now" checks right away, and you can add your own rules (`REJECTED_RULES`), which apply from the next request after saving.
+- **System instruction**: lists every official section plus the client system prompt in official order; each section can be toggled on or off, expanded to inspect or edit its body, restored with "Restore official text", and edited with variable "Insert" (`{{.Client}}` represents the client's own system prompt); "Load preset" fills the full template of a built-in tier
+- **User turn wrapper**: edits the message wrapper template directly (`{{.Text}}` represents the original user message), also with "Load preset" and variable "Insert"
 
-## Project Layout
-
-```text
-cmd/antigravity2api/  # entry point and subcommands
-internal/
-  antigravity/        # Cloud Code client: sign-in, initialization, catalog, envelope and stream decoding
-  api/                # OpenAI, Claude and Gemini protocol adapters
-  app/                # HTTP server, admin API and event stream
-  auth/               # account files and official client credential import
-  balancer/           # multi-account scheduling and cooldowns
-  config/             # configuration loading, validation and saving
-  desktop/            # desktop window and tray
-  logging/            # service logs
-  proxypool/          # proxy pool: account binding, checks and rebinding
-  prompt/             # system prompt tiers and templates
-  requestdb/          # request ledger, usage and cost
-  service/            # generation service: account selection, conversations, retries and account lifecycle
-  tokencount/         # local token counting
-  webui/              # embedded admin UI
-web/                  # admin UI source
-build/                # desktop icons and packaging configuration
-docs/                 # protocol, development and logging docs
-```
+Google rejects requests whose system prompt contains certain client identity sentences and instructions (HTTP 429). The service strips matching sentences before sending using [`rules/rejected.txt`](rules/rejected.txt), updated automatically at startup and every hour; Settings shows the rule list version and last check result, offers "Update now", and accepts custom rules (`REJECTED_RULES`, active on the next request after saving).
 
 ## Environment Variables
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `LISTEN` | Listen address of the public API, admin API and admin UI; when Windows reserves the port, the service listens on the next free port and the admin UI shows the actual address | `127.0.0.1:8017` |
+| `LISTEN` | Listen address for public API, admin API and admin UI | `127.0.0.1:8017` |
 | `API_KEYS` | Public API keys, comma separated | empty |
-| `API_KEY_ACCOUNTS` | Accounts bound to API keys, each item written as `key:account\|account`, comma separated; a key with bound accounts uses only those accounts | empty |
-| `API_KEY_NAMES` | Names for API keys, each item written as `key:name`, comma separated; the admin UI shows them with the keys | empty |
+| `API_KEY_ACCOUNTS` | Accounts bound to API keys (`key:account\|account`, comma separated) | empty |
+| `API_KEY_NAMES` | Display names for API keys (`key:name`, comma separated) | empty |
 | `AUTH_DIR` | Account directory | `auth` |
-| `RUNTIME_DIR` | Runtime data directory: the request ledger `requests.db`, logs in `logs/`, uploaded `files/`, generated `media/`, conversation records, model catalogs and other runtime state | `runtime` |
-| `PROXY` | Global HTTP, HTTPS or SOCKS5 proxy; the comma-separated items form a proxy pool; the system proxy is used when empty | empty |
+| `RUNTIME_DIR` | Runtime data directory (ledger, logs, files, media, conversations and catalogs) | `runtime` |
+| `PROXY` | Global HTTP, HTTPS or SOCKS5 proxy (comma separated for a pool) | empty |
 | `SYSTEM_PROMPT` | System prompt tier: `full`, `medium`, `aggressive`, `custom` | `full` |
-| `SYSTEM_PROMPT_TEMPLATE` | System instruction template of the `custom` tier; write multi-line text as one double-quoted line with `\n` | System instruction of the `medium` tier |
-| `SYSTEM_PROMPT_USER_TEMPLATE` | User message template of the `custom` tier; empty sends messages as is | User message wrapper of the `medium` tier |
-| `REJECTED_RULES` | Custom rejected-sentence rules, used together with the auto-updated list; syntax at the top of `rules/rejected.txt` | Empty |
-| `MODEL_MAPPING` | Client model names mapped to catalog model IDs, each item `alias:model ID`, comma separated | empty |
-| `MEDIA_OUTPUT` | How generated media is given: `inline` or `url` | `inline` |
-| `MEDIA_BASE_URL` | Service address used in media links, for example `https://ai.example.com`; when empty, the address of each request is used, following `X-Forwarded-Proto` behind a reverse proxy | empty |
+| `SYSTEM_PROMPT_TEMPLATE` | `custom` system instruction template (use double quotes with `\n` for multi-line) | `medium` tier system instruction |
+| `SYSTEM_PROMPT_USER_TEMPLATE` | `custom` user message template; empty sends messages as is | `medium` tier user wrapper |
+| `REJECTED_RULES` | Custom rejected-sentence rules merged with the auto-updated list (syntax in `rules/rejected.txt`) | empty |
+| `MODEL_MAPPING` | Client model aliases (`alias:model ID`, comma separated) | empty |
+| `MEDIA_OUTPUT` | Generated media output mode: `inline` or `url` | `inline` |
+| `MEDIA_BASE_URL` | Service address used in media links, e.g. `https://ai.example.com` | empty |
 | `ACCOUNT_CONCURRENCY` | Concurrent requests per account | `2` |
 | `ROUTING_STRATEGY` | Routing strategy: `round-robin` or `fill-first` | `round-robin` |
-| `PREFER_LOWER_TIER_MODELS` | Model IDs that prefer lower-plan accounts, comma-separated; within the same priority, Free, then Pro, then Ultra accounts are used | empty |
-| `REQUEST_TIMEOUT` | Maximum wait for the first upstream event and between two upstream events | `5m` |
-| `FIRST_EVENT_HEDGE` | When a request has no first token for a while, send a backup request on an idle account (another account first, otherwise a free slot on the same account); the first to answer continues and the other is cancelled; background Responses requests get none. `auto` waits for the first-token p95 of each model over the last 24 hours and skips models with fewer than 20 requests; a positive integer is the wait in seconds; `off` sends no backup requests | `auto` |
-| `FIRST_EVENT_HEDGE_MODELS` | Comma-separated model IDs that get backup requests; backup requests also count against account quota | `gemini-4-argon` |
-| `NONSTREAM_KEEPALIVE` | When a non-streaming request waits more than 10 seconds, return 200 first and then write a newline every 10 seconds, so reverse proxies keep the connection open | `true` |
-| `FAKE_STREAM` | Streaming requests get the complete result first and then output it in streaming format; failures midway are regenerated on another account | `false` |
-| `QUOTA_REFRESH_INTERVAL` | Interval for reading the quota of every account, disabled ones included, in the background; minimum `1m`, `0` turns it off | `15m` |
-| `QUOTA_RESERVE_PERCENT` | Quota reserve, 0–99 | `0` |
+| `PREFER_LOWER_TIER_MODELS` | Model IDs preferring lower-plan accounts, comma separated | empty |
+| `REQUEST_TIMEOUT` | Maximum wait for the first upstream event and between consecutive events | `5m` |
+| `FIRST_EVENT_HEDGE` | Backup request trigger on slow first token: `auto`, positive integer seconds, or `off` | `auto` |
+| `FIRST_EVENT_HEDGE_MODELS` | Model IDs eligible for backup requests, comma separated | `gemini-4-carbon,gemini-4-argon` |
+| `NONSTREAM_KEEPALIVE` | Keep-alive newlines for slow non-streaming requests | `true` |
+| `FAKE_STREAM` | Buffer full result before streaming; regenerate on another account on mid-stream failure | `false` |
+| `QUOTA_REFRESH_INTERVAL` | Background quota refresh interval for all accounts (including disabled); min `1m`, `0` disables | `15m` |
+| `QUOTA_RESERVE_PERCENT` | Quota reserve percentage, 0–99 | `0` |
 | `WEEKLY_QUOTA_WARMUP` | Start weekly quota timers automatically | `false` |
 | `LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `LOG_FORMAT` | Log format: `json` or `text` | `json` |
 | `LOG_FILE` | Also write logs to `RUNTIME_DIR/logs/`, rotating at 10 MB per file | `true` |
-| `LOG_MAX_TOTAL_MB` | Total size limit of the log files, at least 20: `LOG_MAX_TOTAL_MB / 10 − 1` rotated files are kept and the oldest are removed beyond that | `500` |
+| `LOG_MAX_TOTAL_MB` | Total log file size limit in MB (minimum 20) | `500` |
 | `REQUEST_LOG_BODIES` | Store request and response bodies | `false` |
 | `ADMIN_AUTH_ENABLED` | Sign-in for remote access to the admin UI | `false` |
 | `ADMIN_USERNAME` | Admin user name | `admin` |
 | `ADMIN_PASSWORD` | Admin password | empty |
 
-- `MEDIA_OUTPUT` applies to Chat Completions and Messages text and to Images `response_format: url`: `inline` writes a data URL; `url` saves the media by content under `RUNTIME_DIR/media/` and gives a `/media/<file>` link to this service, a path that does not check API keys
-- `ROUTING_STRATEGY`: among the highest-priority accounts, `round-robin` picks the one with the fewest running requests and, on ties, the one picked least recently; `fill-first` fills one account first
-- `QUOTA_RESERVE_PERCENT`: when the 5-hour or weekly remaining share of an account quota group is at or below this percentage, the group is not scheduled until that window resets; with `0` only used-up groups are skipped
-- `WEEKLY_QUOTA_WARMUP`: after each automatic quota refresh, send `Hi` from every ready account whose weekly window has not started, so the weekly timer starts; at most once per account and quota group every 6 days
-- `REQUEST_LOG_BODIES`: store public request and response bodies and the upstream attempt bodies of successful requests; upstream attempt bodies of failed requests are always stored; each is truncated to 64 KiB, keeping the latest 1000 of each
+- `LISTEN`: when Windows reserves the configured port, listens on the next available port and displays the actual address in the admin UI header
+- `API_KEY_ACCOUNTS`: a key with bound accounts uses only those accounts
+- `PROXY`: uses the system proxy when empty
+- `MEDIA_OUTPUT` and `MEDIA_BASE_URL`: apply to Chat Completions and Messages content and Images `response_format: url`; `inline` embeds a data URL, while `url` saves files by content under `RUNTIME_DIR/media/` and serves `/media/<file>` without API key checks; when `MEDIA_BASE_URL` is empty, each request's address is used, following `X-Forwarded-Proto` behind a reverse proxy
+- `ROUTING_STRATEGY`: among highest-priority accounts, `round-robin` picks the one with the fewest running requests and least recent pick on ties; `fill-first` fills one account first
+- `PREFER_LOWER_TIER_MODELS`: within the same priority, prefers Free, then Pro, then Ultra accounts
+- `FIRST_EVENT_HEDGE` and `FIRST_EVENT_HEDGE_MODELS`: when the primary request stalls before the first token, sends a backup request on an idle account (another account first, otherwise a free slot on the primary account); the first to emit continues while the other is cancelled, and background Responses requests are excluded; `auto` uses each model's 24-hour first-token p95 (skipping models with fewer than 20 samples or requests whose upstream body exceeds the recent p95 size), a positive integer sets seconds, and `off` disables hedging; backup requests count against account quota
+- `NONSTREAM_KEEPALIVE`: when a non-streaming request waits over 10 seconds, sends status 200 and writes a newline every 10 seconds to keep reverse-proxy connections open
+- `QUOTA_RESERVE_PERCENT`: skips an account's quota group when its 5-hour or weekly remaining share is at or below this percentage until that window resets; `0` skips only exhausted groups
+- `WEEKLY_QUOTA_WARMUP`: after each automatic quota refresh, sends `Hi` from ready accounts whose weekly window has not started yet, at most once per account and quota group every 6 days
+- `LOG_MAX_TOTAL_MB`: keeps `LOG_MAX_TOTAL_MB / 10 − 1` rotated files and removes the oldest beyond that
+- `REQUEST_LOG_BODIES`: stores public request/response bodies and upstream attempt bodies of successful requests (failed upstream attempt bodies are always stored); each is truncated to 64 KiB, keeping the latest 1000 of each
 
 Process environment variables override the same keys in `.env`.
 
@@ -360,17 +376,18 @@ Process environment variables override the same keys in `.env`.
 | `login` | Sign in to a Google account and add it to the account store |
 | `import` | Import the account of the local official Antigravity client |
 | `switch <email>` | Switch the local official client to that account of the account store |
-| `accounts` | Read the account directory and list accounts, plans, enabled or disabled and the time added, in the order added |
+| `accounts` | Read the account directory and list accounts, plans, enabled state and time added |
 | `status` | Show the state of the running service and each account |
 | `version` | Print the program version |
 
-- `login` signs in with a browser by default; `--code` signs in with a pasted authorization code; `--remote <address> --token <token>` uploads the account to a remote service and also works with `--code`; `--proxy <URL>` is the proxy for this sign-in and is bound to the account (`direct` connects without a proxy), and works with the other options; `--cloud --provider <name>` signs in on this machine with Continue with Google Cloud (enterprise WIF) and cannot be combined with `--code` or `--remote`
-- `status` reads `/api/status` and `/api/accounts` of the running service over loopback and prints the version, listen address, start time and the state, plan and remaining share per quota bucket of each account; loopback access needs no sign-in
+- `login` flags: defaults to browser sign-in; `--code` signs in with a pasted authorization code; `--remote <address> --token <token>` uploads to a remote service (combinable with `--code`); `--proxy <URL>` sets the sign-in proxy and binds it to the account (`direct` for no proxy, combinable with other flags); `--cloud --provider <name>` signs in locally with Continue with Google Cloud enterprise WIF (cannot combine with `--code` or `--remote`)
+- `status`: reads `/api/status` and `/api/accounts` over loopback without sign-in, printing version, listen address, start time and each account's state, plan and remaining share per quota bucket
+- Global overrides: every command accepts `--listen`, `--auth`, `--runtime` and `--proxy` to override `LISTEN`, `AUTH_DIR`, `RUNTIME_DIR` and `PROXY` (`login --proxy` behaves as above)
+- Exit status and desktop app: errors print the reason to stderr and exit with code 1 (e.g. `status` prints `服务未在 <LISTEN> 运行: <reason>` when stopped); output formats for `accounts` and `status` are in the [development guide](docs/development.md#子命令输出); the desktop executable accepts all subcommands, opens the desktop window when run with none, and starts in the tray only with `--hidden`
 
-Every command accepts `--listen`, `--auth`, `--runtime` and `--proxy`, overriding `LISTEN`, `AUTH_DIR`, `RUNTIME_DIR` and `PROXY` (for `login`, `--proxy` works as described above). On an error a command writes the reason to standard error and exits with code 1; for example `status` prints `服务未在 <LISTEN> 运行: <reason>` when the service is not running. The output of `accounts` and `status` is described in the [development guide](docs/development.md#子命令输出). The desktop executable accepts the same subcommands; without a subcommand it opens the desktop window, and `--hidden` starts with only the tray icon.
+## Documentation
 
-## Notes
-
-Issues and PRs are welcome.
-
-See [docs/development.md](docs/development.md) for development and contribution, [docs/protocol.md](docs/protocol.md) for sign-in, initialization, the request envelope and stream decoding, [docs/logging.md](docs/logging.md) for logs and the request ledger, and [docs/reverse-engineering.md](docs/reverse-engineering.md) for capturing and analyzing the official client.
+- [Development Guide](docs/development.md): build environment, project layout, configuration, scheduling, admin API and tests
+- [Protocol Reference](docs/protocol.md): sign-in, initialization, request envelope, companion requests and stream decoding
+- [Logging and Request Ledger](docs/logging.md): log format, event catalog, SQLite ledger, pricing and admin event stream
+- [Reverse Engineering Guide](docs/reverse-engineering.md): capturing, static analysis and aligning with new official client releases

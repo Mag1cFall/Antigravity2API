@@ -1144,7 +1144,7 @@ func geminiFinishReason(reason string) string {
 	}
 }
 
-// setGeminiCandidateEnd 写入候选的终止原因、终止说明与搜索来源
+// setGeminiCandidateEnd 写入候选的终止原因、终止说明、搜索来源与引文来源
 func setGeminiCandidateEnd(candidate map[string]any, result generationResult) {
 	candidate["finishReason"] = geminiFinishReason(result.finishReason)
 	if result.finishMessage != "" {
@@ -1152,6 +1152,9 @@ func setGeminiCandidateEnd(candidate map[string]any, result generationResult) {
 	}
 	if result.grounding != nil {
 		candidate["groundingMetadata"] = result.grounding
+	}
+	if len(result.citations) > 0 {
+		candidate["citationMetadata"] = map[string]any{"citationSources": result.citations}
 	}
 }
 

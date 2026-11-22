@@ -168,7 +168,7 @@ func Default() Config {
 		RoutingStrategy:          "round-robin",
 		RequestTimeout:           5 * time.Minute,
 		FirstEventHedge:          FirstEventHedgeAuto,
-		FirstEventHedgeModels:    []string{"gemini-4-argon"},
+		FirstEventHedgeModels:    []string{"gemini-4-carbon", "gemini-4-argon"},
 		NonstreamKeepalive:       true,
 		QuotaRefreshInterval:     15 * time.Minute,
 		LogLevel:                 "info",

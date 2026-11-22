@@ -13,6 +13,7 @@ import (
 	"image/png"
 	"io"
 	"math"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"strconv"
@@ -61,8 +62,25 @@ func (s *server) handleOpenAIImages(w http.ResponseWriter, r *http.Request) {
 	s.writeOpenAIImages(w, r, request, nil, "image_generation")
 }
 
-// handleOpenAIImageEdits 把 multipart 的 image 或 image[] 与 mask 作为参考图片接在提示词之后，按 OpenAI Images 参数生成编辑结果
+// openAIImageEditInput 为 JSON 图像编辑请求中的参考图或遮罩，image_url 与 file_id 二选一
+type openAIImageEditInput struct {
+	ImageURL string `json:"image_url"`
+	FileID   string `json:"file_id"`
+}
+
+// openAIImageEditRequest 为 JSON 形态的 OpenAI 图像编辑请求
+type openAIImageEditRequest struct {
+	openAIImageRequest
+	Images []openAIImageEditInput `json:"images"`
+	Mask   *openAIImageEditInput  `json:"mask"`
+}
+
+// handleOpenAIImageEdits 接受 multipart（image、image[] 与 mask）或 application/json（images 与 mask）图像编辑请求，把参考图与遮罩接在提示词之后生成编辑结果
 func (s *server) handleOpenAIImageEdits(w http.ResponseWriter, r *http.Request) {
+	if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType == "application/json" {
+		s.handleOpenAIImageEditsJSON(w, r)
+		return
+	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -89,33 +107,131 @@ func (s *server) handleOpenAIImageEdits(w http.ResponseWriter, r *http.Request) 
 		}
 		request.N = count
 	}
-	var inputs []antigravity.Part
+	var images []antigravity.Blob
 	for _, header := range append(r.MultipartForm.File["image"], r.MultipartForm.File["image[]"]...) {
-		data, err := readMultipartFile(header)
+		blob, err := readMultipartImage(header)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		mimeType := cmp.Or(declaredMediaType(header.Header.Get("Content-Type")), http.DetectContentType(data))
-		mimeType, data = normalizeImagePayload(mimeType, data)
-		inputs = append(inputs, antigravity.Part{InlineData: &antigravity.Blob{MIME: mimeType, Data: data}})
+		images = append(images, blob)
 	}
-	if len(inputs) == 0 {
+	if len(images) == 0 {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "image is required")
 		return
 	}
+	var mask *antigravity.Blob
 	if masks := r.MultipartForm.File["mask"]; len(masks) > 0 {
-		mask, err := readMultipartFile(masks[0])
-		if err == nil {
-			mask, err = imageEditMask(mask)
-		}
+		blob, err := readMultipartImage(masks[0])
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		inputs = append(inputs, antigravity.Part{InlineData: &antigravity.Blob{MIME: "image/png", Data: mask}}, antigravity.Part{Text: imageEditMaskInstruction})
+		mask = &blob
+	}
+	inputs, err := imageEditParts(images, mask)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
 	}
 	s.writeOpenAIImages(w, r, request, inputs, "image_edit")
+}
+
+// handleOpenAIImageEditsJSON 解析 application/json 形态的图像编辑请求并构造与 multipart 相同的上游输入
+func (s *server) handleOpenAIImageEditsJSON(w http.ResponseWriter, r *http.Request) {
+	var request openAIImageEditRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if len(request.Images) == 0 {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "images is required")
+		return
+	}
+	images := make([]antigravity.Blob, 0, len(request.Images))
+	for _, imageInput := range request.Images {
+		blob, err := resolveImageEditInput(r.Context(), imageInput)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		images = append(images, blob)
+	}
+	var mask *antigravity.Blob
+	if request.Mask != nil {
+		blob, err := resolveImageEditInput(r.Context(), *request.Mask)
+		if err != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		mask = &blob
+	}
+	inputs, err := imageEditParts(images, mask)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	s.writeOpenAIImages(w, r, request.openAIImageRequest, inputs, "image_edit")
+}
+
+// readMultipartImage 读取 multipart 图片并做一次规范化（GIF 转 PNG）
+func readMultipartImage(header *multipart.FileHeader) (antigravity.Blob, error) {
+	data, err := readMultipartFile(header)
+	if err != nil {
+		return antigravity.Blob{}, err
+	}
+	mimeType := cmp.Or(declaredMediaType(header.Header.Get("Content-Type")), http.DetectContentType(data))
+	mimeType, data = normalizeImagePayload(mimeType, data)
+	return antigravity.Blob{MIME: mimeType, Data: data}, nil
+}
+
+// resolveImageEditInput 读取并规范化单张 JSON 编辑输入（每张图只规范化一次），image_url 支持 data URL 与 http(s) URL，file_id 读取已上传文件
+func resolveImageEditInput(ctx context.Context, input openAIImageEditInput) (antigravity.Blob, error) {
+	imageURL := strings.TrimSpace(input.ImageURL)
+	fileID := strings.TrimSpace(input.FileID)
+	if (imageURL == "") == (fileID == "") {
+		return antigravity.Blob{}, errors.New("image input must specify exactly one of image_url or file_id")
+	}
+	if fileID != "" {
+		store := filesFrom(ctx)
+		if store == nil {
+			return antigravity.Blob{}, fmt.Errorf("file %s: %w", fileID, errFileNotFound)
+		}
+		file, data, err := store.read(fileID)
+		if err != nil {
+			return antigravity.Blob{}, fmt.Errorf("file %s: %w", fileID, err)
+		}
+		mimeType, data := normalizeImagePayload(cmp.Or(declaredMediaType(file.MIME), http.DetectContentType(data)), data)
+		return antigravity.Blob{MIME: mimeType, Data: data}, nil
+	}
+	if remoteMediaURL(imageURL) {
+		blob, err := downloadRemoteMedia(ctx, imageURL, "")
+		if err != nil {
+			return antigravity.Blob{}, fmt.Errorf("Error while downloading %s: %w", imageURL, err)
+		}
+		return *blob, nil
+	}
+	part, err := dataURLPart(imageURL, "")
+	if err != nil {
+		return antigravity.Blob{}, err
+	}
+	return *part.InlineData, nil
+}
+
+// imageEditParts 把已规范化的参考图与可选遮罩组装为上游输入分片，遮罩转为灰度 PNG 并附编辑说明
+func imageEditParts(images []antigravity.Blob, mask *antigravity.Blob) ([]antigravity.Part, error) {
+	parts := make([]antigravity.Part, 0, len(images)+2)
+	for _, blob := range images {
+		parts = append(parts, antigravity.Part{InlineData: &blob})
+	}
+	if mask != nil {
+		converted, err := imageEditMask(mask.Data)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, antigravity.Part{InlineData: &antigravity.Blob{MIME: "image/png", Data: converted}}, antigravity.Part{Text: imageEditMaskInstruction})
+	}
+	return parts, nil
 }
 
 // writeOpenAIImages 按 n 并发生成图片并写入 OpenAI 图片响应：提示词在前，inputs 为其后的参考图片与说明；未指定模型时取目录中首个图像生成模型，流式时每张图片发送一个 <event>.completed 事件

@@ -225,7 +225,7 @@ func NewPrelogin(device Device, proxy Proxy) *Prelogin {
 	return &Prelogin{client: client, browser: []byte(uuid.NewString())}
 }
 
-// Run 在启动后 5.1–5.7 s 用设备 installation_id 发出该系统的第一个登录前批次（取官方 2.33.0 的新安装登录前现场），之后按模板中的上报时刻继续发出其余批次；ctx 结束时返回
+// Run 在启动后 5.1–5.7 s 用设备 installation_id 发出该系统的第一个登录前批次（取官方 2.34.0 的新安装登录前现场），之后按模板中的上报时刻继续发出其余批次；ctx 结束时返回
 func (p *Prelogin) Run(ctx context.Context) {
 	template, ok := preloginTemplates[p.client.device.OS]
 	if !ok {
