@@ -770,6 +770,9 @@ type streamChunk struct {
 			FinishMessage     string      `json:"finishMessage"`
 			ContinuationToken string      `json:"continuationToken"`
 			GroundingMetadata *Grounding  `json:"groundingMetadata"`
+			CitationMetadata  *struct {
+				Citations []CitationSource `json:"citations"`
+			} `json:"citationMetadata"`
 		} `json:"candidates"`
 		UsageMetadata *struct {
 			PromptTokenCount        int64 `json:"promptTokenCount"`
@@ -1000,6 +1003,9 @@ func DecodeStream(reader io.Reader, events chan<- Event) {
 			}
 			if candidate.GroundingMetadata != nil {
 				events <- Event{Kind: EventGrounding, ProviderModel: chunk.Response.ModelVersion, Grounding: candidate.GroundingMetadata}
+			}
+			if candidate.CitationMetadata != nil && len(candidate.CitationMetadata.Citations) > 0 {
+				events <- Event{Kind: EventCitation, ProviderModel: chunk.Response.ModelVersion, Citations: candidate.CitationMetadata.Citations}
 			}
 			checkpoint = cmp.Or(candidate.ContinuationToken, checkpoint)
 			switch {

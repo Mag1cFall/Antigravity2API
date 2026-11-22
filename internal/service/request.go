@@ -62,7 +62,7 @@ func prepare(request antigravity.GenerateRequest, model antigravity.CatalogModel
 	if request, err = normalizeTurns(request, model); err != nil {
 		return request, nil, err
 	}
-	out := &output{hide: request.Config.HideThinking, limit: request.Config.MaxOutputTokens, stop: newStopMatcher(request.Config.StopSequences), provider: model.ModelProvider, origin: signatureOrigin(model), signed: newSignatureRecord()}
+	out := &output{unary: request.Unary, hide: request.Config.HideThinking, limit: request.Config.MaxOutputTokens, stop: newStopMatcher(request.Config.StopSequences), provider: model.ModelProvider, origin: signatureOrigin(model), signed: newSignatureRecord()}
 	request, out.names = renameFunctions(request, model.ModelProvider == antigravity.ProviderAnthropic)
 	if model.ModelProvider == antigravity.ProviderAnthropic {
 		renameCalls(request.Contents)

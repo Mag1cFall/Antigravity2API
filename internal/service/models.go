@@ -25,13 +25,24 @@ var (
 // defaultLevel 为请求不带思考参数时族模型使用的档位
 const defaultLevel = "medium"
 
+// alias 返回 MODEL_MAPPING 中别名等于 name 的目标模型名
+func (s *Service) alias(name string) (string, bool) {
+	for _, entry := range s.live.Load().ModelMapping {
+		if entry.Alias == name {
+			return entry.Model, true
+		}
+	}
+	return "", false
+}
+
 // resolve 把客户端模型名解析为就绪账户目录中的条目
 // 无效括号后缀返回 400，只在未就绪账户目录中返回 503，找不到返回 404；规则见 docs/protocol.md“模型 ID 与思考档位”
 func (s *Service) resolve(name string, config antigravity.GenerationConfig) (antigravity.CatalogModel, error) {
-	for _, alias := range s.live.Load().ModelMapping {
-		if alias.Alias == name {
-			name = alias.Model
-			break
+	if target, ok := s.alias(name); ok {
+		name = target
+	} else if stripped := contextSuffix.ReplaceAllString(name, ""); stripped != name {
+		if target, ok := s.alias(stripped); ok {
+			name = target
 		}
 	}
 	if model, ok := s.pool.Model(name); ok {

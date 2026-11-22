@@ -32,6 +32,7 @@ type generationResult struct {
 	stopSequence  string
 	providerModel string
 	grounding     *antigravity.Grounding
+	citations     []antigravity.CitationSource
 	finished      bool
 }
 
@@ -63,6 +64,16 @@ func (result *generationResult) apply(event antigravity.Event) error {
 		result.media = append(result.media, *event.Media)
 	case antigravity.EventGrounding:
 		result.grounding = event.Grounding
+	case antigravity.EventCitation:
+		result.citations = append(result.citations, event.Citations...)
+	case antigravity.EventRestart:
+		result.text.Reset()
+		result.reasoning.Reset()
+		result.toolCalls = nil
+		result.media = nil
+		result.usage = nil
+		result.grounding = nil
+		result.citations = nil
 	case antigravity.EventFinish:
 		result.finishReason, result.finishMessage = event.FinishReason, event.FinishMessage
 		result.stopSequence = event.StopSequence

@@ -210,9 +210,28 @@ const (
 	EventError EventKind = "error"
 	// EventGrounding 表示 Google 搜索的查询、来源与正文片段的来源
 	EventGrounding EventKind = "grounding"
+	// EventCitation 表示上游 candidate 的引文来源
+	EventCitation EventKind = "citation"
 	// EventRestart 表示服务丢弃已向客户端写出思考的上游尝试并重新生成，之后的思考与签名属于新的尝试
 	EventRestart EventKind = "restart"
 )
+
+// CitationDate 表示引文来源的发表日期
+type CitationDate struct {
+	Year  int `json:"year,omitempty"`
+	Month int `json:"month,omitempty"`
+	Day   int `json:"day,omitempty"`
+}
+
+// CitationSource 表示上游 candidate citationMetadata 中的一条引文来源
+type CitationSource struct {
+	StartIndex      *int          `json:"startIndex,omitempty"`
+	EndIndex        *int          `json:"endIndex,omitempty"`
+	URI             string        `json:"uri,omitempty"`
+	License         string        `json:"license,omitempty"`
+	Title           string        `json:"title,omitempty"`
+	PublicationDate *CitationDate `json:"publicationDate,omitempty"`
+}
 
 // Grounding 表示上游 candidate 的 groundingMetadata
 type Grounding struct {
@@ -270,6 +289,8 @@ type Event struct {
 	ContinuationToken string `json:"-"`
 	// Grounding 为搜索事件的来源
 	Grounding *Grounding `json:"grounding,omitempty"`
+	// Citations 为引文事件的来源列表
+	Citations []CitationSource `json:"citations,omitempty"`
 	// Err 为错误事件的错误；结束事件上为已发出函数调用后被忽略的内容策略结束、缺少结束帧或读取中断
 	Err error `json:"-"`
 }

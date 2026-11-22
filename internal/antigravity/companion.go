@@ -54,6 +54,8 @@ type companionState struct {
 	catalogExperiments []int64
 	// monitors 为目录 sharedModelExperiments 中 sonar 的 default-sonar-monitors-config，为空时执行配置沿用模板中的值
 	monitors      string
+	assist        LoadCodeAssistResponse
+	assistLatency time.Duration
 	ccpa          experimentsResponse
 	ccpaLatency   time.Duration
 	aicode        configResponse
@@ -126,7 +128,7 @@ func (c *Client) fetchConfig(ctx context.Context) error {
 	var response configResponse
 	err := c.get(ctx, endpointConfig, &response)
 	c.mu.Lock()
-	c.state.aicode, c.state.aicodeLatency, c.state.configured, c.state.aicodeError = response, time.Since(started), true, configError(err)
+	c.state.aicode, c.state.aicodeLatency, c.state.configured, c.state.aicodeError = response, time.Since(started), true, aiCodeError("FetchConfig", err)
 	c.mu.Unlock()
 	return err
 }
@@ -149,7 +151,7 @@ const (
 // loginLists 为官方 language_server 登录后读完模型目录并发读取的远程项目与会话列表
 var loginLists = []string{remoteProjects, remoteConversations}
 
-// listRemotes 记下本虚拟进程轮询远程列表，并在后台于 32–112 ms 后并发读取 lists 与插件市场目录（官方 2.33.0 登录序列），目录读完后记录读取事件
+// listRemotes 记下本虚拟进程轮询远程列表，并在后台于 32–112 ms 后并发读取 lists 与插件市场目录（官方 2.34.0 登录序列），目录读完后记录读取事件
 func (c *Client) listRemotes(ctx context.Context, lists []string) {
 	c.mu.Lock()
 	c.hub.remote = true
@@ -162,11 +164,7 @@ func (c *Client) listRemotes(ctx context.Context, lists []string) {
 		for _, list := range lists {
 			group.Go(func() { c.get(ctx, endpointAICode+"/v1alpha/"+list, nil) })
 		}
-		group.Go(func() {
-			if c.readMarketplaces(ctx) {
-				c.logMarketplace()
-			}
-		})
+		group.Go(func() { c.warmMarketplaces(ctx) })
 		group.Wait()
 	}()
 }
@@ -198,13 +196,13 @@ func (c *Client) listPlugins(ctx context.Context) {
 	c.get(ctx, endpointAICode+"/v1alpha/remote:listPlugins?returnToApp=antigravity", nil)
 }
 
-// configError 返回官方 language_server 记下的 fetchConfig 错误文本：上游错误为状态行与正文，其余为错误本身，成功时为空
-func configError(err error) string {
+// aiCodeError 返回官方 language_server 记下的 AI Code 请求错误文本：上游错误为状态行与正文，其余为错误本身，成功时为空
+func aiCodeError(name string, err error) string {
 	if upstream, ok := errors.AsType[*UpstreamError](err); ok {
-		return fmt.Sprintf("failed to make AI Code FetchConfig request: %q, body: %q", strconv.Itoa(upstream.Status)+" "+http.StatusText(upstream.Status), upstream.Body)
+		return fmt.Sprintf("failed to make AI Code %s request: %q, body: %q", name, strconv.Itoa(upstream.Status)+" "+http.StatusText(upstream.Status), upstream.Body)
 	}
 	if err != nil {
-		return "failed to make AI Code FetchConfig request: " + err.Error()
+		return "failed to make AI Code " + name + " request: " + err.Error()
 	}
 	return ""
 }
@@ -332,11 +330,14 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 	}
 	var result Initialization
 	var profiles sync.WaitGroup
-	var firstEnded, secondEnded, sent, ready, refetched time.Time
+	var firstEnded, secondEnded, sent, ready, refetched, reloaded, configEnded time.Time
 	checked, assisted, reassisted, read := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	endRead := sync.OnceFunc(func() { close(read) })
 	booted, finished, settled := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	endBoot := sync.OnceFunc(func() { close(booted) })
+	configured, reloadedCh := make(chan struct{}), make(chan struct{})
+	endConfig := sync.OnceFunc(func() { close(configured) })
+	endReloaded := sync.OnceFunc(func() { close(reloadedCh) })
 	record := func(at time.Time, slack int, event func()) error {
 		select {
 		case <-settled:
@@ -361,6 +362,7 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 	first := func() (err error) {
 		defer endRead()
 		defer endBoot()
+		defer endConfig()
 		if renew {
 			_, err = source.Refresh()
 		}
@@ -409,11 +411,14 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 				return err
 			}
 			c.configure(ctx, false, true)
+			configEnded = time.Now()
+			endConfig()
 			return record(time.Now().Add(time.Duration(between(3, 15))*time.Millisecond), between(1, 2), c.report)
 		})
 	}
 	second := func() error {
 		defer close(finished)
+		defer endReloaded()
 		select {
 		case <-checked:
 		case <-ctx.Done():
@@ -446,10 +451,12 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 			joined = false
 		default:
 		}
-		var reloaded time.Time
 		err = parallel(func() error {
 			_, err := c.LoadCodeAssist(ctx, EndpointDaily)
-			reloaded = time.Now()
+			if err == nil {
+				reloaded = time.Now()
+			}
+			endReloaded()
 			return err
 		}, optional(func() error {
 			c.mu.Lock()
@@ -468,6 +475,36 @@ func (c *Client) ColdStart(ctx context.Context) (Initialization, error) {
 		refetched = time.Now()
 		return nil
 	}
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		<-configured
+		<-reloadedCh
+		if configEnded.IsZero() || reloaded.IsZero() || !c.shadowLicensesEnabled() {
+			return
+		}
+		at := reloaded
+		if configEnded.After(at) {
+			at = configEnded
+		}
+		if until(bg, at.Add(time.Duration(between(10, 60))*time.Millisecond)) == nil {
+			c.shadowLicenses(bg)
+		}
+	}()
+	go func() {
+		<-configured
+		if configEnded.IsZero() {
+			return
+		}
+		c.mu.Lock()
+		enabled := marketplaceEnabled(c.state.mendelFlags())
+		c.mu.Unlock()
+		if !enabled {
+			return
+		}
+		if until(bg, configEnded.Add(time.Duration(between(40, 250))*time.Millisecond)) == nil {
+			c.warmMarketplaces(bg)
+		}
+	}()
 	err := parallel(check, first, second, func() error {
 		<-booted
 		<-finished
@@ -722,7 +759,11 @@ func (m *Companion) poll(ctx context.Context, round int) {
 	routed := c.routed()
 	var group sync.WaitGroup
 	if refresh {
-		group.Go(func() { c.Assist(ctx) })
+		group.Go(func() {
+			if _, err := c.Assist(ctx); err == nil && c.shadowLicensesEnabled() && pause(ctx, 10, 60) == nil {
+				c.shadowLicenses(ctx)
+			}
+		})
 	}
 	listed := !routed && c.listExperiments(ctx) == nil
 	if refresh {
@@ -930,4 +971,160 @@ func (c *Client) report() {
 		params["client_event_time_ms"] = int(at.UnixMilli()) - between(12, 20)
 	}
 	c.log(state.clearcutEvent(at, c.device, "mendel_aicode_shadow_diff", params, eventShape{flags: flagged, empty: !flagged && !cold, compared: true}))
+}
+
+// licensesResponse 表示 aicode fetchLicenses 的响应
+type licensesResponse struct {
+	Licenses []licenseEntry `json:"licenses"`
+}
+
+// licenseEntry 表示 fetchLicenses 返回的一条许可证
+type licenseEntry struct {
+	UserTier            string `json:"userTier"`
+	TierDisplayName     string `json:"tierDisplayName"`
+	UpgradeSubscription struct {
+		Text       string `json:"text"`
+		URL        string `json:"url"`
+		ButtonText string `json:"buttonText"`
+	} `json:"upgradeSubscription"`
+}
+
+// licenseDiff 表示 fetchLicenses 与 loadCodeAssist 套餐在一个字段上的差异
+type licenseDiff struct {
+	CCPA   string `json:"ccpa"`
+	AICode string `json:"aicode"`
+}
+
+// shadowLicensesEnabled 判断个人账户是否开启了 fetchLicenses 对照（shadow-call-aicode-fetch-licenses 开且 use-aicode-fetch-licenses 关）
+func (c *Client) shadowLicensesEnabled() bool {
+	if c.base != EndpointDaily {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.mendelBool("shadow-call-aicode-fetch-licenses") == 1 && c.state.mendelBool("use-aicode-fetch-licenses") == 0
+}
+
+// shadowLicenses 发出 GET aicode/v1alpha:fetchLicenses 并记录一条带实验开关的 fetch_licenses_aicode_shadow_diff 事件
+func (c *Client) shadowLicenses(ctx context.Context) {
+	started := time.Now()
+	var response licensesResponse
+	err := c.get(ctx, endpointLicenses, &response)
+	latency := time.Since(started)
+	c.mu.Lock()
+	state := c.state
+	c.mu.Unlock()
+	c.hubEvent("fetch_licenses_aicode_shadow_diff", eventShape{flags: true}, state.licenseShadowDiff(c.base, response, latency, err))
+}
+
+// sanitizeUpgradeURI 把升级链接中的 email 查询参数替换为 [REDACTED]，并递归处理 continue 参数；无法解析时返回 [REDACTED]（同官方 2.34.0 sanitizeUpgradeURI）
+func sanitizeUpgradeURI(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "[REDACTED]"
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "[REDACTED]"
+	}
+	changed := false
+	for key, values := range query {
+		switch {
+		case strings.EqualFold(key, "email"):
+			for index := range values {
+				values[index] = "[REDACTED]"
+			}
+			query[key], changed = values, true
+		case strings.EqualFold(key, "continue"):
+			for index, value := range values {
+				if sanitized := sanitizeUpgradeURI(value); sanitized != value {
+					values[index], changed = sanitized, true
+				}
+			}
+			query[key] = values
+		}
+	}
+	if !changed {
+		return raw
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+// licenseShadowDiff 对照 loadCodeAssist 套餐与 fetchLicenses 响应的 6 个字段，返回 fetch_licenses_aicode_shadow_diff 事件参数（字段配对、默认 free-tier 与截断上限同官方 2.34.0 userTierFromLicenses / CompareFetchLicenses / recordFetchLicensesShadowEval）
+func (s companionState) licenseShadowDiff(base string, response licensesResponse, latency time.Duration, err error) map[string]any {
+	ccpa := s.assist.CurrentTier
+	if s.assist.PaidTier != nil {
+		ccpa = *s.assist.PaidTier
+	}
+	params := map[string]any{
+		"ccpa_endpoint":     base,
+		"aicode_endpoint":   endpointLicenses,
+		"ccpa_latency_ms":   int(s.assistLatency.Milliseconds()),
+		"aicode_latency_ms": int(latency.Milliseconds()),
+		"ccpa_user_tier":    ccpa.ID,
+	}
+	if len(s.assist.IneligibleTiers) > 0 {
+		tier := s.assist.IneligibleTiers[0]
+		if tier.TierID != "" {
+			params["ccpa_ineligible_tier_id"] = tier.TierID
+		}
+		if tier.ReasonCode != "" {
+			params["ccpa_ineligible_reason_code"] = tier.ReasonCode
+		}
+		if tier.ReasonMessage != "" {
+			params["ccpa_ineligible_reason_message"] = clip(tier.ReasonMessage, 512)
+		}
+	}
+	if err != nil {
+		params["matching_count"] = 0
+		params["diff_count"] = 0
+		params["aicode_error"] = clip(aiCodeError("FetchLicenses", err), 512)
+		if upstream, ok := errors.AsType[*UpstreamError](err); ok {
+			if reason := upstream.Reason(); reason != "" {
+				params["aicode_error_reason"] = reason
+			}
+			for _, detail := range upstream.body().Error.Details {
+				if location := detail.Metadata["detected_location"]; location != "" {
+					params["aicode_detected_location"] = location
+					break
+				}
+			}
+		}
+		return params
+	}
+	license := licenseEntry{UserTier: "free-tier"}
+	if len(response.Licenses) > 0 {
+		entry := response.Licenses[0]
+		if entry.UserTier == "" {
+			entry.UserTier = "free-tier"
+		}
+		license = entry
+	}
+	diffs := make(map[string]licenseDiff)
+	matching := 0
+	for _, pair := range []struct{ name, left, right string }{
+		{"user_tier", ccpa.ID, license.UserTier},
+		{"tier_display_name", ccpa.Name, license.TierDisplayName},
+		{"tier_description", ccpa.Description, license.TierDisplayName},
+		{"upgrade_subscription_text", ccpa.UpgradeSubscriptionText, license.UpgradeSubscription.Text},
+		{"upgrade_subscription_uri", sanitizeUpgradeURI(ccpa.UpgradeSubscriptionURI), sanitizeUpgradeURI(license.UpgradeSubscription.URL)},
+		{"upgrade_button_text", ccpa.UpgradeButtonText, license.UpgradeSubscription.ButtonText},
+	} {
+		if pair.left == pair.right {
+			matching++
+		} else {
+			diffs[pair.name] = licenseDiff{CCPA: clip(pair.left, 256), AICode: clip(pair.right, 256)}
+		}
+	}
+	encoded, _ := json.Marshal(diffs)
+	params["matching_count"] = matching
+	params["diff_count"] = len(diffs)
+	params["diffs_json"] = string(encoded)
+	params["aicode_user_tier"] = license.UserTier
+	params["aicode_licenses_count"] = len(response.Licenses)
+	return params
 }

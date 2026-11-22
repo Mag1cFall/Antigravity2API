@@ -175,7 +175,7 @@ export function UpdateItem() {
           >
             {data.notes && (
               <div
-                className="[&_ol]:pl-5 [&_ul]:pl-5 [&_code]:rounded max-h-[50vh] overflow-y-auto text-sm leading-6 [overflow-wrap:anywhere] [&_a]:text-primary [&_a]:underline [&_code]:bg-muted [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mt-4 [&_h1]:font-semibold [&_h1:first-child]:mt-0 [&_h2]:mt-4 [&_h2]:font-semibold [&_h2:first-child]:mt-0 [&_h3]:mt-3 [&_h3]:font-semibold [&_li]:mt-1 [&_ol]:list-decimal [&_p]:mt-2 [&_table]:mt-2 [&_table]:w-full [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_ul]:mt-2 [&_ul]:list-disc"
+                className="max-h-[50vh] overflow-y-auto text-sm leading-6 [overflow-wrap:anywhere] [&_a]:text-primary [&_a]:underline [&_code]:rounded-sm [&_code]:bg-muted [&_code]:px-1 [&_code]:font-mono [&_code]:text-xs [&_h1]:mt-4 [&_h1]:font-semibold [&_h1:first-child]:mt-0 [&_h2]:mt-4 [&_h2]:font-semibold [&_h2:first-child]:mt-0 [&_h3]:mt-3 [&_h3]:font-semibold [&_li]:mt-1 [&_ol]:list-decimal [&_ol]:pl-6 [&_p]:mt-2 [&_table]:mt-2 [&_table]:w-full [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_ul]:mt-2 [&_ul]:list-disc [&_ul]:pl-6"
                 dangerouslySetInnerHTML={{ __html: markdown.render(data.notes) }}
               />
             )}

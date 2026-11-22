@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 )
+
+// claudePropertyKey 为 Claude 族工具 Schema 接受的属性键模式
+var claudePropertyKey = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
 // schemaArgumentsNote 为附加在函数描述末尾的完整参数 Schema 前缀
 const schemaArgumentsNote = "\nArguments must follow this JSON Schema: "
@@ -32,7 +36,7 @@ var schemaFormats = map[string][]string{
 }
 
 // schemaLossyFields 为上游 Schema 无法原样表达、出现时需在描述中附完整 Schema 的字段
-var schemaLossyFields = []string{"additionalProperties", "prefixItems", "exclusiveMinimum", "propertyNames", "oneOf", "allOf", "not"}
+var schemaLossyFields = []string{"additionalProperties", "additionalItems", "prefixItems", "exclusiveMinimum", "propertyNames", "oneOf", "allOf", "not"}
 
 // CleanFunctionDeclaration 把函数声明的 JSON Schema 投影为上游 parameters 接受的 Schema 子集并在 Schema 保留原始 JSON Schema，无法原样表达时在描述末尾附完整 JSON Schema
 func CleanFunctionDeclaration(declaration FunctionDeclaration) (FunctionDeclaration, error) {
@@ -118,7 +122,7 @@ func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 		"minimum": true, "maximum": true, "minLength": true, "maxLength": true,
 		"pattern": true, "example": true, "oneOf": true, "anyOf": true,
 		"allOf": true, "not": true, "propertyOrdering": true,
-		"$schema": true, "additionalProperties": true, "default": true, "exclusiveMinimum": true,
+		"$schema": true, "additionalProperties": true, "additionalItems": true, "default": true, "exclusiveMinimum": true,
 		"propertyNames": true, "prefixItems": true,
 	}
 	for name := range schema {
@@ -261,7 +265,34 @@ func (p *schemaProjector) project(raw json.RawMessage) (map[string]any, error) {
 		}
 	}
 	p.dropMismatchedKeywords(output)
+	ensureRequiredProperties(output)
 	return output, nil
+}
+
+// ensureRequiredProperties 为对象节点中 required 列出而 properties 未定义的属性补上不限类型的定义，避免上游拒绝
+func ensureRequiredProperties(output map[string]any) {
+	required, ok := output["required"].([]string)
+	if !ok || len(required) == 0 {
+		return
+	}
+	upstreamType, _ := output["type"].(string)
+	if upstreamType != "" && upstreamType != "OBJECT" {
+		return
+	}
+	properties, _ := output["properties"].(map[string]any)
+	for _, name := range required {
+		if _, defined := properties[name]; defined {
+			continue
+		}
+		if properties == nil {
+			properties = make(map[string]any)
+			output["properties"] = properties
+		}
+		properties[name] = map[string]any{}
+	}
+	if upstreamType == "" && len(properties) > 0 {
+		output["type"] = "OBJECT"
+	}
 }
 
 // dropMismatchedKeywords 去掉与节点类型不符的 items、properties 与 required，上游只在 ARRAY 接受 items、只在 OBJECT 接受后两者
@@ -278,8 +309,43 @@ func (p *schemaProjector) dropMismatchedKeywords(output map[string]any) {
 	}
 }
 
-// projectPrefixItems 把 prefixItems 的各位置 Schema 与 items 合为一个元素 Schema，items=false 时以位置数为 maxItems
+// projectPrefixItems 把 Draft-07 元组 items（含空数组与 additionalItems）和 prefixItems 的各位置 Schema 与 items 合为一个元素 Schema，禁止额外元素时以位置数为 maxItems
 func (p *schemaProjector) projectPrefixItems(schema map[string]json.RawMessage) error {
+	if raw, ok := schema["items"]; ok {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) > 0 && trimmed[0] == '[' {
+			var tuple []json.RawMessage
+			if err := json.Unmarshal(trimmed, &tuple); err != nil {
+				return fmt.Errorf("schema.items 必须是 Schema 或 Schema 数组")
+			}
+			delete(schema, "items")
+			additional, hasAdditional := schema["additionalItems"]
+			delete(schema, "additionalItems")
+			if len(tuple) == 0 {
+				if hasAdditional {
+					if bytes.Equal(bytes.TrimSpace(additional), []byte("false")) {
+						p.lossy = true
+						schema["items"] = json.RawMessage("false")
+					} else {
+						schema["items"] = additional
+					}
+				} else {
+					schema["items"] = json.RawMessage("true")
+				}
+			} else if _, hasPrefix := schema["prefixItems"]; !hasPrefix {
+				schema["prefixItems"] = trimmed
+				if hasAdditional {
+					schema["items"] = additional
+				}
+			} else {
+				p.lossy = true
+			}
+		}
+	}
+	if _, ok := schema["additionalItems"]; ok {
+		delete(schema, "additionalItems")
+		p.lossy = true
+	}
 	raw, ok := schema["prefixItems"]
 	if !ok {
 		return nil
@@ -290,6 +356,11 @@ func (p *schemaProjector) projectPrefixItems(schema map[string]json.RawMessage) 
 		return fmt.Errorf("schema.prefixItems 必须是 Schema 数组")
 	}
 	if len(variants) == 0 {
+		if _, hasItems := schema["items"]; !hasItems {
+			schema["items"] = json.RawMessage("true")
+		} else if bytes.Equal(bytes.TrimSpace(schema["items"]), []byte("false")) {
+			p.lossy = true
+		}
 		return nil
 	}
 	p.lossy = true
@@ -308,7 +379,12 @@ func (p *schemaProjector) projectPrefixItems(schema map[string]json.RawMessage) 
 		}
 		schema["maxItems"] = json.RawMessage(strconv.FormatInt(limit, 10))
 	}
-	distinct := slices.CompactFunc(slices.Clone(variants), func(a, b json.RawMessage) bool { return bytes.Equal(a, b) })
+	distinct := make([]json.RawMessage, 0, len(variants))
+	for _, variant := range variants {
+		if !slices.ContainsFunc(distinct, func(existing json.RawMessage) bool { return bytes.Equal(existing, variant) }) {
+			distinct = append(distinct, variant)
+		}
+	}
 	if len(distinct) == 1 {
 		schema["items"] = distinct[0]
 		return nil
@@ -350,6 +426,12 @@ type schemaRefResolver struct {
 	expanded    int
 }
 
+// schemaAnnotationKeys 为不参与校验约束、允许 $ref 同级直接覆盖的注解字段
+var schemaAnnotationKeys = map[string]bool{
+	"description": true, "title": true, "default": true, "example": true,
+	"examples": true, "$comment": true, "deprecated": true,
+}
+
 // resolve 展开节点中的 $ref 并去掉 $defs 与 definitions，stack 为正在展开的引用
 func (r *schemaRefResolver) resolve(value any, stack []string) any {
 	switch value := value.(type) {
@@ -361,33 +443,37 @@ func (r *schemaRefResolver) resolve(value any, stack []string) any {
 		return resolved
 	case map[string]any:
 		if reference, ok := value["$ref"].(string); ok {
+			siblings := map[string]any{}
+			for key, item := range value {
+				if key != "$ref" && key != "$defs" && key != "definitions" {
+					siblings[key] = item
+				}
+			}
 			definition, found := r.definitions[reference]
 			if !found {
 				r.unresolved = true
-				return true
+				if len(siblings) == 0 {
+					return true
+				}
+				return r.resolve(siblings, stack)
 			}
 			if slices.Contains(stack, reference) || r.expanded >= maxSchemaRefExpansions {
 				r.unresolved = true
+				var fallback any = true
 				if object, ok := definition.(map[string]any); ok && object["type"] != nil {
-					return map[string]any{"type": object["type"]}
+					fallback = map[string]any{"type": object["type"]}
 				}
-				return true
+				if len(siblings) == 0 {
+					return fallback
+				}
+				return combineRefSiblings(fallback, r.resolve(siblings, stack))
 			}
 			r.expanded++
-			merged := map[string]any{}
-			if object, ok := definition.(map[string]any); ok {
-				for key, item := range object {
-					merged[key] = item
-				}
-			} else {
-				return r.resolve(definition, append(stack, reference))
+			resolvedTarget := r.resolve(definition, append(stack, reference))
+			if len(siblings) == 0 {
+				return resolvedTarget
 			}
-			for key, item := range value {
-				if key != "$ref" {
-					merged[key] = item
-				}
-			}
-			return r.resolve(merged, append(stack, reference))
+			return combineRefSiblings(resolvedTarget, r.resolve(siblings, stack))
 		}
 		resolved := make(map[string]any, len(value))
 		for key, item := range value {
@@ -411,6 +497,45 @@ func (r *schemaRefResolver) resolve(value any, stack []string) any {
 	return value
 }
 
+// combineRefSiblings 按合取语义合并已展开的 $ref 目标与同级字段：同级只有注解时直接覆盖，含校验约束时以 allOf 保留双方约束
+func combineRefSiblings(target any, siblings any) any {
+	if target == true {
+		return siblings
+	}
+	if target == false {
+		return false
+	}
+	targetObj, okTarget := target.(map[string]any)
+	siblingObj, okSibling := siblings.(map[string]any)
+	if !okTarget || !okSibling {
+		return target
+	}
+	annotations := map[string]any{}
+	constraints := map[string]any{}
+	for key, item := range siblingObj {
+		if schemaAnnotationKeys[key] {
+			annotations[key] = item
+		} else {
+			constraints[key] = item
+		}
+	}
+	if len(constraints) == 0 {
+		merged := make(map[string]any, len(targetObj)+len(annotations))
+		for key, item := range targetObj {
+			merged[key] = item
+		}
+		for key, item := range annotations {
+			merged[key] = item
+		}
+		return merged
+	}
+	combined := map[string]any{"allOf": []any{targetObj, constraints}}
+	for key, item := range annotations {
+		combined[key] = item
+	}
+	return combined
+}
+
 // variants 投影 anyOf、oneOf 或 allOf 的各分支
 func (p *schemaProjector) variants(raw json.RawMessage, name string) ([]any, error) {
 	var variants []json.RawMessage
@@ -428,7 +553,7 @@ func (p *schemaProjector) variants(raw json.RawMessage, name string) ([]any, err
 	return projected, nil
 }
 
-// mergeSchema 把 allOf 分支并入节点，节点自身字段优先，properties 与 required 取并集
+// mergeSchema 把 allOf 分支按合取语义并入节点：properties 与 items 递归合并，required 取并集，数值与长度上下界取更严值，enum 取交集
 func mergeSchema(target map[string]any, source map[string]any) {
 	for key, value := range source {
 		switch key {
@@ -439,9 +564,23 @@ func mergeSchema(target map[string]any, source map[string]any) {
 				target["properties"] = properties
 			}
 			for name, property := range value.(map[string]any) {
-				if _, exists := properties[name]; !exists {
-					properties[name] = property
+				if existing, exists := properties[name].(map[string]any); exists {
+					if incoming, ok := property.(map[string]any); ok {
+						mergeSchema(existing, incoming)
+						continue
+					}
 				}
+				properties[name] = property
+			}
+		case "items":
+			if existing, exists := target["items"].(map[string]any); exists {
+				if incoming, ok := value.(map[string]any); ok {
+					mergeSchema(existing, incoming)
+					continue
+				}
+			}
+			if _, exists := target["items"]; !exists {
+				target["items"] = value
 			}
 		case "required":
 			required, _ := target["required"].([]string)
@@ -451,6 +590,59 @@ func mergeSchema(target map[string]any, source map[string]any) {
 				}
 			}
 			target["required"] = required
+		case "minimum":
+			if existing, exists := target[key].(float64); exists {
+				target[key] = max(existing, value.(float64))
+			} else {
+				target[key] = value
+			}
+		case "maximum":
+			if existing, exists := target[key].(float64); exists {
+				target[key] = min(existing, value.(float64))
+			} else {
+				target[key] = value
+			}
+		case "minLength", "minItems", "minProperties":
+			if existing, exists := target[key].(int64); exists {
+				target[key] = max(existing, value.(int64))
+			} else {
+				target[key] = value
+			}
+		case "maxLength", "maxItems", "maxProperties":
+			if existing, exists := target[key].(int64); exists {
+				target[key] = min(existing, value.(int64))
+			} else {
+				target[key] = value
+			}
+		case "enum":
+			incoming := value.([]string)
+			if existing, exists := target[key].([]string); exists {
+				var intersection []string
+				for _, item := range existing {
+					if slices.Contains(incoming, item) {
+						intersection = append(intersection, item)
+					}
+				}
+				if len(intersection) > 0 {
+					target[key] = intersection
+				}
+			} else {
+				target[key] = incoming
+			}
+		case "type":
+			if existing, exists := target[key].(string); exists {
+				if existing == "NUMBER" && value == "INTEGER" {
+					target[key] = "INTEGER"
+				}
+			} else {
+				target[key] = value
+			}
+		case "nullable":
+			if existing, exists := target[key].(bool); exists {
+				target[key] = existing && value.(bool)
+			} else {
+				target[key] = value
+			}
 		default:
 			if _, exists := target[key]; !exists {
 				target[key] = value
@@ -508,9 +700,9 @@ func fillSchemaTypes(schema map[string]any) {
 	}
 }
 
-// claudeParameters 把上游 Schema 中的 anyOf 与可空标量改写为 Claude 族接受的形状，返回改写后的 Schema 与是否丢弃了约束，两者都不含时原样返回
+// claudeParameters 把上游 Schema 中的 anyOf、可空标量与不合规属性键改写为 Claude 族接受的形状，返回改写后的 Schema 与是否丢弃了约束，不含 anyOf、可空标量且没有降级属性键时原样返回
 func claudeParameters(raw json.RawMessage) (json.RawMessage, bool, error) {
-	if !bytes.Contains(raw, []byte(`"anyOf"`)) && !bytes.Contains(raw, []byte(`"nullable":true`)) {
+	if !bytes.Contains(raw, []byte(`"anyOf"`)) && !bytes.Contains(raw, []byte(`"nullable":true`)) && !bytes.Contains(raw, []byte(`"properties"`)) {
 		return raw, false, nil
 	}
 	var schema map[string]any
@@ -519,8 +711,38 @@ func claudeParameters(raw json.RawMessage) (json.RawMessage, bool, error) {
 	}
 	unions := flattenUnions(schema)
 	nullable := untypeNullable(schema)
+	keys := dropInvalidClaudePropertyKeys(schema)
+	if !keys && !bytes.Contains(raw, []byte(`"anyOf"`)) && !bytes.Contains(raw, []byte(`"nullable":true`)) {
+		return raw, false, nil
+	}
 	encoded, err := json.Marshal(schema)
-	return encoded, unions || nullable, err
+	return encoded, unions || nullable || keys, err
+}
+
+// dropInvalidClaudePropertyKeys 逐层检查 properties 键名是否满足 Claude 族模式，含不合规键的对象退化为不限属性的对象，改写过时返回 true
+func dropInvalidClaudePropertyKeys(schema map[string]any) bool {
+	lossy := false
+	if items, ok := schema["items"].(map[string]any); ok {
+		lossy = dropInvalidClaudePropertyKeys(items) || lossy
+	}
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		return lossy
+	}
+	for name := range properties {
+		if !claudePropertyKey.MatchString(name) {
+			delete(schema, "properties")
+			delete(schema, "required")
+			delete(schema, "propertyOrdering")
+			return true
+		}
+	}
+	for _, property := range properties {
+		if child, ok := property.(map[string]any); ok {
+			lossy = dropInvalidClaudePropertyKeys(child) || lossy
+		}
+	}
+	return lossy
 }
 
 // untypeNullable 逐层把可空的标量节点改为只留描述的无类型节点，Claude 族上游丢弃 nullable，带类型时模型无法给出 null；改写过时返回 true
@@ -622,7 +844,7 @@ func flattenUnions(schema map[string]any) bool {
 	return true
 }
 
-// normalizeFunctionParameters 将零参数定义归一化为对象，并为 required 中未定义的属性补充不限类型的定义
+// normalizeFunctionParameters 将空对象、空值与 true 归一化为对象 Schema
 func normalizeFunctionParameters(raw json.RawMessage) (json.RawMessage, error) {
 	cleaned, err := cleanSchemaInput(raw, true)
 	if err != nil {
@@ -631,14 +853,7 @@ func normalizeFunctionParameters(raw json.RawMessage) (json.RawMessage, error) {
 	if bytes.Equal(cleaned, []byte("{}")) || bytes.Equal(cleaned, []byte("true")) {
 		return json.RawMessage(`{"type":"object"}`), nil
 	}
-	schema, err := decodeSchemaValue(cleaned)
-	if err != nil {
-		return nil, err
-	}
-	if !defineRequiredProperties(schema) {
-		return cleaned, nil
-	}
-	return json.Marshal(schema)
+	return cleaned, nil
 }
 
 // decodeSchemaValue 解码 Schema 并保留数值原文
@@ -650,52 +865,6 @@ func decodeSchemaValue(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return value, nil
-}
-
-// defineRequiredProperties 为 required 列出而 properties 未定义的属性补充不限类型的定义，返回是否修改
-func defineRequiredProperties(value any) bool {
-	schema, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	changed := false
-	if required, ok := schema["required"].([]any); ok {
-		properties, _ := schema["properties"].(map[string]any)
-		for _, item := range required {
-			name, ok := item.(string)
-			if !ok {
-				continue
-			}
-			if _, defined := properties[name]; defined {
-				continue
-			}
-			if properties == nil {
-				properties = map[string]any{}
-				schema["properties"] = properties
-			}
-			properties[name] = map[string]any{}
-			changed = true
-		}
-	}
-	for key, child := range schema {
-		switch key {
-		case "properties", "$defs", "definitions":
-			if children, ok := child.(map[string]any); ok {
-				for _, nested := range children {
-					changed = defineRequiredProperties(nested) || changed
-				}
-			}
-		case "items", "additionalProperties", "not":
-			changed = defineRequiredProperties(child) || changed
-		case "anyOf", "oneOf", "allOf", "prefixItems":
-			if children, ok := child.([]any); ok {
-				for _, nested := range children {
-					changed = defineRequiredProperties(nested) || changed
-				}
-			}
-		}
-	}
-	return changed
 }
 
 // cleanSchemaInput 清理可选空值并按工具与输出契约保留组合节点
@@ -711,7 +880,7 @@ func cleanSchemaInput(raw json.RawMessage, preserveCombinations bool) (json.RawM
 	if json.Unmarshal(raw, &schema) != nil || schema == nil {
 		return nil, fmt.Errorf("schema 必须是 JSON object 或 boolean")
 	}
-	for _, name := range []string{"type", "format", "description", "nullable", "enum", "items", "properties", "required", "minItems", "maxItems", "minProperties", "maxProperties", "minimum", "maximum", "minLength", "maxLength", "pattern", "oneOf", "anyOf", "allOf", "not", "propertyOrdering"} {
+	for _, name := range []string{"type", "format", "description", "nullable", "enum", "items", "additionalItems", "prefixItems", "properties", "required", "minItems", "maxItems", "minProperties", "maxProperties", "minimum", "maximum", "minLength", "maxLength", "pattern", "oneOf", "anyOf", "allOf", "not", "propertyOrdering"} {
 		if bytes.Equal(bytes.TrimSpace(schema[name]), []byte("null")) {
 			delete(schema, name)
 		}
@@ -725,13 +894,30 @@ func cleanSchemaInput(raw json.RawMessage, preserveCombinations bool) (json.RawM
 			schema[name] = canonicalSchemaInteger(value)
 		}
 	}
-	for _, name := range []string{"items", "not"} {
-		if nested := bytes.TrimSpace(schema[name]); len(nested) > 0 && nested[0] == '{' {
+	for _, name := range []string{"items", "additionalItems", "not"} {
+		nested := bytes.TrimSpace(schema[name])
+		if len(nested) > 0 && nested[0] == '{' {
 			cleaned, err := cleanSchemaInput(nested, preserveCombinations)
 			if err != nil {
 				return nil, fmt.Errorf("schema.%s: %w", name, err)
 			}
 			schema[name] = cleaned
+		} else if name == "items" && len(nested) > 0 && nested[0] == '[' {
+			var tuple []json.RawMessage
+			if json.Unmarshal(nested, &tuple) != nil {
+				return nil, fmt.Errorf("schema.items 必须是 Schema 或 Schema 数组")
+			}
+			for index, item := range tuple {
+				if bytes.Equal(bytes.TrimSpace(item), []byte("null")) {
+					item = json.RawMessage("true")
+				}
+				cleaned, err := cleanSchemaInput(item, preserveCombinations)
+				if err != nil {
+					return nil, fmt.Errorf("schema.items[%d]: %w", index, err)
+				}
+				tuple[index] = cleaned
+			}
+			schema[name], _ = json.Marshal(tuple)
 		}
 	}
 	if value, ok := schema["properties"]; ok {
@@ -794,7 +980,7 @@ func cleanSchemaInput(raw json.RawMessage, preserveCombinations bool) (json.RawM
 
 // typeKeywords 为只对数组或对象类型有意义的关键字，多类型 type 展开为 anyOf 时移入对应类型的分支
 var typeKeywords = map[string][]string{
-	"array":  {"items", "prefixItems", "minItems", "maxItems"},
+	"array":  {"items", "additionalItems", "prefixItems", "minItems", "maxItems"},
 	"object": {"properties", "required", "additionalProperties", "minProperties", "maxProperties", "propertyNames"},
 }
 
@@ -1007,13 +1193,15 @@ func normalizeImplicitType(schema map[string]json.RawMessage) {
 		}
 		if typed != nil && !conflictingType {
 			schema["type"] = typed["type"]
-			if items, ok := typed["items"]; ok && schema["items"] == nil && !conflictingItems {
-				schema["items"] = items
+			if items, ok := typed["items"]; ok && schema["items"] == nil && !conflictingItems && !branchesHave(schema["allOf"], "items") && !branchesHave(schema["allOf"], "prefixItems") {
+				if trimmed := bytes.TrimSpace(items); len(trimmed) > 0 && trimmed[0] != '[' && !bytes.Equal(trimmed, []byte("false")) {
+					schema["items"] = items
+				}
 			}
 		}
 	}
 	var typeName string
-	if json.Unmarshal(schema["type"], &typeName) != nil || !strings.EqualFold(typeName, "array") || schema["items"] != nil || branchesHave(schema["allOf"], "items") {
+	if json.Unmarshal(schema["type"], &typeName) != nil || !strings.EqualFold(typeName, "array") || schema["items"] != nil || branchesHave(schema["allOf"], "items") || branchesHave(schema["allOf"], "prefixItems") {
 		return
 	}
 	schema["items"] = json.RawMessage(`true`)

@@ -334,7 +334,7 @@ func (c *Client) searchIndex(conversations int) map[string]any {
 	return map[string]any{"convo_count": conversations, "duration_ms": 0, "extracted_count": 0, "db_size_bytes": 4096 * max(searchIndexPages, between(conversations+4, 2*conversations+8))}
 }
 
-// hubLogin 记录登录序列的迁移、摘要订阅、搜索索引预热、sidecar 启动与权限迁移事件（官方 2.33.0 的先后），迁移、摘要订阅与 sidecar 启动的开关字段留空，搜索索引与权限迁移带实验开关
+// hubLogin 记录登录序列的迁移、摘要订阅、搜索索引预热、sidecar 启动与权限迁移事件（官方 2.34.0 的先后），迁移、摘要订阅与 sidecar 启动的开关字段留空，搜索索引与权限迁移带实验开关
 func (c *Client) hubLogin() {
 	c.hubEvent("retroactive_migration_attempted", eventShape{blank: true, empty: true}, nil)
 	c.hubEvent("retroactive_migration_skipped_already_completed", eventShape{blank: true, empty: true}, map[string]any{"status": "RETROACTIVE_MIGRATION_STATUS_COMPLETED_UNNECESSARY"})
@@ -351,7 +351,7 @@ func (c *Client) hubLogin() {
 	})
 }
 
-// hubOnboarded 记录登录引导结束后界面渲染的会话列表加载完成、分组方式、分组会话数与输入区渲染事件（iframeLocalTtirMs 与官方 2.33.0 登录现场的 boot* 耗时）
+// hubOnboarded 记录登录引导结束后界面渲染的会话列表加载完成、分组方式、分组会话数与输入区渲染事件（iframeLocalTtirMs 与官方 2.34.0 登录现场的 boot* 耗时）
 func (c *Client) hubOnboarded() {
 	c.hubEvent("sidebar_conversation_list_loaded", eventShape{flags: true, ui: true}, map[string]any{"conversationCount": c.conversations(), "latencyMs": c.sinceLaunch()})
 	c.hubEvent("sidebar_group_by_state", eventShape{flags: true, ui: true, env: true}, map[string]any{"groupBy": "project", "mode": "agentManager", "project_4k_mode": "default"})
@@ -490,18 +490,10 @@ func (c *Client) hubInterface(ctx context.Context) {
 	go c.get(ctx, endpointAICode+"/v1alpha/"+remoteConversations, nil)
 	remoted := time.Now()
 	go func() {
-		if until(ctx, remoted.Add(time.Duration(between(200, 448))*time.Millisecond)) == nil {
+		if until(ctx, remoted.Add(time.Duration(between(80, 448))*time.Millisecond)) == nil {
 			c.get(ctx, endpointAICode+"/v1alpha/"+remoteProjects, nil)
 		}
 	}()
-	if until(ctx, remoted.Add(time.Duration(between(269, 352))*time.Millisecond)) != nil {
-		return
-	}
-	go c.listPlugins(ctx)
-	if wait(164, 356) {
-		c.readMarketplaces(ctx)
-		c.logMarketplace()
-	}
 	go c.sidebarTicks(ctx, counted, grouped)
 	if until(ctx, counted.Add(sidebarRefresh+time.Duration(between(9, 34))*time.Millisecond)) != nil {
 		return
@@ -575,7 +567,7 @@ func (c *Client) touchSidebar() {
 	}
 }
 
-// sidebarGrouped 记录按项目分组的侧栏会话数统计，有会话时随后记录无项目会话统计（官方 2.33.0 没有会话时不记录）
+// sidebarGrouped 记录按项目分组的侧栏会话数统计，有会话时随后记录无项目会话统计（官方 2.34.0 没有会话时不记录）
 func (c *Client) sidebarGrouped(conversations int) {
 	c.hubEvent("sidebar_conversations", eventShape{flags: true, ui: true, env: true}, map[string]any{
 		"conversationCount": conversations, "orphanedConversationCount": 0, "projectlessConversationCount": 0, "pinnedConversationCount": 0, "loadedProjectCount": 1, "knownProjectCount": 1, "mode": "agentManager", "project_4k_mode": "default",
